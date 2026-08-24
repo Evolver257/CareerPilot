@@ -79,6 +79,42 @@ export type JobImportResponse = {
   total: number;
 };
 
+export type ResumeEvidence = {
+  chunk_id: string;
+  chunk_type: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  semantic_score: number;
+  rerank_score: number;
+};
+
+export type JobScore = {
+  id: string;
+  job_id: string;
+  resume_id: string;
+  semantic_score: number;
+  skill_score: number;
+  education_score: number;
+  experience_score: number;
+  location_score: number;
+  preference_score: number;
+  llm_score: number;
+  final_score: number;
+  rules_passed: boolean;
+  rule_reasons: string[];
+  matched_skills: string[];
+  missing_skills: string[];
+  strengths: string[];
+  gaps: string[];
+  risks: string[];
+  resume_evidence: ResumeEvidence[];
+  recommendation: "strong_apply" | "apply" | "maybe" | "skip";
+  reasoning_summary: string;
+  score_version: string;
+  weights: Record<string, number>;
+  created_at: string;
+};
+
 export type ResumeEducation = {
   institution: string;
   degree: string;
@@ -189,6 +225,14 @@ export function getJob(id: string): Promise<Job> {
 
 export function analyzeJob(id: string): Promise<JobAnalysis> {
   return apiFetch<JobAnalysis>(`/api/jobs/${encodeURIComponent(id)}/analyze`, { method: "POST" });
+}
+
+export function scoreJob(id: string, resumeId?: string): Promise<JobScore> {
+  return apiFetch<JobScore>(`/api/jobs/${encodeURIComponent(id)}/score`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(resumeId ? { resume_id: resumeId } : {}),
+  });
 }
 
 export function importJobs(payload: {

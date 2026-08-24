@@ -55,6 +55,26 @@ Job skills are persisted in `job_skills` with `required`, `preferred`, or
 `optional` classification. The complete structured analysis remains in
 `jobs.normalized_data` for later matching and ranking phases.
 
+Phase 4 Matching Engine exposes:
+
+```text
+POST /api/jobs/{id}/score          score against an explicit or default resume
+```
+
+Optional request body:
+
+```json
+{
+  "resume_id": "00000000-0000-0000-0000-000000000000"
+}
+```
+
+The final score uses configurable semantic, skill, education, experience,
+location, preference, and LLM Judge weights. Resume RAG embeds a structured JD
+query, retrieves resume chunks from pgvector, reranks them, and provides only
+those chunks to the Judge. Each result is persisted in `job_scores` together
+with user-visible evidence, strengths, gaps, risks, and recommendation.
+
 ## Frontend
 
 From `apps/web`:

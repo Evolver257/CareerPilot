@@ -88,6 +88,9 @@ class Resume(Base):
     chunks: Mapped[list[ResumeChunk]] = relationship(
         back_populates="resume", cascade="all, delete-orphan"
     )
+    scores: Mapped[list[JobScore]] = relationship(
+        back_populates="resume", cascade="all, delete-orphan"
+    )
 
 
 class ResumeChunk(Base):
@@ -156,6 +159,9 @@ class Job(Base):
     skills: Mapped[list[JobSkill]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
+    scores: Mapped[list[JobScore]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
 
 
 class JobSkill(Base):
@@ -173,3 +179,37 @@ class JobSkill(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     job: Mapped[Job] = relationship(back_populates="skills")
+
+
+class JobScore(Base):
+    __tablename__ = "job_scores"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    job_id: Mapped[UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    resume_id: Mapped[UUID] = mapped_column(
+        ForeignKey("resumes.id", ondelete="CASCADE"), index=True
+    )
+    semantic_score: Mapped[float] = mapped_column(Float)
+    skill_score: Mapped[float] = mapped_column(Float)
+    education_score: Mapped[float] = mapped_column(Float)
+    experience_score: Mapped[float] = mapped_column(Float)
+    location_score: Mapped[float] = mapped_column(Float)
+    preference_score: Mapped[float] = mapped_column(Float)
+    llm_score: Mapped[float] = mapped_column(Float)
+    final_score: Mapped[float] = mapped_column(Float)
+    rules_passed: Mapped[bool] = mapped_column(Boolean, default=True)
+    rule_reasons: Mapped[list[str]] = mapped_column(JSON, default=list)
+    matched_skills: Mapped[list[str]] = mapped_column(JSON, default=list)
+    missing_skills: Mapped[list[str]] = mapped_column(JSON, default=list)
+    strengths: Mapped[list[str]] = mapped_column(JSON, default=list)
+    gaps: Mapped[list[str]] = mapped_column(JSON, default=list)
+    risks: Mapped[list[str]] = mapped_column(JSON, default=list)
+    resume_evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    recommendation: Mapped[str] = mapped_column(String(30))
+    reasoning_summary: Mapped[str] = mapped_column(Text, default="")
+    score_version: Mapped[str] = mapped_column(String(50))
+    weights: Mapped[dict[str, float]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    job: Mapped[Job] = relationship(back_populates="scores")
+    resume: Mapped[Resume] = relationship(back_populates="scores")

@@ -2,7 +2,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.api.dependencies import get_job_service
+from app.api.dependencies import get_job_service, get_matching_service
 from app.schemas.job_intelligence import (
     JobAnalysisRead,
     JobImportRequest,
@@ -12,7 +12,13 @@ from app.schemas.job_intelligence import (
     StructuredJob,
 )
 from app.schemas.jobs import JobCreate, JobListResponse, JobRead
+from app.schemas.matching import JobScoreRead, JobScoreRequest
 from app.services.jobs import DuplicateJobError, InvalidJobImportError, JobService
+from app.services.matching import (
+    MatchingJobNotFoundError,
+    MatchingResumeNotFoundError,
+    MatchingService,
+)
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -85,6 +91,24 @@ async def analyze_job(
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return _analysis_read(job)
+
+
+@router.post("/{job_id}/score", response_model=JobScoreRead)
+async def score_job(
+    job_id: UUID,
+    payload: JobScoreRequest | None = None,
+    service: MatchingService = Depends(get_matching_service),
+) -> JobScoreRead:
+    try:
+        score = await service.score(
+            job_id=job_id,
+            resume_id=payload.resume_id if payload else None,
+        )
+    except MatchingJobNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except MatchingResumeNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return JobScoreRead.model_validate(score)
 
 
 @router.get("/{job_id}", response_model=JobRead)

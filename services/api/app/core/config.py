@@ -9,7 +9,7 @@ class Settings(BaseSettings):
 
     app_name: str = "CareerPilot API"
     environment: str = "development"
-    database_url: str = "postgresql+asyncpg://careerpilot:careerpilot@localhost:5432/careerpilot"
+    database_url: str = "postgresql+asyncpg://4careerpilot:careerpilot@localhost:5432/careerpilot"
     redis_url: str = "redis://localhost:6379/0"
     cors_origins: str = Field(default="http://localhost:3000", validation_alias="CORS_ORIGINS")
     max_upload_size_bytes: int = Field(
@@ -21,10 +21,44 @@ class Settings(BaseSettings):
         default="demo@careerpilot.local", validation_alias="DEFAULT_USER_EMAIL"
     )
     default_user_name: str = Field(default="Demo User", validation_alias="DEFAULT_USER_NAME")
+    matching_semantic_weight: float = Field(
+        default=0.25, validation_alias="MATCHING_SEMANTIC_WEIGHT"
+    )
+    matching_skill_weight: float = Field(default=0.25, validation_alias="MATCHING_SKILL_WEIGHT")
+    matching_education_weight: float = Field(
+        default=0.15, validation_alias="MATCHING_EDUCATION_WEIGHT"
+    )
+    matching_experience_weight: float = Field(
+        default=0.10, validation_alias="MATCHING_EXPERIENCE_WEIGHT"
+    )
+    matching_location_weight: float = Field(
+        default=0.10, validation_alias="MATCHING_LOCATION_WEIGHT"
+    )
+    matching_preference_weight: float = Field(
+        default=0.10, validation_alias="MATCHING_PREFERENCE_WEIGHT"
+    )
+    matching_llm_weight: float = Field(default=0.05, validation_alias="MATCHING_LLM_WEIGHT")
+    matching_retrieval_top_k: int = Field(default=8, validation_alias="MATCHING_RETRIEVAL_TOP_K")
+    matching_rerank_top_k: int = Field(default=4, validation_alias="MATCHING_RERANK_TOP_K")
+    matching_score_version: str = Field(
+        default="MATCHING_V1", validation_alias="MATCHING_SCORE_VERSION"
+    )
 
     @property
     def allowed_origins(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def matching_weights(self) -> dict[str, float]:
+        return {
+            "semantic": self.matching_semantic_weight,
+            "skill": self.matching_skill_weight,
+            "education": self.matching_education_weight,
+            "experience": self.matching_experience_weight,
+            "location": self.matching_location_weight,
+            "preference": self.matching_preference_weight,
+            "llm": self.matching_llm_weight,
+        }
 
 
 @lru_cache

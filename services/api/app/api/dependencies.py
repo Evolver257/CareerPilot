@@ -5,6 +5,7 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.llm.provider import LLMProvider, MockLLMProvider
 from app.services.jobs import JobService
+from app.services.matching import MatchingService
 from app.services.resumes import ResumeService
 
 
@@ -21,3 +22,10 @@ def get_resume_service(
     provider: LLMProvider = Depends(get_llm_provider),
 ) -> ResumeService:
     return ResumeService(session, embedding_provider=provider)
+
+
+def get_matching_service(
+    session: AsyncSession = Depends(get_db),
+    provider: LLMProvider = Depends(get_llm_provider),
+) -> MatchingService:
+    return MatchingService(session, provider)

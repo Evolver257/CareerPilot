@@ -17,8 +17,8 @@ export function Navigation() {
         {links.map((link) => <Link key={link.href} className="block whitespace-nowrap rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-indigo-50 hover:text-indigo-700" href={link.href}>{link.label}</Link>)}
       </nav>
       <div className="mt-8 hidden rounded-2xl bg-slate-50 p-4 lg:block">
-        <p className="text-xs font-semibold uppercase tracking-widest text-indigo-600">Phase 3</p>
-        <p className="mt-2 text-sm leading-6 text-slate-600">Resume Intelligence 与 Job Intelligence 已接入。</p>
+        <p className="text-xs font-semibold uppercase tracking-widest text-indigo-600">Phase 4</p>
+        <p className="mt-2 text-sm leading-6 text-slate-600">Resume RAG 与混合匹配评分已接入。</p>
       </div>
     </aside>
   );
