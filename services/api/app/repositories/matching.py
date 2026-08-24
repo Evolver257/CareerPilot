@@ -84,6 +84,13 @@ class MatchingRepository:
         await self.session.refresh(score)
         return score
 
+    async def add_scores(self, scores: list[JobScore]) -> list[JobScore]:
+        self.session.add_all(scores)
+        await self.session.commit()
+        for score in scores:
+            await self.session.refresh(score)
+        return scores
+
     @staticmethod
     def _cosine_similarity(left: list[float], right: list[float]) -> float:
         if not left or not right or len(left) != len(right):

@@ -3,6 +3,7 @@ import Link from "next/link";
 const links = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/jobs", label: "职位探索" },
+  { href: "/ranking", label: "智能排名" },
   { href: "/resume", label: "简历管理" }
 ];
 
@@ -17,8 +18,8 @@ export function Navigation() {
         {links.map((link) => <Link key={link.href} className="block whitespace-nowrap rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-indigo-50 hover:text-indigo-700" href={link.href}>{link.label}</Link>)}
       </nav>
       <div className="mt-8 hidden rounded-2xl bg-slate-50 p-4 lg:block">
-        <p className="text-xs font-semibold uppercase tracking-widest text-indigo-600">Phase 4</p>
-        <p className="mt-2 text-sm leading-6 text-slate-600">Resume RAG 与混合匹配评分已接入。</p>
+        <p className="text-xs font-semibold uppercase tracking-widest text-indigo-600">Phase 5</p>
+        <p className="mt-2 text-sm leading-6 text-slate-600">多阶段 Ranking 与完整 Trace 已接入。</p>
       </div>
     </aside>
   );

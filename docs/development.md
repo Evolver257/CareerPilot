@@ -75,6 +75,31 @@ query, retrieves resume chunks from pgvector, reranks them, and provides only
 those chunks to the Judge. Each result is persisted in `job_scores` together
 with user-visible evidence, strengths, gaps, risks, and recommendation.
 
+Phase 5 Ranking Pipeline exposes:
+
+```text
+POST /api/jobs/rank                rank the current candidate pool
+```
+
+Optional request body:
+
+```json
+{
+  "resume_id": "00000000-0000-0000-0000-000000000000",
+  "candidate_limit": 300,
+  "top_k_embedding": 100,
+  "top_k_rerank": 30,
+  "top_k_llm": 15,
+  "final_top_k": 10
+}
+```
+
+The pipeline applies Rule Filter, Embedding Rank, deterministic Reranker, LLM
+Judge, and Final Ranking in order. The response includes every stage's input,
+output, duration, score, and promotion decision. Only candidates promoted by
+the Reranker reach the LLM Judge. Defaults are configurable through
+`TOP_K_EMBEDDING`, `TOP_K_RERANK`, and `TOP_K_LLM`.
+
 ## Frontend
 
 From `apps/web`:

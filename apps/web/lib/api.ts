@@ -115,6 +115,53 @@ export type JobScore = {
   created_at: string;
 };
 
+export type RankingStageName =
+  | "rule_filter"
+  | "embedding_rank"
+  | "reranker"
+  | "llm_judge"
+  | "final_ranking";
+
+export type RankingTraceCandidate = {
+  job_id: string;
+  title: string;
+  rank: number | null;
+  score: number | null;
+  selected: boolean;
+  passed: boolean | null;
+  reasons: string[];
+  sub_scores: Record<string, number>;
+  recommendation: JobScore["recommendation"] | null;
+};
+
+export type RankingTraceStage = {
+  name: RankingStageName;
+  input_count: number;
+  output_count: number;
+  duration_ms: number;
+  candidates: RankingTraceCandidate[];
+};
+
+export type JobRankingResponse = {
+  items: Array<{ rank: number; job: Job; score: JobScore }>;
+  total_candidates: number;
+  trace: {
+    run_id: string;
+    version: string;
+    started_at: string;
+    completed_at: string;
+    llm_calls: number;
+    config: {
+      candidate_limit: number;
+      top_k_embedding: number;
+      top_k_rerank: number;
+      top_k_llm: number;
+      final_top_k: number;
+    };
+    stages: RankingTraceStage[];
+  };
+};
+
 export type ResumeEducation = {
   institution: string;
   degree: string;
@@ -229,6 +276,14 @@ export function analyzeJob(id: string): Promise<JobAnalysis> {
 
 export function scoreJob(id: string, resumeId?: string): Promise<JobScore> {
   return apiFetch<JobScore>(`/api/jobs/${encodeURIComponent(id)}/score`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(resumeId ? { resume_id: resumeId } : {}),
+  });
+}
+
+export function rankJobs(resumeId?: string): Promise<JobRankingResponse> {
+  return apiFetch<JobRankingResponse>("/api/jobs/rank", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(resumeId ? { resume_id: resumeId } : {}),

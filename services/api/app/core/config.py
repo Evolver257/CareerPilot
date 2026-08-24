@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     matching_score_version: str = Field(
         default="MATCHING_V1", validation_alias="MATCHING_SCORE_VERSION"
     )
+    ranking_candidate_limit: int = Field(default=300, validation_alias="RANKING_CANDIDATE_LIMIT")
+    top_k_embedding: int = Field(default=100, validation_alias="TOP_K_EMBEDDING")
+    top_k_rerank: int = Field(default=30, validation_alias="TOP_K_RERANK")
+    top_k_llm: int = Field(default=15, validation_alias="TOP_K_LLM")
+    final_ranking_top_k: int = Field(default=10, validation_alias="FINAL_RANKING_TOP_K")
+    ranking_version: str = Field(default="RANKING_V1", validation_alias="RANKING_VERSION")
 
     @property
     def allowed_origins(self) -> list[str]:

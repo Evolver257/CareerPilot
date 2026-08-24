@@ -27,7 +27,7 @@ export default function DashboardPage() {
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="发现职位" value={jobs?.total ?? "—"} hint="来自 API 的实时数量" />
-        <StatCard label="高匹配职位" value="—" hint="Phase 4 开放" />
+        <StatCard label="高匹配职位" value="—" hint="Phase 5 Ranking 已启用" />
         <StatCard label="等待确认" value="—" hint="Human-in-the-loop" />
         <StatCard label="已投递" value="—" hint="Campaign 尚未启用" />
       </section>

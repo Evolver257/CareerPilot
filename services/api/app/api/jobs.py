@@ -2,7 +2,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.api.dependencies import get_job_service, get_matching_service
+from app.api.dependencies import get_job_service, get_matching_service, get_ranking_service
 from app.schemas.job_intelligence import (
     JobAnalysisRead,
     JobImportRequest,
@@ -13,12 +13,14 @@ from app.schemas.job_intelligence import (
 )
 from app.schemas.jobs import JobCreate, JobListResponse, JobRead
 from app.schemas.matching import JobScoreRead, JobScoreRequest
+from app.schemas.ranking import JobRankingRequest, JobRankingResponse
 from app.services.jobs import DuplicateJobError, InvalidJobImportError, JobService
 from app.services.matching import (
     MatchingJobNotFoundError,
     MatchingResumeNotFoundError,
     MatchingService,
 )
+from app.services.ranking import RankingService
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -81,6 +83,17 @@ async def import_jobs(
         duplicates=result.duplicates,
         total=len(result.jobs),
     )
+
+
+@router.post("/rank", response_model=JobRankingResponse)
+async def rank_jobs(
+    payload: JobRankingRequest,
+    service: RankingService = Depends(get_ranking_service),
+) -> JobRankingResponse:
+    try:
+        return await service.rank(payload)
+    except MatchingResumeNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.post("/{job_id}/analyze", response_model=JobAnalysisRead)
