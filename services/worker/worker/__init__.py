@@ -1,0 +1,1 @@
+"""CareerPilot background worker placeholder."""

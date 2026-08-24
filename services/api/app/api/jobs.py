@@ -1,0 +1,95 @@
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+
+from app.api.dependencies import get_job_service
+from app.schemas.job_intelligence import (
+    JobAnalysisRead,
+    JobImportRequest,
+    JobImportResponse,
+    JobRequirements,
+    JobSkillRead,
+    StructuredJob,
+)
+from app.schemas.jobs import JobCreate, JobListResponse, JobRead
+from app.services.jobs import DuplicateJobError, InvalidJobImportError, JobService
+
+router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+
+
+def _analysis_read(job) -> JobAnalysisRead:
+    normalized = job.normalized_data or {}
+    structured = StructuredJob.model_validate(normalized.get("structured_job", {}))
+    if not structured.title:
+        structured = structured.model_copy(
+            update={
+                "title": job.title,
+                "location": job.location or "",
+                "job_type": job.job_type or "",
+            }
+        )
+    requirements = JobRequirements.model_validate(normalized.get("requirements", {}))
+    if not requirements.education and job.education_requirement:
+        requirements = requirements.model_copy(update={"education": job.education_requirement})
+    if not requirements.experience and job.experience_requirement:
+        requirements = requirements.model_copy(update={"experience": job.experience_requirement})
+    skills = [JobSkillRead.model_validate(skill) for skill in job.skills]
+    return JobAnalysisRead(
+        job=JobRead.model_validate(job),
+        structured_job=structured,
+        requirements=requirements,
+        skills=skills,
+    )
+
+
+@router.get("", response_model=JobListResponse)
+async def list_jobs(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    search: str | None = Query(default=None, min_length=1, max_length=100),
+    service: JobService = Depends(get_job_service),
+) -> JobListResponse:
+    jobs, total = await service.list_jobs(page=page, page_size=page_size, search=search)
+    return JobListResponse(items=jobs, total=total, page=page, page_size=page_size)
+
+
+@router.post("", response_model=JobRead, status_code=status.HTTP_201_CREATED)
+async def create_job(payload: JobCreate, service: JobService = Depends(get_job_service)) -> JobRead:
+    try:
+        return await service.create_job(payload)
+    except DuplicateJobError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/import", response_model=JobImportResponse, status_code=status.HTTP_201_CREATED)
+async def import_jobs(
+    payload: JobImportRequest, service: JobService = Depends(get_job_service)
+) -> JobImportResponse:
+    try:
+        result = await service.import_jobs(payload)
+    except (DuplicateJobError, InvalidJobImportError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return JobImportResponse(
+        items=[_analysis_read(job) for job in result.jobs],
+        created=result.created,
+        duplicates=result.duplicates,
+        total=len(result.jobs),
+    )
+
+
+@router.post("/{job_id}/analyze", response_model=JobAnalysisRead)
+async def analyze_job(
+    job_id: UUID, service: JobService = Depends(get_job_service)
+) -> JobAnalysisRead:
+    job = await service.analyze_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return _analysis_read(job)
+
+
+@router.get("/{job_id}", response_model=JobRead)
+async def get_job(job_id: UUID, service: JobService = Depends(get_job_service)) -> JobRead:
+    job = await service.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return job
