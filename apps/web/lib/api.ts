@@ -322,6 +322,57 @@ export type AgentRun = {
 
 export type AgentRunListResponse = { items: AgentRun[]; total: number };
 
+export type BrowserTaskStatus =
+  | "PENDING"
+  | "CONNECTING"
+  | "RUNNING"
+  | "WAITING_FOR_USER"
+  | "COMPLETED"
+  | "CANCELLED"
+  | "FAILED";
+
+export type BrowserAction = {
+  id: string;
+  action: string;
+  target?: { strategy: string; name?: string | null; selector?: string | null } | null;
+  value?: string | null;
+  url?: string | null;
+  metadata: Record<string, unknown>;
+};
+
+export type BrowserTaskEvent = {
+  id: string;
+  task_id: string;
+  event_type: string;
+  action_id: string | null;
+  sequence: number | null;
+  payload: Record<string, unknown>;
+  created_at: string;
+};
+
+export type BrowserTask = {
+  id: string;
+  user_id: string;
+  application_id: string;
+  campaign_id: string | null;
+  platform: string;
+  task_type: string;
+  scenario: string;
+  status: BrowserTaskStatus;
+  payload: Record<string, unknown>;
+  result: Record<string, unknown>;
+  current_action: BrowserAction | Record<string, unknown>;
+  failure_reason: string | null;
+  action_sequence: number;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  events: BrowserTaskEvent[];
+};
+
+export type BrowserTaskListResponse = { items: BrowserTask[]; total: number };
+
 export type ResumeEducation = {
   institution: string;
   degree: string;
@@ -536,6 +587,59 @@ export function resumeAgentRun(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+}
+
+export function getBrowserTasks(): Promise<BrowserTaskListResponse> {
+  return apiFetch<BrowserTaskListResponse>("/api/browser-tasks");
+}
+
+export function getBrowserTask(id: string): Promise<BrowserTask> {
+  return apiFetch<BrowserTask>(`/api/browser-tasks/${encodeURIComponent(id)}`);
+}
+
+export function createBrowserTask(payload: {
+  application_id: string;
+  platform?: string;
+  scenario?: string;
+  auto_start?: boolean;
+}): Promise<BrowserTask> {
+  return apiFetch<BrowserTask>("/api/browser-tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function browserTaskAction(
+  id: string,
+  action: "start" | "cancel",
+): Promise<BrowserTask> {
+  return apiFetch<BrowserTask>(`/api/browser-tasks/${encodeURIComponent(id)}/${action}`, {
+    method: "POST",
+  });
+}
+
+export function resumeBrowserTask(
+  id: string,
+  decision = "resolved",
+  note?: string,
+): Promise<BrowserTask> {
+  return apiFetch<BrowserTask>(`/api/browser-tasks/${encodeURIComponent(id)}/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision, note }),
+  });
+}
+
+export function simulateBrowserExtension(id: string): Promise<BrowserTask> {
+  return apiFetch<BrowserTask>(`/api/browser-tasks/${encodeURIComponent(id)}/mock-extension`, {
+    method: "POST",
+  });
+}
+
+export function browserTaskWebSocketUrl(id: string): string {
+  const base = API_BASE_URL.replace(/^http/, "ws");
+  return `${base}/api/browser-tasks/ws/${encodeURIComponent(id)}`;
 }
 
 export function importJobs(payload: {

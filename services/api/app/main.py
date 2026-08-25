@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import agents, campaigns, health, jobs, resumes
+from app.api import agents, browser_tasks, campaigns, health, jobs, resumes
 from app.core.config import get_settings
 
 
@@ -28,3 +28,4 @@ app.include_router(resumes.router)
 app.include_router(campaigns.router)
 app.include_router(campaigns.applications_router)
 app.include_router(agents.router)
+app.include_router(browser_tasks.router)

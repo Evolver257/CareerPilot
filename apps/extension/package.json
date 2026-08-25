@@ -1,0 +1,16 @@
+{
+  "name": "careerpilot-browser-extension",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "typecheck": "wxt prepare && tsc --noEmit"
+  },
+  "dependencies": {
+    "wxt": "^0.20.13"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

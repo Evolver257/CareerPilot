@@ -5,6 +5,7 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.llm.provider import LLMProvider, MockLLMProvider
 from app.services.agent_runtime import AgentRuntime
+from app.services.browser_tasks import BrowserTaskService
 from app.services.campaigns import CampaignService
 from app.services.jobs import JobService
 from app.services.matching import MatchingService
@@ -53,3 +54,10 @@ def get_agent_runtime(
     provider: LLMProvider = Depends(get_llm_provider),
 ) -> AgentRuntime:
     return AgentRuntime(session, provider)
+
+
+def get_browser_task_service(
+    session: AsyncSession = Depends(get_db),
+    provider: LLMProvider = Depends(get_llm_provider),
+) -> BrowserTaskService:
+    return BrowserTaskService(session, provider)

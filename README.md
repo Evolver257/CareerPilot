@@ -1,10 +1,10 @@
 # CareerPilot
 
-CareerPilot is an extensible AI job-search platform foundation. Phase 1 established the web/API/database boundary, Phase 2 added Resume Intelligence, Phase 3 added Job Intelligence, Phase 4 added hybrid Resume–JD matching with Resume RAG, Phase 5 added cost-aware multi-stage ranking, Phase 6 added resumable application campaigns, and Phase 7 adds a traceable Agent Runtime.
+CareerPilot is an extensible AI job-search platform foundation. Phase 1 established the web/API/database boundary, Phase 2 added Resume Intelligence, Phase 3 added Job Intelligence, Phase 4 added hybrid Resume–JD matching with Resume RAG, Phase 5 added cost-aware multi-stage ranking, Phase 6 added resumable application campaigns, Phase 7 added a traceable Agent Runtime, and Phase 8 adds a Browser Agent boundary with a Mock Platform.
 
 ## Current status
 
-Phase 0 (repository audit) through Phase 7 (Agent Runtime) are implemented:
+Phase 0 (repository audit) through Phase 8 (Browser Agent + Mock Platform) are implemented:
 
 - Next.js web workspace for Dashboard, Jobs, Job Detail, and Resume upload/Profile/Chunks
 - FastAPI application with `/health`, Jobs read endpoints, and Resume Intelligence APIs
@@ -24,6 +24,10 @@ Phase 0 (repository audit) through Phase 7 (Agent Runtime) are implemented:
 - Nine schema-validated job-search tools with retry, timeout, max-step, pause/resume, and cancel controls
 - Persistent AgentRun, AgentStep, and AgentEvent trace plus SSE event streaming
 - Agent Runs workspace with expandable Tool Input/Output, status, latency, and approval controls
+- BrowserTask persistence with structured NAVIGATE/CLICK/TYPE/EXTRACT/CHECK_STATE actions and auditable events
+- WXT Browser Extension boundary over WebSocket with semantic DOM actions and no credential transfer
+- Mock Platform job list/detail/apply pages plus SUCCESS, CAPTCHA_REQUIRED, LOGIN_REQUIRED, PLATFORM_LIMIT, and DOM_CHANGED scenarios
+- Browser Task console with Extension connection status, human-action pause/resume, and Mock Extension CI harness
 - Redis and a worker placeholder in Docker Compose
 - API parser/upload/chunk tests, migration test, frontend typecheck, lint, and production build
 
@@ -54,6 +58,8 @@ Then open:
 - API docs: http://localhost:8000/docs
 - Health: http://localhost:8000/health
 - Agent Runs: http://localhost:3000/agent-runs
+- Browser Tasks: http://localhost:3000/browser-tasks
+- Mock Platform: http://localhost:3000/mock-platform
 
 If port 8000 is already in use, start the API on another host port while keeping the container port unchanged:
 
@@ -95,6 +101,7 @@ CareerPilot does not upload recruitment-site cookies, passwords, or authenticati
 5. ~~Ranking pipeline~~
 6. ~~Campaign and application state machine~~
 7. ~~Agent runtime~~
+8. ~~Browser Agent and Mock Platform~~
 8. Browser Agent and Mock Platform
 
 See [docs/phase-0-audit.md](docs/phase-0-audit.md), [docs/architecture.md](docs/architecture.md), and [docs/development.md](docs/development.md) for implementation notes.

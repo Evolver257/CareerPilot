@@ -50,6 +50,9 @@ class User(Base):
     agent_runs: Mapped[list[AgentRun]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    browser_tasks: Mapped[list[BrowserTask]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class UserPreference(Base):
@@ -266,6 +269,7 @@ class Campaign(Base):
         back_populates="campaign", cascade="all, delete-orphan"
     )
     agent_runs: Mapped[list[AgentRun]] = relationship(back_populates="campaign")
+    browser_tasks: Mapped[list[BrowserTask]] = relationship(back_populates="campaign")
 
 
 class CampaignJob(Base):
@@ -321,6 +325,60 @@ class Application(Base):
     campaign: Mapped[Campaign] = relationship(back_populates="applications")
     job: Mapped[Job] = relationship(back_populates="applications")
     resume: Mapped[Resume] = relationship(back_populates="applications")
+    browser_tasks: Mapped[list[BrowserTask]] = relationship(
+        back_populates="application", cascade="all, delete-orphan"
+    )
+
+
+class BrowserTask(Base):
+    __tablename__ = "browser_tasks"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    application_id: Mapped[UUID] = mapped_column(
+        ForeignKey("applications.id", ondelete="CASCADE"), index=True
+    )
+    campaign_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    platform: Mapped[str] = mapped_column(String(100), default="mock", index=True)
+    task_type: Mapped[str] = mapped_column(String(80), default="submit_application")
+    scenario: Mapped[str] = mapped_column(String(40), default="SUCCESS")
+    status: Mapped[str] = mapped_column(String(40), default="PENDING", index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    current_action: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    action_sequence: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="browser_tasks")
+    application: Mapped[Application] = relationship(back_populates="browser_tasks")
+    campaign: Mapped[Campaign | None] = relationship(back_populates="browser_tasks")
+    events: Mapped[list[BrowserTaskEvent]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+
+
+class BrowserTaskEvent(Base):
+    __tablename__ = "browser_task_events"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    task_id: Mapped[UUID] = mapped_column(
+        ForeignKey("browser_tasks.id", ondelete="CASCADE"), index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(100), index=True)
+    action_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    task: Mapped[BrowserTask] = relationship(back_populates="events")
 
 
 class AgentRun(Base):

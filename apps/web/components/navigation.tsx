@@ -6,6 +6,8 @@ const links = [
   { href: "/ranking", label: "智能排名" },
   { href: "/resume", label: "简历管理" },
   { href: "/agent-runs", label: "Agent Trace" },
+  { href: "/browser-tasks", label: "Browser Tasks" },
+  { href: "/mock-platform", label: "Mock Platform" },
   { href: "/campaigns", label: "Campaign" },
   { href: "/applications", label: "投递追踪" }
 ];
@@ -21,8 +23,8 @@ export function Navigation() {
         {links.map((link) => <Link key={link.href} className="block whitespace-nowrap rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-indigo-50 hover:text-indigo-700" href={link.href}>{link.label}</Link>)}
       </nav>
       <div className="mt-8 hidden rounded-2xl bg-slate-50 p-4 lg:block">
-        <p className="text-xs font-semibold uppercase tracking-widest text-indigo-600">Phase 7</p>
-        <p className="mt-2 text-sm leading-6 text-slate-600">Agent Runtime、Tool Trace 与人工审批已接入。</p>
+        <p className="text-xs font-semibold uppercase tracking-widest text-indigo-600">Phase 8</p>
+        <p className="mt-2 text-sm leading-6 text-slate-600">Browser Task、Mock Platform 与 Extension 通道已接入。</p>
       </div>
     </aside>
   );
