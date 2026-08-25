@@ -98,6 +98,8 @@ ApplicationAction = Literal[
     "login_required",
     "platform_limit",
     "dom_changed",
+    "risk_control",
+    "unknown_state",
     "fail",
 ]
 

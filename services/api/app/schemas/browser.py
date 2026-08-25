@@ -93,6 +93,13 @@ class BrowserTaskListResponse(BaseModel):
     total: int
 
 
+class PlatformAdapterRead(BaseModel):
+    name: str
+    label: str
+    mode: str
+    safe_for_automation: bool
+
+
 class BrowserTaskSocketMessage(BaseModel):
     type: str
     payload: dict[str, Any] = Field(default_factory=dict)

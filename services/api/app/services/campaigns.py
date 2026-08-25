@@ -265,6 +265,8 @@ class CampaignService:
                 "login_required": ApplicationStatus.LOGIN_REQUIRED,
                 "platform_limit": ApplicationStatus.PLATFORM_LIMIT,
                 "dom_changed": ApplicationStatus.DOM_CHANGED,
+                "risk_control": ApplicationStatus.RISK_CONTROL,
+                "unknown_state": ApplicationStatus.UNKNOWN_STATE,
                 "fail": ApplicationStatus.FAILED,
             }[action]
             self.application_state.fail(

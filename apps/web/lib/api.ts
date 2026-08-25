@@ -187,6 +187,8 @@ export type ApplicationStatus =
   | "LOGIN_REQUIRED"
   | "PLATFORM_LIMIT"
   | "DOM_CHANGED"
+  | "RISK_CONTROL"
+  | "UNKNOWN_STATE"
   | "FAILED";
 
 export type Application = {
@@ -372,6 +374,13 @@ export type BrowserTask = {
 };
 
 export type BrowserTaskListResponse = { items: BrowserTask[]; total: number };
+
+export type PlatformAdapter = {
+  name: string;
+  label: string;
+  mode: string;
+  safe_for_automation: boolean;
+};
 
 export type ResumeEducation = {
   institution: string;
@@ -593,13 +602,17 @@ export function getBrowserTasks(): Promise<BrowserTaskListResponse> {
   return apiFetch<BrowserTaskListResponse>("/api/browser-tasks");
 }
 
+export function getPlatformAdapters(): Promise<PlatformAdapter[]> {
+  return apiFetch<PlatformAdapter[]>("/api/browser-tasks/platforms");
+}
+
 export function getBrowserTask(id: string): Promise<BrowserTask> {
   return apiFetch<BrowserTask>(`/api/browser-tasks/${encodeURIComponent(id)}`);
 }
 
 export function createBrowserTask(payload: {
   application_id: string;
-  platform?: string;
+  platform?: "mock" | "careerboard";
   scenario?: string;
   auto_start?: boolean;
 }): Promise<BrowserTask> {

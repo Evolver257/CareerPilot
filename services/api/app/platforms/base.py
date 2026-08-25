@@ -28,6 +28,14 @@ class DomChangedError(PlatformAdapterError):
     """The expected page structure is no longer present."""
 
 
+class RiskControlDetectedError(PlatformAdapterError):
+    """The platform has presented a risk-control state to the user."""
+
+
+class UnknownStateError(PlatformAdapterError):
+    """The adapter cannot safely identify the current page state."""
+
+
 @dataclass(frozen=True)
 class PlatformJob:
     id: UUID

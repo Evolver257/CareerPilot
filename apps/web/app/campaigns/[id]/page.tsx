@@ -28,6 +28,8 @@ const statusLabels: Record<string, string> = {
   LOGIN_REQUIRED: "需要登录",
   PLATFORM_LIMIT: "平台限制",
   DOM_CHANGED: "页面变化",
+  RISK_CONTROL: "风控暂停",
+  UNKNOWN_STATE: "未知页面",
 };
 
 export default function CampaignDetailPage() {

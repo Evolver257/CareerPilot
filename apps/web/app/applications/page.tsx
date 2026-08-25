@@ -17,6 +17,8 @@ const statusLabels: Record<string, string> = {
   LOGIN_REQUIRED: "需要登录",
   PLATFORM_LIMIT: "平台限制",
   DOM_CHANGED: "页面变化",
+  RISK_CONTROL: "风控暂停",
+  UNKNOWN_STATE: "未知页面",
   FAILED: "失败",
 };
 
@@ -36,7 +38,7 @@ export default function ApplicationsPage() {
     waiting: applications.filter((item) => item.status === "WAITING_APPROVAL").length,
     queued: applications.filter((item) => ["QUEUED", "EXECUTING", "PAUSED"].includes(item.status)).length,
     submitted: applications.filter((item) => item.status === "SUBMITTED").length,
-    attention: applications.filter((item) => ["CAPTCHA_REQUIRED", "LOGIN_REQUIRED", "PLATFORM_LIMIT", "DOM_CHANGED", "FAILED"].includes(item.status)).length,
+    attention: applications.filter((item) => ["CAPTCHA_REQUIRED", "LOGIN_REQUIRED", "PLATFORM_LIMIT", "DOM_CHANGED", "RISK_CONTROL", "UNKNOWN_STATE", "FAILED"].includes(item.status)).length,
   }), [applications]);
 
   return (
@@ -64,7 +66,7 @@ export default function ApplicationsPage() {
               <tbody className="divide-y divide-slate-100">
                 {applications.map((application) => {
                   const history = application.metadata.state_history ?? [];
-                  const needsAttention = ["CAPTCHA_REQUIRED", "LOGIN_REQUIRED", "PLATFORM_LIMIT", "DOM_CHANGED", "FAILED"].includes(application.status);
+                  const needsAttention = ["CAPTCHA_REQUIRED", "LOGIN_REQUIRED", "PLATFORM_LIMIT", "DOM_CHANGED", "RISK_CONTROL", "UNKNOWN_STATE", "FAILED"].includes(application.status);
                   return <tr key={application.id}><td className="px-6 py-4"><Link className="font-semibold text-indigo-700" href={`/jobs/${application.job_id}`}>{application.job.title}</Link><p className="mt-1 text-xs text-slate-500">{application.job.location ?? "地点未注明"}</p></td><td className="px-6 py-4"><Link className="text-slate-700 hover:text-indigo-700" href={`/campaigns/${application.campaign_id}`}>{application.campaign_name}</Link></td><td className="px-6 py-4 text-slate-500">{application.platform}</td><td className="px-6 py-4"><span className={`rounded-full px-3 py-1 text-xs font-medium ${needsAttention ? "bg-rose-50 text-rose-700" : "bg-indigo-50 text-indigo-700"}`}>{statusLabels[application.status] ?? application.status}</span>{application.failure_reason && <p className="mt-2 max-w-xs text-xs text-rose-600">{application.failure_reason}</p>}</td><td className="px-6 py-4 text-slate-500">{new Date(application.updated_at).toLocaleString("zh-CN")}</td><td className="px-6 py-4"><details><summary className="cursor-pointer text-xs font-medium text-slate-600">{history.length} 个事件</summary><ol className="mt-3 space-y-2 text-xs text-slate-500">{history.map((event, index) => <li key={`${event.at}-${index}`}>{event.from ?? "—"} → <span className="font-medium text-slate-700">{event.to}</span></li>)}</ol></details></td></tr>;
                 })}
               </tbody>

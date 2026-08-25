@@ -24,6 +24,8 @@ class ApplicationStateMachine:
             ApplicationStatus.LOGIN_REQUIRED,
             ApplicationStatus.PLATFORM_LIMIT,
             ApplicationStatus.DOM_CHANGED,
+            ApplicationStatus.RISK_CONTROL,
+            ApplicationStatus.UNKNOWN_STATE,
             ApplicationStatus.FAILED,
         },
     }
@@ -33,6 +35,8 @@ class ApplicationStateMachine:
         ApplicationStatus.LOGIN_REQUIRED,
         ApplicationStatus.PLATFORM_LIMIT,
         ApplicationStatus.DOM_CHANGED,
+        ApplicationStatus.RISK_CONTROL,
+        ApplicationStatus.UNKNOWN_STATE,
         ApplicationStatus.FAILED,
     }
     terminal = {ApplicationStatus.SUBMITTED, ApplicationStatus.CANCELLED}

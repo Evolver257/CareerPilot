@@ -20,6 +20,7 @@ from app.schemas.browser import (
     BrowserTaskListResponse,
     BrowserTaskRead,
     BrowserTaskResumeRequest,
+    PlatformAdapterRead,
 )
 from app.services.browser_tasks import (
     BrowserTaskActionError,
@@ -86,6 +87,13 @@ async def create_browser_task(
         return _task_read(await service.create(payload))
     except BrowserTaskActionError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.get("/platforms", response_model=list[PlatformAdapterRead])
+async def list_platform_adapters(
+    service: BrowserTaskService = Depends(get_browser_task_service),
+) -> list[PlatformAdapterRead]:
+    return [PlatformAdapterRead.model_validate(item) for item in service.adapters.catalog()]
 
 
 @router.get("/{task_id}", response_model=BrowserTaskRead)

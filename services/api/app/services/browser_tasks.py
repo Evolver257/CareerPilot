@@ -19,9 +19,12 @@ from app.platforms.base import (
     CaptchaRequiredError,
     DomChangedError,
     LoginRequiredError,
+    PlatformAdapterError,
     PlatformLimitError,
+    RiskControlDetectedError,
+    UnknownStateError,
 )
-from app.platforms.mock import MockPlatformAdapter
+from app.platforms.registry import PlatformAdapterRegistry
 from app.repositories.browser_tasks import BrowserTaskRepository
 from app.repositories.campaigns import CampaignRepository
 from app.schemas.browser import (
@@ -78,7 +81,7 @@ class BrowserTaskService:
         self.repository = BrowserTaskRepository(session)
         self.campaign_repository = CampaignRepository(session)
         self.campaign_service = CampaignService(session, provider)
-        self.mock_adapter = MockPlatformAdapter(session)
+        self.adapters = PlatformAdapterRegistry(session)
 
     async def list_tasks(self) -> tuple[list[BrowserTask], int]:
         return await self.repository.list_tasks()
@@ -95,11 +98,13 @@ class BrowserTaskService:
             raise BrowserTaskActionError("Application not found")
         if application.platform != payload.platform:
             raise BrowserTaskActionError("Application platform does not match the task platform")
-        if payload.platform != "mock":
-            raise BrowserTaskActionError("Only Mock Platform is available in Phase 8")
-        prepared = await self.mock_adapter.prepare_application(
-            application_id=application.id, scenario=payload.scenario
-        )
+        try:
+            adapter = self.adapters.get(payload.platform)
+            prepared = await adapter.prepare_application(
+                application_id=application.id, scenario=payload.scenario
+            )
+        except (PlatformAdapterError, ValueError) as exc:
+            raise BrowserTaskActionError(str(exc)) from exc
         task = BrowserTask(
             id=uuid4(),
             user_id=application.user_id,
@@ -121,10 +126,9 @@ class BrowserTaskService:
         )
         actions = list(task.payload["actions"])
         if actions:
-            actions[0]["url"] = (
-                f"http://localhost:3000/mock-platform/jobs/{prepared.context['job_id']}"
-                f"?task={task.id}"
-            )
+            url = actions[0].get("url")
+            if isinstance(url, str):
+                actions[0]["url"] = url.replace("{task_id}", str(task.id))
             task.payload = {**task.payload, "actions": actions}
         await self.repository.add_event(
             task,
@@ -203,7 +207,7 @@ class BrowserTaskService:
             return await self._fail_task(task, result.error or "Browser action failed")
         if action.action == BrowserActionType.CLICK:
             try:
-                submitted = await self.mock_adapter.submit_application(
+                submitted = await self.adapters.get(task.platform).submit_application(
                     application_id=task.application_id,
                     scenario=task.scenario,
                     observations=observations,
@@ -221,10 +225,12 @@ class BrowserTaskService:
                 LoginRequiredError,
                 PlatformLimitError,
                 DomChangedError,
+                RiskControlDetectedError,
+                UnknownStateError,
             ) as exc:
                 await self._mark_application_failure(task.application_id, exc)
                 return await self._wait_for_user(task, str(exc))
-            except (InvalidStateTransitionError, RuntimeError) as exc:
+            except (InvalidStateTransitionError, RuntimeError, PlatformAdapterError) as exc:
                 await self._mark_application_failure(task.application_id, exc)
                 return await self._fail_task(task, str(exc))
         payload["next_action_index"] = int(payload.get("next_action_index", 0)) + 1
@@ -385,6 +391,8 @@ class BrowserTaskService:
             LoginRequiredError: "login_required",
             PlatformLimitError: "platform_limit",
             DomChangedError: "dom_changed",
+            RiskControlDetectedError: "risk_control",
+            UnknownStateError: "unknown_state",
         }.get(type(error), "fail")
         try:
             await self.campaign_service.transition_application(

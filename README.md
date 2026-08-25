@@ -1,10 +1,10 @@
 # CareerPilot
 
-CareerPilot is an extensible AI job-search platform foundation. Phase 1 established the web/API/database boundary, Phase 2 added Resume Intelligence, Phase 3 added Job Intelligence, Phase 4 added hybrid Resume–JD matching with Resume RAG, Phase 5 added cost-aware multi-stage ranking, Phase 6 added resumable application campaigns, Phase 7 added a traceable Agent Runtime, and Phase 8 adds a Browser Agent boundary with a Mock Platform.
+CareerPilot is an extensible AI job-search platform foundation. Phase 1 established the web/API/database boundary, Phase 2 added Resume Intelligence, Phase 3 added Job Intelligence, Phase 4 added hybrid Resume–JD matching with Resume RAG, Phase 5 added cost-aware multi-stage ranking, Phase 6 added resumable application campaigns, Phase 7 added a traceable Agent Runtime, Phase 8 added a Browser Agent boundary with a Mock Platform, and Phase 9 adds a safe CareerBoard Platform Adapter prototype.
 
 ## Current status
 
-Phase 0 (repository audit) through Phase 8 (Browser Agent + Mock Platform) are implemented:
+Phase 0 (repository audit) through Phase 9 (Platform Adapter Prototype) are implemented:
 
 - Next.js web workspace for Dashboard, Jobs, Job Detail, and Resume upload/Profile/Chunks
 - FastAPI application with `/health`, Jobs read endpoints, and Resume Intelligence APIs
@@ -28,6 +28,9 @@ Phase 0 (repository audit) through Phase 8 (Browser Agent + Mock Platform) are i
 - WXT Browser Extension boundary over WebSocket with semantic DOM actions and no credential transfer
 - Mock Platform job list/detail/apply pages plus SUCCESS, CAPTCHA_REQUIRED, LOGIN_REQUIRED, PLATFORM_LIMIT, and DOM_CHANGED scenarios
 - Browser Task console with Extension connection status, human-action pause/resume, and Mock Extension CI harness
+- Independent CareerBoard adapter directory with selectors, parser, detector, actions, adapter registry, and local fixture validation
+- CAPTCHA, LOGIN_REQUIRED, RISK_CONTROL, and UNKNOWN_STATE detection that pauses the task and emits REQUEST_USER_ACTION
+- Recoverable CareerBoard BrowserTask flow with adapter failure recognition and DOM-change regression tests
 - Redis and a worker placeholder in Docker Compose
 - API parser/upload/chunk tests, migration test, frontend typecheck, lint, and production build
 
@@ -41,7 +44,7 @@ Next.js Web  ── REST/SSE ──>  FastAPI API  ──>  SQLAlchemy 2  ──
        └── future SSE/WebSocket boundary for Agent and Extension
 ```
 
-The domain layer does not depend on a specific recruitment website. Future platform-specific behavior belongs behind `JobPlatformAdapter` in `packages/platforms`.
+The domain layer does not depend on a specific recruitment website. Platform-specific behavior belongs behind `JobPlatformAdapter` in `services/api/app/platforms`, with each adapter isolated in its own directory.
 
 ## Quick start
 
@@ -90,7 +93,7 @@ npm run dev
 
 ## Security and platform usage notice
 
-CareerPilot does not upload recruitment-site cookies, passwords, or authentication tokens. Any future browser integration must pause for CAPTCHA, login, risk-control, platform-limit, or unknown-page conditions and request user action. No bypass or evasion behavior is part of this project.
+CareerPilot does not upload recruitment-site cookies, passwords, or authentication tokens. The CareerBoard adapter is currently a local fixture prototype: it only describes actions for a user-launched browser session and never makes remote requests. Any browser integration pauses for CAPTCHA, login, risk-control, platform-limit, or unknown-page conditions and requests user action. No bypass or evasion behavior is part of this project.
 
 ## Roadmap
 
@@ -102,6 +105,6 @@ CareerPilot does not upload recruitment-site cookies, passwords, or authenticati
 6. ~~Campaign and application state machine~~
 7. ~~Agent runtime~~
 8. ~~Browser Agent and Mock Platform~~
-8. Browser Agent and Mock Platform
+9. ~~Platform Adapter Prototype~~
 
 See [docs/phase-0-audit.md](docs/phase-0-audit.md), [docs/architecture.md](docs/architecture.md), and [docs/development.md](docs/development.md) for implementation notes.

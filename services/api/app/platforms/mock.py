@@ -55,7 +55,7 @@ class MockPlatformAdapter(JobPlatformAdapter):
         actions = [
             BrowserAction(
                 action=BrowserActionType.NAVIGATE,
-                url=f"http://localhost:3000/mock-platform/jobs/{job.id}?task={application_id}",
+                url=f"http://localhost:3000/mock-platform/jobs/{job.id}?task={{task_id}}",
             ),
             BrowserAction(action=BrowserActionType.CHECK_STATE),
             BrowserAction(
