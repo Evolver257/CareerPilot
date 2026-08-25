@@ -70,6 +70,8 @@ export default function RankingPage() {
             <span className="font-semibold">{result.trace.version}</span>
             <span className="mx-2 text-indigo-300">·</span>
             LLM 调用 {result.trace.llm_calls} 次
+            <span className="mx-2 text-indigo-300">·</span>
+            {result.trace.token_usage.total_tokens.toLocaleString()} tokens
           </div>
         )}
       </header>

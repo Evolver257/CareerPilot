@@ -3,11 +3,10 @@ FROM python:3.13-slim
 WORKDIR /app
 
 COPY pyproject.toml requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./alembic.ini
-
-RUN pip install --no-cache-dir -r requirements.txt
 
 ENV PYTHONUNBUFFERED=1
 

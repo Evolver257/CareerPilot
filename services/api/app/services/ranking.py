@@ -237,6 +237,7 @@ class RankingService:
             started_at=started_at,
             completed_at=completed_at,
             llm_calls=len(rerank_selected),
+            token_usage=self.llm_judge.usage.as_dict(),
             config=config,
             stages=stages,
         )

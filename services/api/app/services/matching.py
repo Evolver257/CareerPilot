@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.llm.prompts.job_judge import build_job_judge_prompt
 from app.llm.provider import LLMProvider
+from app.llm.usage import UsageAccumulator, UsageRecord, estimate_tokens
 from app.models.entities import Job, JobScore, UserPreference
 from app.repositories.matching import MatchingRepository
 from app.schemas.job_intelligence import StructuredJob
@@ -227,6 +228,7 @@ class PreferenceScorer:
 class LLMJudge:
     def __init__(self, provider: LLMProvider) -> None:
         self.provider = provider
+        self.usage = UsageAccumulator()
 
     async def judge(
         self,
@@ -247,6 +249,14 @@ class LLMJudge:
             sub_scores=sub_scores,
         )
         provider_result = await self.provider.generate_structured(prompt, LLMJudgeOutput)
+        provider_usage = getattr(self.provider, "last_usage", None)
+        if not isinstance(provider_usage, UsageRecord):
+            provider_usage = UsageRecord(
+                prompt_tokens=estimate_tokens(prompt),
+                completion_tokens=estimate_tokens(provider_result.model_dump_json()),
+                source="estimated",
+            )
+        self.usage.add(provider_usage)
         if provider_result.reasoning_summary or provider_result.strengths or provider_result.gaps:
             return provider_result
         return self._deterministic_judge(

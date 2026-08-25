@@ -172,6 +172,14 @@ async def cancel_agent_run(
     return await _run_action(run_id, runtime.cancel, runtime)
 
 
+@router.post("/{run_id}/retry", response_model=AgentRunRead)
+async def retry_agent_run(
+    run_id: UUID,
+    runtime: AgentRuntime = Depends(get_agent_runtime),
+) -> AgentRunRead:
+    return await _run_action(run_id, runtime.retry, runtime)
+
+
 @router.get("/{run_id}/events/stream")
 async def stream_agent_events(
     run_id: UUID,

@@ -173,6 +173,12 @@ async def test_agent_run_pause_resume_cancel_and_step_limit(client: AsyncClient)
     assert limited.json()["error"] == "Agent reached max_steps"
     assert len(limited.json()["steps"]) == 2
 
+    retried = await client.post(f"/api/agent-runs/{limited.json()['id']}/retry")
+    assert retried.status_code == 200
+    assert retried.json()["id"] != limited.json()["id"]
+    assert retried.json()["input"]["retry_of"] == limited.json()["id"]
+    assert retried.json()["status"] == "FAILED"
+
 
 def test_agent_planner_extracts_phase_seven_acceptance_goal() -> None:
     state = AgentPlanner().create_state("帮我找匹配度 80 分以上的 AI Agent 实习岗位")

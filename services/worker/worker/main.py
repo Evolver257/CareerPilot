@@ -1,7 +1,10 @@
 import asyncio
+import logging
 import os
 
 from redis.asyncio import Redis
+
+logger = logging.getLogger("careerpilot.worker")
 
 
 async def run() -> None:
@@ -9,7 +12,7 @@ async def run() -> None:
     client = Redis.from_url(redis_url)
     try:
         await client.ping()
-        print("CareerPilot worker is ready")
+        logger.info("worker_ready redis_url=%s", redis_url)
         await asyncio.Event().wait()
     finally:
         await client.aclose()

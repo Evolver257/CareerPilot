@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.schemas.jobs import JobRead
 from app.schemas.matching import JobScoreRead, Recommendation
+from app.schemas.usage import LLMUsageRead
 
 RankingStageName = Literal[
     "rule_filter",
@@ -63,6 +64,7 @@ class RankingTraceRead(BaseModel):
     started_at: datetime
     completed_at: datetime
     llm_calls: int
+    token_usage: LLMUsageRead = Field(default_factory=LLMUsageRead)
     config: RankingConfigRead
     stages: list[RankingTraceStage]
 

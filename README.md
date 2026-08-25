@@ -1,10 +1,10 @@
 # CareerPilot
 
-CareerPilot is an extensible AI job-search platform foundation. Phase 1 established the web/API/database boundary, Phase 2 added Resume Intelligence, Phase 3 added Job Intelligence, Phase 4 added hybrid Resume–JD matching with Resume RAG, Phase 5 added cost-aware multi-stage ranking, Phase 6 added resumable application campaigns, Phase 7 added a traceable Agent Runtime, Phase 8 added a Browser Agent boundary with a Mock Platform, and Phase 9 adds a safe CareerBoard Platform Adapter prototype.
+CareerPilot is an extensible AI job-search platform foundation. Phase 1 established the web/API/database boundary, Phase 2 added Resume Intelligence, Phase 3 added Job Intelligence, Phase 4 added hybrid Resume–JD matching with Resume RAG, Phase 5 added cost-aware multi-stage ranking, Phase 6 added resumable application campaigns, Phase 7 added a traceable Agent Runtime, Phase 8 added a Browser Agent boundary with a Mock Platform, Phase 9 added a safe CareerBoard Platform Adapter prototype, and Phase 10 productizes the Dashboard, funnel, trace, usage, retry, and error surfaces.
 
 ## Current status
 
-Phase 0 (repository audit) through Phase 9 (Platform Adapter Prototype) are implemented:
+Phase 0 (repository audit) through Phase 10 (Productization) are implemented:
 
 - Next.js web workspace for Dashboard, Jobs, Job Detail, and Resume upload/Profile/Chunks
 - FastAPI application with `/health`, Jobs read endpoints, and Resume Intelligence APIs
@@ -31,6 +31,9 @@ Phase 0 (repository audit) through Phase 9 (Platform Adapter Prototype) are impl
 - Independent CareerBoard adapter directory with selectors, parser, detector, actions, adapter registry, and local fixture validation
 - CAPTCHA, LOGIN_REQUIRED, RISK_CONTROL, and UNKNOWN_STATE detection that pauses the task and emits REQUEST_USER_ACTION
 - Recoverable CareerBoard BrowserTask flow with adapter failure recognition and DOM-change regression tests
+- Product Dashboard with statistics, Application Funnel, Agent Trace quality, LLM token usage, and explicit cost status
+- Bounded terminal Agent Retry that creates a new auditable Run linked by `retry_of`
+- Productization architecture diagram, real local-page Demo GIF, screenshots, technical highlights, and interview talking points
 - Redis and a worker placeholder in Docker Compose
 - API parser/upload/chunk tests, migration test, frontend typecheck, lint, and production build
 
@@ -63,6 +66,7 @@ Then open:
 - Agent Runs: http://localhost:3000/agent-runs
 - Browser Tasks: http://localhost:3000/browser-tasks
 - Mock Platform: http://localhost:3000/mock-platform
+- Product Dashboard: http://localhost:3000/dashboard
 
 If port 8000 is already in use, start the API on another host port while keeping the container port unchanged:
 
@@ -106,5 +110,6 @@ CareerPilot does not upload recruitment-site cookies, passwords, or authenticati
 7. ~~Agent runtime~~
 8. ~~Browser Agent and Mock Platform~~
 9. ~~Platform Adapter Prototype~~
+10. ~~Productization~~
 
-See [docs/phase-0-audit.md](docs/phase-0-audit.md), [docs/architecture.md](docs/architecture.md), and [docs/development.md](docs/development.md) for implementation notes.
+See [docs/phase-0-audit.md](docs/phase-0-audit.md), [docs/architecture.md](docs/architecture.md), [docs/development.md](docs/development.md), and [docs/phase-10-productization.md](docs/phase-10-productization.md) for implementation notes.

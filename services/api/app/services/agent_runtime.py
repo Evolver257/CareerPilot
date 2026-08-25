@@ -321,6 +321,36 @@ class AgentRuntime:
         self.events.emit(run, AgentEventType.RUN_CANCELLED)
         return await self.repository.checkpoint(run)
 
+    async def retry(self, run_id: UUID) -> AgentRun:
+        """Start a fresh auditable run after a terminal execution failure."""
+
+        source = await self.get_run(run_id)
+        if source.status not in {
+            AgentRunStatus.FAILED.value,
+            AgentRunStatus.TIMED_OUT.value,
+        }:
+            raise AgentRunActionError(f"Agent Run cannot retry from {source.status}")
+        resume_id = source.run_input.get("resume_id")
+        if not resume_id:
+            raise AgentRunActionError("Agent Run cannot retry without its resume")
+        retried = await self.create(
+            AgentRunCreate(
+                goal=str(source.run_input.get("goal", "Retry Agent Run")),
+                resume_id=UUID(str(resume_id)),
+                auto_start=False,
+                max_steps=source.max_steps,
+                timeout_seconds=source.timeout_seconds,
+                max_retries=source.max_retries,
+            )
+        )
+        retried.run_input = {
+            **retried.run_input,
+            "retry_of": str(source.id),
+            "retry_reason": source.error,
+        }
+        retried = await self.repository.checkpoint(retried)
+        return await self.start(retried.id)
+
     async def _run_until_blocked(self, run: AgentRun) -> AgentRun:
         run_id = run.id
         deadline = perf_counter() + run.timeout_seconds

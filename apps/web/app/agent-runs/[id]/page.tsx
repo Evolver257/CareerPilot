@@ -76,7 +76,7 @@ export default function AgentRunDetailPage() {
     return () => window.clearInterval(timer);
   }, [load, run?.status]);
 
-  async function handleAction(action: "start" | "pause" | "cancel") {
+  async function handleAction(action: "start" | "pause" | "cancel" | "retry") {
     if (!run) return;
     setBusy(true);
     setError(null);
@@ -116,6 +116,7 @@ export default function AgentRunDetailPage() {
 
   const candidates = run.output.candidates ?? [];
   const canCancel = !["COMPLETED", "CANCELLED", "FAILED", "TIMED_OUT"].includes(run.status);
+  const retryOf = typeof run.input.retry_of === "string" ? run.input.retry_of : null;
 
   return (
     <div className="mx-auto max-w-7xl space-y-8">
@@ -133,6 +134,7 @@ export default function AgentRunDetailPage() {
           {run.status === "PENDING" && <button className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => void handleAction("start")} type="button">Start</button>}
           {run.status === "RUNNING" && <button className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium disabled:opacity-50" disabled={busy} onClick={() => void handleAction("pause")} type="button">Pause</button>}
           {run.status === "PAUSED" && <button className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => void handleResume({})} type="button">Resume</button>}
+          {(["FAILED", "TIMED_OUT"] as AgentRunStatus[]).includes(run.status) && <button className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => void handleAction("retry")} type="button">Retry as new Run</button>}
           {canCancel && <button className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-700 disabled:opacity-50" disabled={busy} onClick={() => void handleAction("cancel")} type="button">Cancel</button>}
           {run.campaign_id && <Link className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700" href={`/campaigns/${run.campaign_id}`}>查看 Campaign</Link>}
         </div>
@@ -140,6 +142,7 @@ export default function AgentRunDetailPage() {
 
       {error && <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-800">{error}</div>}
       {run.error && <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-800"><span className="font-semibold">Runtime Error · </span>{run.error}</div>}
+      {retryOf && <p className="text-xs text-slate-400">本 Run 重试自：{retryOf}</p>}
 
       {run.status === "WAITING_FOR_USER" && (
         <section className="panel border-amber-200 bg-amber-50/40">

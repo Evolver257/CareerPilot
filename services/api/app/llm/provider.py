@@ -8,6 +8,8 @@ from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
+from app.llm.usage import UsageRecord, estimate_tokens
+
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 
@@ -26,16 +28,29 @@ class MockLLMProvider:
 
     def __init__(self, dimensions: int = 384) -> None:
         self.dimensions = dimensions
+        self.last_usage: UsageRecord | None = None
 
     async def generate(self, prompt: str, *, model: str | None = None) -> str:
+        self.last_usage = UsageRecord(
+            prompt_tokens=estimate_tokens(prompt),
+            completion_tokens=estimate_tokens(prompt),
+            source="mock_estimated",
+        )
         return prompt
 
     async def generate_structured(
         self, prompt: str, schema: type[SchemaT], *, model: str | None = None
     ) -> SchemaT:
-        return schema.model_validate({})
+        result = schema.model_validate({})
+        self.last_usage = UsageRecord(
+            prompt_tokens=estimate_tokens(prompt),
+            completion_tokens=estimate_tokens(result.model_dump_json()),
+            source="mock_estimated",
+        )
+        return result
 
     async def embed(self, text: str, *, model: str | None = None) -> list[float]:
+        self.last_usage = None
         return self._hash_embedding(text)
 
     def _hash_embedding(self, text: str) -> list[float]:

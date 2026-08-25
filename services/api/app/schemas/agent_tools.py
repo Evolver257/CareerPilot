@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from app.schemas.matching import Recommendation
+from app.schemas.usage import LLMUsageRead
 
 
 class ToolJob(BaseModel):
@@ -88,6 +89,7 @@ class RankJobsToolOutput(BaseModel):
     count: int
     candidates: list[RankedToolJob]
     trace_run_id: UUID | None = None
+    token_usage: LLMUsageRead = Field(default_factory=LLMUsageRead)
 
 
 class CreateCampaignToolInput(BaseModel):

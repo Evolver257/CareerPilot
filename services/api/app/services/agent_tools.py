@@ -267,6 +267,7 @@ class AgentToolService:
             count=len(candidates),
             candidates=candidates,
             trace_run_id=result.trace.run_id,
+            token_usage=result.trace.token_usage,
         )
 
     async def create_campaign(self, raw_input: BaseModel) -> CreateCampaignToolOutput:

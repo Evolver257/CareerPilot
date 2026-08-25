@@ -151,6 +151,7 @@ export type JobRankingResponse = {
     started_at: string;
     completed_at: string;
     llm_calls: number;
+    token_usage: LLMUsage;
     config: {
       candidate_limit: number;
       top_k_embedding: number;
@@ -324,6 +325,45 @@ export type AgentRun = {
 
 export type AgentRunListResponse = { items: AgentRun[]; total: number };
 
+export type LLMUsage = {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost_usd: number | null;
+  source: string;
+};
+
+export type DashboardResponse = {
+  summary: {
+    jobs_total: number;
+    high_match_jobs: number;
+    campaigns_total: number;
+    campaign_candidates: number;
+    applications_total: number;
+    submitted_applications: number;
+    attention_required: number;
+  };
+  funnel: Array<{
+    key: string;
+    label: string;
+    count: number;
+    conversion_rate: number | null;
+  }>;
+  application_status: Array<{ status: string; count: number }>;
+  agent: {
+    total_runs: number;
+    active_runs: number;
+    completed_runs: number;
+    failed_runs: number;
+    total_steps: number;
+    failed_steps: number;
+    retry_count: number;
+    average_latency_ms: number;
+  };
+  token_usage: LLMUsage;
+  refreshed_at: string;
+};
+
 export type BrowserTaskStatus =
   | "PENDING"
   | "CONNECTING"
@@ -486,6 +526,10 @@ export function getJobs(search?: string): Promise<JobListResponse> {
   return apiFetch<JobListResponse>(`/api/jobs${query}`);
 }
 
+export function getDashboard(): Promise<DashboardResponse> {
+  return apiFetch<DashboardResponse>("/api/dashboard");
+}
+
 export function getJob(id: string): Promise<Job> {
   return apiFetch<Job>(`/api/jobs/${encodeURIComponent(id)}`);
 }
@@ -580,7 +624,7 @@ export function createAgentRun(payload: {
 
 export function agentRunAction(
   id: string,
-  action: "start" | "pause" | "cancel",
+  action: "start" | "pause" | "cancel" | "retry",
 ): Promise<AgentRun> {
   return apiFetch<AgentRun>(`/api/agent-runs/${encodeURIComponent(id)}/${action}`, {
     method: "POST",
