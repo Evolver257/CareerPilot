@@ -162,6 +162,93 @@ export type JobRankingResponse = {
   };
 };
 
+export type CampaignStatus =
+  | "DRAFT"
+  | "RANKING"
+  | "WAITING_APPROVAL"
+  | "RUNNING"
+  | "PAUSED"
+  | "COMPLETED"
+  | "CANCELLED"
+  | "FAILED";
+
+export type ApplicationStatus =
+  | "DISCOVERED"
+  | "ANALYZED"
+  | "QUALIFIED"
+  | "WAITING_APPROVAL"
+  | "APPROVED"
+  | "QUEUED"
+  | "EXECUTING"
+  | "SUBMITTED"
+  | "PAUSED"
+  | "CANCELLED"
+  | "CAPTCHA_REQUIRED"
+  | "LOGIN_REQUIRED"
+  | "PLATFORM_LIMIT"
+  | "DOM_CHANGED"
+  | "FAILED";
+
+export type Application = {
+  id: string;
+  user_id: string;
+  campaign_id: string;
+  job_id: string;
+  resume_id: string;
+  platform: string;
+  status: ApplicationStatus;
+  message: string;
+  applied_at: string | null;
+  failure_reason: string | null;
+  metadata: {
+    state_history?: Array<{ from: string | null; to: string; event: string; at: string }>;
+    [key: string]: unknown;
+  };
+  created_at: string;
+  updated_at: string;
+};
+
+export type Campaign = {
+  id: string;
+  user_id: string;
+  resume_id: string | null;
+  name: string;
+  status: CampaignStatus;
+  query: string;
+  min_score: number;
+  max_jobs: number;
+  target_cities: string[];
+  filters: Record<string, unknown>;
+  candidate_count: number;
+  waiting_approval_count: number;
+  queued_count: number;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type CampaignJob = {
+  id: string;
+  campaign_id: string;
+  job_id: string;
+  rank: number;
+  score: number;
+  status: ApplicationStatus | "REJECTED";
+  job: Job;
+  application: Application | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CampaignDetail = Campaign & { candidate_jobs: CampaignJob[] };
+
+export type CampaignListResponse = { items: Campaign[]; total: number };
+
+export type ApplicationListItem = Application & { job: Job; campaign_name: string };
+
+export type ApplicationListResponse = { items: ApplicationListItem[]; total: number };
+
 export type ResumeEducation = {
   institution: string;
   degree: string;
@@ -288,6 +375,51 @@ export function rankJobs(resumeId?: string): Promise<JobRankingResponse> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(resumeId ? { resume_id: resumeId } : {}),
   });
+}
+
+export function getCampaigns(): Promise<CampaignListResponse> {
+  return apiFetch<CampaignListResponse>("/api/campaigns");
+}
+
+export function getCampaign(id: string): Promise<CampaignDetail> {
+  return apiFetch<CampaignDetail>(`/api/campaigns/${encodeURIComponent(id)}`);
+}
+
+export function createCampaign(payload: {
+  name: string;
+  resume_id?: string;
+  query?: string;
+  keywords?: string[];
+  min_score: number;
+  max_jobs: number;
+  target_cities?: string[];
+}): Promise<CampaignDetail> {
+  return apiFetch<CampaignDetail>("/api/campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function campaignAction(
+  id: string,
+  action: "start" | "pause" | "resume" | "cancel",
+): Promise<CampaignDetail> {
+  return apiFetch<CampaignDetail>(`/api/campaigns/${encodeURIComponent(id)}/${action}`, {
+    method: "POST",
+  });
+}
+
+export function approveCampaignJobs(id: string, jobIds: string[]): Promise<CampaignDetail> {
+  return apiFetch<CampaignDetail>(`/api/campaigns/${encodeURIComponent(id)}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ job_ids: jobIds }),
+  });
+}
+
+export function getApplications(): Promise<ApplicationListResponse> {
+  return apiFetch<ApplicationListResponse>("/api/applications");
 }
 
 export function importJobs(payload: {

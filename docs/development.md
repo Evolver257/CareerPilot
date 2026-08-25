@@ -100,6 +100,26 @@ output, duration, score, and promotion decision. Only candidates promoted by
 the Reranker reach the LLM Judge. Defaults are configurable through
 `TOP_K_EMBEDDING`, `TOP_K_RERANK`, and `TOP_K_LLM`.
 
+Phase 6 Campaign Engine exposes:
+
+```text
+GET/POST /api/campaigns
+GET      /api/campaigns/{id}
+POST     /api/campaigns/{id}/start
+POST     /api/campaigns/{id}/approve
+POST     /api/campaigns/{id}/pause
+POST     /api/campaigns/{id}/resume
+POST     /api/campaigns/{id}/cancel
+GET      /api/applications
+POST     /api/applications/{id}/transition
+```
+
+Starting a Campaign searches the stored Mock Jobs, invokes the Ranking
+Pipeline, and creates candidate Applications in `WAITING_APPROVAL`. Explicit
+user approval advances selected Applications through `APPROVED` to `QUEUED`.
+The state machine records every transition and supports pause/resume, retry,
+cancel, and the browser-blocking states reserved for later phases.
+
 ## Frontend
 
 From `apps/web`:

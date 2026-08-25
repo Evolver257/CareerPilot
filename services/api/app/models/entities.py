@@ -41,6 +41,12 @@ class User(Base):
     resumes: Mapped[list[Resume]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    campaigns: Mapped[list[Campaign]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    applications: Mapped[list[Application]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class UserPreference(Base):
@@ -89,6 +95,10 @@ class Resume(Base):
         back_populates="resume", cascade="all, delete-orphan"
     )
     scores: Mapped[list[JobScore]] = relationship(
+        back_populates="resume", cascade="all, delete-orphan"
+    )
+    campaigns: Mapped[list[Campaign]] = relationship(back_populates="resume")
+    applications: Mapped[list[Application]] = relationship(
         back_populates="resume", cascade="all, delete-orphan"
     )
 
@@ -162,6 +172,12 @@ class Job(Base):
     scores: Mapped[list[JobScore]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
+    campaign_jobs: Mapped[list[CampaignJob]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
+    applications: Mapped[list[Application]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
 
 
 class JobSkill(Base):
@@ -213,3 +229,91 @@ class JobScore(Base):
 
     job: Mapped[Job] = relationship(back_populates="scores")
     resume: Mapped[Resume] = relationship(back_populates="scores")
+
+
+class Campaign(Base):
+    __tablename__ = "campaigns"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    resume_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("resumes.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(300))
+    status: Mapped[str] = mapped_column(String(40), default="DRAFT", index=True)
+    status_before_pause: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    query: Mapped[str] = mapped_column(Text, default="")
+    min_score: Mapped[float] = mapped_column(Float, default=70.0)
+    max_jobs: Mapped[int] = mapped_column(Integer, default=20)
+    target_cities: Mapped[list[str]] = mapped_column(JSON, default=list)
+    filters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="campaigns")
+    resume: Mapped[Resume | None] = relationship(back_populates="campaigns")
+    campaign_jobs: Mapped[list[CampaignJob]] = relationship(
+        back_populates="campaign", cascade="all, delete-orphan"
+    )
+    applications: Mapped[list[Application]] = relationship(
+        back_populates="campaign", cascade="all, delete-orphan"
+    )
+
+
+class CampaignJob(Base):
+    __tablename__ = "campaign_jobs"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "job_id", name="uq_campaign_jobs_campaign_job"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    campaign_id: Mapped[UUID] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    rank: Mapped[int] = mapped_column(Integer)
+    score: Mapped[float] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(40), default="WAITING_APPROVAL", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    campaign: Mapped[Campaign] = relationship(back_populates="campaign_jobs")
+    job: Mapped[Job] = relationship(back_populates="campaign_jobs")
+
+
+class Application(Base):
+    __tablename__ = "applications"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "job_id", name="uq_applications_campaign_job"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    campaign_id: Mapped[UUID] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    resume_id: Mapped[UUID] = mapped_column(
+        ForeignKey("resumes.id", ondelete="CASCADE"), index=True
+    )
+    platform: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(40), default="DISCOVERED", index=True)
+    message: Mapped[str] = mapped_column(Text, default="")
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    application_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    user: Mapped[User] = relationship(back_populates="applications")
+    campaign: Mapped[Campaign] = relationship(back_populates="applications")
+    job: Mapped[Job] = relationship(back_populates="applications")
+    resume: Mapped[Resume] = relationship(back_populates="applications")

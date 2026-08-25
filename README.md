@@ -1,10 +1,10 @@
 # CareerPilot
 
-CareerPilot is an extensible AI job-search platform foundation. Phase 1 established the web/API/database boundary, Phase 2 added Resume Intelligence, Phase 3 added Job Intelligence, Phase 4 added hybrid Resume–JD matching with Resume RAG, and Phase 5 adds cost-aware multi-stage ranking.
+CareerPilot is an extensible AI job-search platform foundation. Phase 1 established the web/API/database boundary, Phase 2 added Resume Intelligence, Phase 3 added Job Intelligence, Phase 4 added hybrid Resume–JD matching with Resume RAG, Phase 5 added cost-aware multi-stage ranking, and Phase 6 adds resumable application campaigns.
 
 ## Current status
 
-Phase 0 (repository audit) through Phase 5 (Ranking Pipeline) are implemented:
+Phase 0 (repository audit) through Phase 6 (Campaign Engine) are implemented:
 
 - Next.js web workspace for Dashboard, Jobs, Job Detail, and Resume upload/Profile/Chunks
 - FastAPI application with `/health`, Jobs read endpoints, and Resume Intelligence APIs
@@ -18,6 +18,8 @@ Phase 0 (repository audit) through Phase 5 (Ranking Pipeline) are implemented:
 - Resume RAG retrieval and reranking that supplies only relevant chunks to the Judge
 - Rule Filter → Embedding Rank → Reranker → LLM Judge → Final Ranking pipeline
 - Configurable stage limits with full candidate-level Trace and a dedicated Ranking workspace
+- Campaign, CampaignJob, and Application persistence with explicit state transitions
+- Human approval, application queuing, pause/resume/cancel, retry, and state-history tracking
 - Redis and a worker placeholder in Docker Compose
 - API parser/upload/chunk tests, migration test, frontend typecheck, lint, and production build
 
@@ -86,7 +88,7 @@ CareerPilot does not upload recruitment-site cookies, passwords, or authenticati
 3. ~~Job Intelligence and Mock Jobs~~
 4. ~~Hybrid matching and Resume RAG~~
 5. ~~Ranking pipeline~~
-6. Campaign and application state machine
+6. ~~Campaign and application state machine~~
 7. Agent runtime
 8. Browser Agent and Mock Platform
 

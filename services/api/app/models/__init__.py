@@ -1,5 +1,8 @@
 from app.models.base import Base
 from app.models.entities import (
+    Application,
+    Campaign,
+    CampaignJob,
     Company,
     Job,
     JobScore,
@@ -9,9 +12,13 @@ from app.models.entities import (
     User,
     UserPreference,
 )
+from app.models.states import ApplicationStatus, CampaignJobStatus, CampaignStatus
 
 __all__ = [
     "Base",
+    "Application",
+    "Campaign",
+    "CampaignJob",
     "Company",
     "Job",
     "JobScore",
@@ -20,4 +27,7 @@ __all__ = [
     "ResumeChunk",
     "User",
     "UserPreference",
+    "ApplicationStatus",
+    "CampaignJobStatus",
+    "CampaignStatus",
 ]
