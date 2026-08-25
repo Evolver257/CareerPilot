@@ -249,6 +249,79 @@ export type ApplicationListItem = Application & { job: Job; campaign_name: strin
 
 export type ApplicationListResponse = { items: ApplicationListItem[]; total: number };
 
+export type AgentRunStatus =
+  | "PENDING"
+  | "RUNNING"
+  | "PAUSED"
+  | "WAITING_FOR_USER"
+  | "COMPLETED"
+  | "CANCELLED"
+  | "FAILED"
+  | "TIMED_OUT";
+
+export type AgentCandidate = {
+  job_id: string;
+  title: string;
+  score: number;
+  recommendation: JobScore["recommendation"];
+  score_id: string | null;
+};
+
+export type AgentStep = {
+  id: string;
+  run_id: string;
+  sequence: number;
+  step_type: string;
+  tool_name: string | null;
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+  status: "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+  attempt: number;
+  latency_ms: number;
+  error: string | null;
+  created_at: string;
+};
+
+export type AgentEvent = {
+  id: string;
+  run_id: string;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+};
+
+export type AgentRun = {
+  id: string;
+  user_id: string;
+  campaign_id: string | null;
+  agent_type: string;
+  status: AgentRunStatus;
+  input: { goal?: string; resume_id?: string; [key: string]: unknown };
+  output: {
+    campaign_id?: string;
+    candidates?: AgentCandidate[];
+    prompt?: string;
+    user_action_required?: boolean;
+    approved?: boolean;
+    queued_count?: number;
+    [key: string]: unknown;
+  };
+  state: Record<string, unknown>;
+  memory: Record<string, unknown>;
+  max_steps: number;
+  timeout_seconds: number;
+  max_retries: number;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  steps: AgentStep[];
+  events: AgentEvent[];
+};
+
+export type AgentRunListResponse = { items: AgentRun[]; total: number };
+
 export type ResumeEducation = {
   institution: string;
   degree: string;
@@ -420,6 +493,49 @@ export function approveCampaignJobs(id: string, jobIds: string[]): Promise<Campa
 
 export function getApplications(): Promise<ApplicationListResponse> {
   return apiFetch<ApplicationListResponse>("/api/applications");
+}
+
+export function getAgentRuns(): Promise<AgentRunListResponse> {
+  return apiFetch<AgentRunListResponse>("/api/agent-runs");
+}
+
+export function getAgentRun(id: string): Promise<AgentRun> {
+  return apiFetch<AgentRun>(`/api/agent-runs/${encodeURIComponent(id)}`);
+}
+
+export function createAgentRun(payload: {
+  goal: string;
+  resume_id?: string;
+  auto_start?: boolean;
+  max_steps?: number;
+  timeout_seconds?: number;
+  max_retries?: number;
+}): Promise<AgentRun> {
+  return apiFetch<AgentRun>("/api/agent-runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function agentRunAction(
+  id: string,
+  action: "start" | "pause" | "cancel",
+): Promise<AgentRun> {
+  return apiFetch<AgentRun>(`/api/agent-runs/${encodeURIComponent(id)}/${action}`, {
+    method: "POST",
+  });
+}
+
+export function resumeAgentRun(
+  id: string,
+  payload: { approved?: boolean; selected_job_ids?: string[] } = {},
+): Promise<AgentRun> {
+  return apiFetch<AgentRun>(`/api/agent-runs/${encodeURIComponent(id)}/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
 export function importJobs(payload: {

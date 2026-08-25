@@ -1,5 +1,8 @@
 from app.models.base import Base
 from app.models.entities import (
+    AgentEvent,
+    AgentRun,
+    AgentStep,
     Application,
     Campaign,
     CampaignJob,
@@ -12,11 +15,21 @@ from app.models.entities import (
     User,
     UserPreference,
 )
-from app.models.states import ApplicationStatus, CampaignJobStatus, CampaignStatus
+from app.models.states import (
+    AgentEventType,
+    AgentRunStatus,
+    AgentStepStatus,
+    ApplicationStatus,
+    CampaignJobStatus,
+    CampaignStatus,
+)
 
 __all__ = [
     "Base",
     "Application",
+    "AgentEvent",
+    "AgentRun",
+    "AgentStep",
     "Campaign",
     "CampaignJob",
     "Company",
@@ -28,6 +41,9 @@ __all__ = [
     "User",
     "UserPreference",
     "ApplicationStatus",
+    "AgentEventType",
+    "AgentRunStatus",
+    "AgentStepStatus",
     "CampaignJobStatus",
     "CampaignStatus",
 ]

@@ -1,10 +1,10 @@
 # CareerPilot
 
-CareerPilot is an extensible AI job-search platform foundation. Phase 1 established the web/API/database boundary, Phase 2 added Resume Intelligence, Phase 3 added Job Intelligence, Phase 4 added hybrid Resume–JD matching with Resume RAG, Phase 5 added cost-aware multi-stage ranking, and Phase 6 adds resumable application campaigns.
+CareerPilot is an extensible AI job-search platform foundation. Phase 1 established the web/API/database boundary, Phase 2 added Resume Intelligence, Phase 3 added Job Intelligence, Phase 4 added hybrid Resume–JD matching with Resume RAG, Phase 5 added cost-aware multi-stage ranking, Phase 6 added resumable application campaigns, and Phase 7 adds a traceable Agent Runtime.
 
 ## Current status
 
-Phase 0 (repository audit) through Phase 6 (Campaign Engine) are implemented:
+Phase 0 (repository audit) through Phase 7 (Agent Runtime) are implemented:
 
 - Next.js web workspace for Dashboard, Jobs, Job Detail, and Resume upload/Profile/Chunks
 - FastAPI application with `/health`, Jobs read endpoints, and Resume Intelligence APIs
@@ -20,13 +20,17 @@ Phase 0 (repository audit) through Phase 6 (Campaign Engine) are implemented:
 - Configurable stage limits with full candidate-level Trace and a dedicated Ranking workspace
 - Campaign, CampaignJob, and Application persistence with explicit state transitions
 - Human approval, application queuing, pause/resume/cancel, retry, and state-history tracking
+- Single-Orchestrator Agent Runtime with Planner, Executor, Tool Registry, state, and memory checkpoints
+- Nine schema-validated job-search tools with retry, timeout, max-step, pause/resume, and cancel controls
+- Persistent AgentRun, AgentStep, and AgentEvent trace plus SSE event streaming
+- Agent Runs workspace with expandable Tool Input/Output, status, latency, and approval controls
 - Redis and a worker placeholder in Docker Compose
 - API parser/upload/chunk tests, migration test, frontend typecheck, lint, and production build
 
 ## Architecture
 
 ```text
-Next.js Web  ── REST ──>  FastAPI API  ──>  SQLAlchemy 2  ──> PostgreSQL
+Next.js Web  ── REST/SSE ──>  FastAPI API  ──>  SQLAlchemy 2  ──> PostgreSQL
        │                       │
        │                       └──────────────> Redis / Worker
        │
@@ -49,6 +53,7 @@ Then open:
 - Web: http://localhost:3000/dashboard
 - API docs: http://localhost:8000/docs
 - Health: http://localhost:8000/health
+- Agent Runs: http://localhost:3000/agent-runs
 
 If port 8000 is already in use, start the API on another host port while keeping the container port unchanged:
 
@@ -89,7 +94,7 @@ CareerPilot does not upload recruitment-site cookies, passwords, or authenticati
 4. ~~Hybrid matching and Resume RAG~~
 5. ~~Ranking pipeline~~
 6. ~~Campaign and application state machine~~
-7. Agent runtime
+7. ~~Agent runtime~~
 8. Browser Agent and Mock Platform
 
 See [docs/phase-0-audit.md](docs/phase-0-audit.md), [docs/architecture.md](docs/architecture.md), and [docs/development.md](docs/development.md) for implementation notes.

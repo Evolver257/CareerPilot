@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.llm.provider import LLMProvider, MockLLMProvider
+from app.services.agent_runtime import AgentRuntime
 from app.services.campaigns import CampaignService
 from app.services.jobs import JobService
 from app.services.matching import MatchingService
@@ -45,3 +46,10 @@ def get_campaign_service(
     provider: LLMProvider = Depends(get_llm_provider),
 ) -> CampaignService:
     return CampaignService(session, provider)
+
+
+def get_agent_runtime(
+    session: AsyncSession = Depends(get_db),
+    provider: LLMProvider = Depends(get_llm_provider),
+) -> AgentRuntime:
+    return AgentRuntime(session, provider)

@@ -47,6 +47,9 @@ class User(Base):
     applications: Mapped[list[Application]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    agent_runs: Mapped[list[AgentRun]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class UserPreference(Base):
@@ -262,6 +265,7 @@ class Campaign(Base):
     applications: Mapped[list[Application]] = relationship(
         back_populates="campaign", cascade="all, delete-orphan"
     )
+    agent_runs: Mapped[list[AgentRun]] = relationship(back_populates="campaign")
 
 
 class CampaignJob(Base):
@@ -317,3 +321,75 @@ class Application(Base):
     campaign: Mapped[Campaign] = relationship(back_populates="applications")
     job: Mapped[Job] = relationship(back_populates="applications")
     resume: Mapped[Resume] = relationship(back_populates="applications")
+
+
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    campaign_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    agent_type: Mapped[str] = mapped_column(String(100), default="job_search_orchestrator")
+    status: Mapped[str] = mapped_column(String(40), default="PENDING", index=True)
+    status_before_pause: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    run_input: Mapped[dict[str, Any]] = mapped_column("input", JSON, default=dict)
+    run_output: Mapped[dict[str, Any]] = mapped_column("output", JSON, default=dict)
+    agent_state: Mapped[dict[str, Any]] = mapped_column("state", JSON, default=dict)
+    memory: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    max_steps: Mapped[int] = mapped_column(Integer, default=12)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    max_retries: Mapped[int] = mapped_column(Integer, default=2)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="agent_runs")
+    campaign: Mapped[Campaign | None] = relationship(back_populates="agent_runs")
+    steps: Mapped[list[AgentStep]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
+    events: Mapped[list[AgentEvent]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
+
+
+class AgentStep(Base):
+    __tablename__ = "agent_steps"
+    __table_args__ = (UniqueConstraint("run_id", "sequence", name="uq_agent_steps_sequence"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    step_type: Mapped[str] = mapped_column(String(50))
+    tool_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    step_input: Mapped[dict[str, Any]] = mapped_column("input", JSON, default=dict)
+    step_output: Mapped[dict[str, Any]] = mapped_column("output", JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    run: Mapped[AgentRun] = relationship(back_populates="steps")
+
+
+class AgentEvent(Base):
+    __tablename__ = "agent_events"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(100), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    run: Mapped[AgentRun] = relationship(back_populates="events")
