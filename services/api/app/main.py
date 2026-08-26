@@ -8,12 +8,24 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import agents, browser_tasks, campaigns, dashboard, health, jobs, resumes
+from app.api import (
+    agents,
+    browser_tasks,
+    campaigns,
+    dashboard,
+    health,
+    jobs,
+    llm,
+    platforms,
+    resumes,
+)
 from app.core.config import get_settings
+from app.services.ranking_runs import fail_interrupted_ranking_runs
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    await fail_interrupted_ranking_runs()
     yield
 
 
@@ -93,3 +105,5 @@ app.include_router(campaigns.applications_router)
 app.include_router(agents.router)
 app.include_router(browser_tasks.router)
 app.include_router(dashboard.router)
+app.include_router(platforms.router)
+app.include_router(llm.router)

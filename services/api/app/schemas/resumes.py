@@ -55,6 +55,12 @@ class ResumeProfile(BaseModel):
     summary: str = ""
 
 
+class ResumeUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    raw_text: str | None = Field(default=None, min_length=1)
+    is_default: bool | None = None
+
+
 class ResumeRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

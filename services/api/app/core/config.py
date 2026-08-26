@@ -17,6 +17,20 @@ class Settings(BaseSettings):
     )
     embedding_dimensions: int = Field(default=384, validation_alias="EMBEDDING_DIMENSIONS")
     embedding_model: str = Field(default="mock-hash-384", validation_alias="EMBEDDING_MODEL")
+    llm_provider: str = Field(default="mock", validation_alias="LLM_PROVIDER")
+    llm_api_key: str = Field(default="", validation_alias="LLM_API_KEY")
+    llm_model: str = Field(default="", validation_alias="LLM_MODEL")
+    llm_base_url: str = Field(default="", validation_alias="LLM_BASE_URL")
+    llm_structured_max_tokens: int = Field(
+        default=8192, gt=0, validation_alias="LLM_STRUCTURED_MAX_TOKENS"
+    )
+    llm_structured_retry_max_tokens: int = Field(
+        default=12288, gt=0, validation_alias="LLM_STRUCTURED_RETRY_MAX_TOKENS"
+    )
+    llm_encryption_key: str = Field(
+        default="development-only-change-me",
+        validation_alias="LLM_ENCRYPTION_KEY",
+    )
     default_user_email: str = Field(
         default="demo@careerpilot.local", validation_alias="DEFAULT_USER_EMAIL"
     )
@@ -45,8 +59,8 @@ class Settings(BaseSettings):
     )
     ranking_candidate_limit: int = Field(default=300, validation_alias="RANKING_CANDIDATE_LIMIT")
     top_k_embedding: int = Field(default=100, validation_alias="TOP_K_EMBEDDING")
-    top_k_rerank: int = Field(default=30, validation_alias="TOP_K_RERANK")
-    top_k_llm: int = Field(default=15, validation_alias="TOP_K_LLM")
+    top_k_rerank: int = Field(default=10, validation_alias="TOP_K_RERANK")
+    top_k_llm: int = Field(default=10, validation_alias="TOP_K_LLM")
     final_ranking_top_k: int = Field(default=10, validation_alias="FINAL_RANKING_TOP_K")
     ranking_version: str = Field(default="RANKING_V1", validation_alias="RANKING_VERSION")
 

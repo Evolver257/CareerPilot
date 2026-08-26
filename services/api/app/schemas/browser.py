@@ -52,6 +52,13 @@ class BrowserTaskCreate(BaseModel):
     auto_start: bool = True
 
 
+class BrowserTaskCampaignCreate(BaseModel):
+    campaign_id: UUID
+    platform: str | None = Field(default=None, min_length=1, max_length=100)
+    scenario: str = Field(default="SUCCESS", min_length=1, max_length=40)
+    auto_start: bool = True
+
+
 class BrowserTaskResumeRequest(BaseModel):
     decision: str = Field(default="resolved", min_length=1, max_length=40)
     note: str | None = Field(default=None, max_length=2000)
@@ -91,6 +98,21 @@ class BrowserTaskRead(BaseModel):
 class BrowserTaskListResponse(BaseModel):
     items: list[BrowserTaskRead]
     total: int
+
+
+class BrowserTaskCampaignFailure(BaseModel):
+    application_id: UUID
+    reason: str
+
+
+class BrowserTaskCampaignResponse(BaseModel):
+    campaign_id: UUID
+    queued_count: int
+    created_count: int
+    reused_count: int
+    failed_count: int
+    items: list[BrowserTaskRead]
+    failures: list[BrowserTaskCampaignFailure]
 
 
 class PlatformAdapterRead(BaseModel):

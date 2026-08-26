@@ -83,6 +83,60 @@ async def test_mock_browser_task_completes_application_and_records_actions(
     assert submitted["applied_at"] is not None
 
 
+async def test_campaign_browser_tasks_create_all_queued_applications_idempotently(
+    client: AsyncClient,
+) -> None:
+    application_ids = await _create_queued_applications(client)
+    applications = await client.get("/api/applications")
+    campaign_id = next(
+        item["campaign_id"]
+        for item in applications.json()["items"]
+        if item["id"] == application_ids[0]
+    )
+
+    created = await client.post(
+        "/api/browser-tasks/campaign",
+        json={
+            "campaign_id": campaign_id,
+            "scenario": "SUCCESS",
+            "auto_start": False,
+        },
+    )
+    assert created.status_code == 201
+    batch = created.json()
+    assert batch["queued_count"] == 2
+    assert batch["created_count"] == 2
+    assert batch["reused_count"] == 0
+    assert batch["failed_count"] == 0
+    assert {item["application_id"] for item in batch["items"]} == set(application_ids)
+    assert {item["status"] for item in batch["items"]} == {"PENDING"}
+
+    repeated = await client.post(
+        "/api/browser-tasks/campaign",
+        json={
+            "campaign_id": campaign_id,
+            "scenario": "SUCCESS",
+            "auto_start": False,
+        },
+    )
+    assert repeated.status_code == 201
+    assert repeated.json()["created_count"] == 0
+    assert repeated.json()["reused_count"] == 2
+
+    for task in batch["items"]:
+        completed = await client.post(f"/api/browser-tasks/{task['id']}/mock-extension")
+        assert completed.status_code == 200
+        assert completed.json()["status"] == "COMPLETED"
+
+    refreshed = await client.get("/api/applications")
+    statuses = {
+        item["id"]: item["status"]
+        for item in refreshed.json()["items"]
+        if item["id"] in application_ids
+    }
+    assert statuses == {application_id: "SUBMITTED" for application_id in application_ids}
+
+
 async def test_mock_browser_task_pauses_on_captcha_and_resumes_after_user_action(
     client: AsyncClient,
 ) -> None:

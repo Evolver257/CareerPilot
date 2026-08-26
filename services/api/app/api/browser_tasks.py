@@ -15,6 +15,9 @@ from app.models.states import BrowserTaskStatus
 from app.schemas.browser import (
     BrowserActionResult,
     BrowserExtensionHello,
+    BrowserTaskCampaignCreate,
+    BrowserTaskCampaignFailure,
+    BrowserTaskCampaignResponse,
     BrowserTaskCreate,
     BrowserTaskEventRead,
     BrowserTaskListResponse,
@@ -87,6 +90,33 @@ async def create_browser_task(
         return _task_read(await service.create(payload))
     except BrowserTaskActionError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post(
+    "/campaign",
+    response_model=BrowserTaskCampaignResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_campaign_browser_tasks(
+    payload: BrowserTaskCampaignCreate,
+    service: BrowserTaskService = Depends(get_browser_task_service),
+) -> BrowserTaskCampaignResponse:
+    try:
+        result = await service.create_for_campaign(payload)
+    except BrowserTaskActionError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return BrowserTaskCampaignResponse(
+        campaign_id=result.campaign_id,
+        queued_count=result.queued_count,
+        created_count=len(result.created),
+        reused_count=len(result.reused),
+        failed_count=len(result.failures),
+        items=[_task_read(task) for task in result.tasks],
+        failures=[
+            BrowserTaskCampaignFailure(application_id=application_id, reason=reason)
+            for application_id, reason in result.failures
+        ],
+    )
 
 
 @router.get("/platforms", response_model=list[PlatformAdapterRead])

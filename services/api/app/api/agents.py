@@ -15,6 +15,7 @@ from app.schemas.agents import (
     AgentRunListResponse,
     AgentRunRead,
     AgentRunResumeRequest,
+    AgentRunUpdate,
     AgentStepRead,
     AgentToolRead,
 )
@@ -123,6 +124,33 @@ async def get_agent_run(
         return _run_read(await runtime.get_run(run_id))
     except AgentRunNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.patch("/{run_id}", response_model=AgentRunRead)
+async def update_agent_run(
+    run_id: UUID,
+    payload: AgentRunUpdate,
+    runtime: AgentRuntime = Depends(get_agent_runtime),
+) -> AgentRunRead:
+    try:
+        return _run_read(await runtime.update(run_id, payload))
+    except AgentRunNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except AgentRunActionError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_agent_run(
+    run_id: UUID,
+    runtime: AgentRuntime = Depends(get_agent_runtime),
+) -> None:
+    try:
+        await runtime.delete(run_id)
+    except AgentRunNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except AgentRunActionError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 async def _run_action(run_id: UUID, action, runtime: AgentRuntime) -> AgentRunRead:

@@ -65,7 +65,23 @@ class ResumeSemanticChunker:
         lines: list[str] = []
         for entry in entries:
             values = entry.model_dump(exclude_none=True)
-            lines.append("; ".join(f"{key}: {value}" for key, value in values.items() if value))
+            rendered: list[str] = []
+            seen: set[str] = set()
+            for key, value in values.items():
+                if not value:
+                    continue
+                text = (
+                    "、".join(str(item) for item in value)
+                    if isinstance(value, list)
+                    else str(value)
+                )
+                normalized = text.strip().casefold()
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                rendered.append(f"{key}: {text}")
+            if rendered:
+                lines.append("；".join(rendered))
         return "\n".join(lines)
 
     def _split(self, content: str) -> list[str]:

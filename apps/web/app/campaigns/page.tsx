@@ -6,8 +6,10 @@ import { useEffect, useState } from "react";
 
 import {
   createCampaign,
+  deleteCampaign,
   getCampaigns,
   getResumes,
+  updateCampaign,
   type Campaign,
   type Resume,
 } from "../../lib/api";
@@ -35,6 +37,7 @@ export default function CampaignsPage() {
   const [maxJobs, setMaxJobs] = useState(10);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [maintaining, setMaintaining] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -70,11 +73,60 @@ export default function CampaignsPage() {
     }
   }
 
+  async function reloadCampaigns() {
+    const response = await getCampaigns();
+    setCampaigns(response.items);
+  }
+
+  async function handleEdit(campaign: Campaign) {
+    const nextName = window.prompt("计划名称", campaign.name);
+    if (nextName === null) return;
+    const currentKeywords = Array.isArray(campaign.filters.keywords) ? campaign.filters.keywords.join(", ") : "";
+    const nextKeywords = window.prompt("关键词（逗号分隔）", currentKeywords);
+    if (nextKeywords === null) return;
+    const nextCities = window.prompt("目标城市（逗号分隔）", campaign.target_cities.join(", "));
+    if (nextCities === null) return;
+    const nextMinScore = window.prompt("最低匹配分数", String(campaign.min_score));
+    if (nextMinScore === null) return;
+    const nextMaxJobs = window.prompt("最大职位数", String(campaign.max_jobs));
+    if (nextMaxJobs === null) return;
+    setMaintaining(true);
+    setError(null);
+    try {
+      await updateCampaign(campaign.id, {
+        name: nextName.trim(),
+        keywords: nextKeywords.split(/[,，]/).map((value) => value.trim()).filter(Boolean),
+        target_cities: nextCities.split(/[,，]/).map((value) => value.trim()).filter(Boolean),
+        min_score: Number(nextMinScore),
+        max_jobs: Number(nextMaxJobs),
+      });
+      await reloadCampaigns();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "投递计划保存失败。");
+    } finally {
+      setMaintaining(false);
+    }
+  }
+
+  async function handleDelete(campaign: Campaign) {
+    if (!window.confirm(`确定删除投递计划“${campaign.name}”及其关联投递记录吗？运行中的计划需先取消。`)) return;
+    setMaintaining(true);
+    setError(null);
+    try {
+      await deleteCampaign(campaign.id);
+      await reloadCampaigns();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "投递计划删除失败。");
+    } finally {
+      setMaintaining(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-7xl space-y-8">
       <header>
-        <p className="eyebrow">Application Campaign</p>
-        <h1 className="mt-3 text-3xl font-semibold tracking-tight">Campaign 管理</h1>
+        <p className="eyebrow">投递计划</p>
+        <h1 className="mt-3 text-3xl font-semibold tracking-tight">管理投递计划</h1>
         <p className="mt-3 max-w-3xl text-slate-500">把职位搜索、智能排名、人工确认和投递队列组织为可暂停、可恢复的计划。</p>
       </header>
 
@@ -82,7 +134,7 @@ export default function CampaignsPage() {
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <p className="eyebrow">Create</p>
-            <h2 className="mt-2 text-xl font-semibold">创建 Campaign</h2>
+            <h2 className="mt-2 text-xl font-semibold">创建投递计划</h2>
           </div>
           <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700">创建后由你手动 Start</span>
         </div>
@@ -116,7 +168,7 @@ export default function CampaignsPage() {
           </label>
         </div>
         <button className="mt-5 rounded-xl bg-indigo-600 px-5 py-3 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50" disabled={creating || !name.trim() || !resumeId} onClick={() => void handleCreate()} type="button">
-          {creating ? "创建中…" : "创建 Campaign"}
+          {creating ? "创建中…" : "创建投递计划"}
         </button>
       </section>
 
@@ -124,16 +176,16 @@ export default function CampaignsPage() {
 
       <section>
         <div className="mb-4 flex items-end justify-between gap-4">
-          <div><p className="eyebrow">Campaign List</p><h2 className="mt-2 text-xl font-semibold">投递计划</h2></div>
-          <p className="text-sm text-slate-500">{campaigns.length} 个 Campaign</p>
+          <div><p className="eyebrow">计划列表</p><h2 className="mt-2 text-xl font-semibold">已有计划</h2></div>
+          <p className="text-sm text-slate-500">{campaigns.length} 个计划</p>
         </div>
         {loading && <div className="panel text-center text-slate-500">加载中…</div>}
-        {!loading && campaigns.length === 0 && <div className="panel text-center text-slate-500">还没有 Campaign，可以从上方创建。</div>}
+        {!loading && campaigns.length === 0 && <div className="panel text-center text-slate-500">还没有投递计划，可以从上方创建。</div>}
         <div className="grid gap-4 lg:grid-cols-2">
           {campaigns.map((campaign) => (
-            <Link className="panel block transition hover:-translate-y-0.5 hover:border-indigo-200 hover:shadow-md" href={`/campaigns/${campaign.id}`} key={campaign.id}>
+            <article className="panel transition hover:border-indigo-200 hover:shadow-md" key={campaign.id}>
               <div className="flex items-start justify-between gap-4">
-                <div><h3 className="font-semibold text-slate-900">{campaign.name}</h3><p className="mt-2 text-sm text-slate-500">最低 {campaign.min_score} 分 · 最多 {campaign.max_jobs} 个职位</p></div>
+                <div><Link className="font-semibold text-slate-900 hover:text-indigo-700" href={`/campaigns/${campaign.id}`}>{campaign.name}</Link><p className="mt-2 text-sm text-slate-500">最低 {campaign.min_score} 分 · 最多 {campaign.max_jobs} 个职位</p></div>
                 <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">{statusLabels[campaign.status]}</span>
               </div>
               <div className="mt-5 grid grid-cols-3 gap-3 border-t border-slate-100 pt-4 text-center">
@@ -141,7 +193,8 @@ export default function CampaignsPage() {
                 <div><p className="text-xs text-slate-400">待确认</p><p className="mt-1 font-semibold">{campaign.waiting_approval_count}</p></div>
                 <div><p className="text-xs text-slate-400">已排队</p><p className="mt-1 font-semibold">{campaign.queued_count}</p></div>
               </div>
-            </Link>
+              <div className="mt-4 flex justify-end gap-3 border-t border-slate-100 pt-4 text-sm"><Link className="font-medium text-indigo-700" href={`/campaigns/${campaign.id}`}>查看详情</Link>{campaign.status === "DRAFT" && <button className="font-medium text-indigo-700" disabled={maintaining} onClick={() => void handleEdit(campaign)} type="button">编辑</button>}<button className="font-medium text-rose-600 disabled:opacity-40" disabled={maintaining} onClick={() => void handleDelete(campaign)} type="button">删除</button></div>
+            </article>
           ))}
         </div>
       </section>

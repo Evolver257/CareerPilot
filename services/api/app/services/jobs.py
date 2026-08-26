@@ -1,13 +1,14 @@
 from dataclasses import dataclass
 from uuid import UUID
 
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.entities import Job, JobSkill
+from app.models.entities import Application, CampaignJob, Job, JobScore, JobSkill
 from app.repositories.jobs import JobRepository
 from app.schemas.job_intelligence import JobImportRequest
-from app.schemas.jobs import JobCreate
+from app.schemas.jobs import JobCreate, JobUpdate
 from app.services.job_intelligence import JobAnalysis, JobNormalizer
 from app.services.mock_jobs import MOCK_JOB_DATASET
 
@@ -18,6 +19,14 @@ class DuplicateJobError(ValueError):
 
 class InvalidJobImportError(ValueError):
     """Raised when an imported JD cannot be analyzed."""
+
+
+class JobNotFoundError(ValueError):
+    """Raised when a requested job does not exist."""
+
+
+class JobInUseError(ValueError):
+    """Raised when deleting a job would remove application history."""
 
 
 @dataclass(frozen=True)
@@ -64,6 +73,66 @@ class JobService:
             await self.session.rollback()
             raise DuplicateJobError("A job with the same unique key already exists") from exc
 
+    async def update_job(self, job_id: UUID, payload: JobUpdate) -> Job:
+        job = await self.repository.get(job_id)
+        if job is None:
+            raise JobNotFoundError("Job not found")
+
+        values = payload.model_dump(exclude_unset=True, exclude={"source_url"})
+        description_changed = "description" in values
+        if description_changed:
+            analysis = self.normalizer.analyze(
+                str(values["description"]),
+                title_hint=str(values.get("title") or job.title),
+            )
+            job.description = str(values["description"])
+            job.content_hash = analysis.content_hash
+            self._apply_analysis(job, analysis)
+            job.skills.clear()
+            await self.session.flush()
+            self.session.add_all(self._skill_entities(job, analysis))
+
+        for field, value in values.items():
+            if field != "description":
+                setattr(job, field, value)
+        if {"salary_min", "salary_max"}.intersection(values):
+            job.raw_data = {
+                key: value
+                for key, value in (job.raw_data or {}).items()
+                if key != "salary_text"
+            }
+        if values or "source_url" in payload.model_fields_set:
+            await self.session.execute(delete(JobScore).where(JobScore.job_id == job.id))
+        if "source_url" in payload.model_fields_set:
+            job.source_url = str(payload.source_url) if payload.source_url else None
+        try:
+            await self.session.commit()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            raise DuplicateJobError("Another job already has the same content") from exc
+        refreshed = await self.repository.get(job.id)
+        if refreshed is None:
+            raise JobNotFoundError("Job disappeared during persistence")
+        return refreshed
+
+    async def delete_job(self, job_id: UUID) -> None:
+        job = await self.repository.get(job_id)
+        if job is None:
+            raise JobNotFoundError("Job not found")
+        referenced = await self.session.scalar(
+            select(CampaignJob.id)
+            .where(CampaignJob.job_id == job_id)
+            .limit(1)
+        ) or await self.session.scalar(
+            select(Application.id).where(Application.job_id == job_id).limit(1)
+        )
+        if referenced:
+            raise JobInUseError(
+                "Job is used by an application plan and cannot be deleted"
+            )
+        await self.session.delete(job)
+        await self.session.commit()
+
     async def import_jobs(self, payload: JobImportRequest) -> JobImportResult:
         if payload.mode == "mock":
             seeds = MOCK_JOB_DATASET[: payload.limit]
@@ -107,12 +176,47 @@ class JobService:
         if job is None:
             return None
         analysis = self.normalizer.analyze(job.description, title_hint=job.title)
+        normalized = self._normalized_data(analysis)
+        if job.normalized_data == normalized and job.skills:
+            return job
         self._apply_analysis(job, analysis)
         job.skills.clear()
         await self.session.flush()
+        await self.session.execute(delete(JobScore).where(JobScore.job_id == job.id))
         self.session.add_all(self._skill_entities(job, analysis))
         await self.session.commit()
         return await self.repository.get(job.id)
+
+    async def refresh_imported_job(
+        self,
+        job_id: UUID,
+        *,
+        raw_jd: str,
+        raw_data: dict[str, object],
+        title: str,
+        location: str | None,
+        source_url: str,
+    ) -> Job:
+        job = await self.repository.get(job_id)
+        if job is None:
+            raise InvalidJobImportError("Imported job disappeared before refresh")
+
+        analysis = self.normalizer.analyze(raw_jd, title_hint=title)
+        job.description = raw_jd
+        job.raw_data = {**(job.raw_data or {}), **raw_data}
+        job.title = title or job.title
+        job.location = location or job.location
+        job.source_url = source_url or job.source_url
+        self._apply_analysis(job, analysis)
+        job.skills.clear()
+        await self.session.flush()
+        await self.session.execute(delete(JobScore).where(JobScore.job_id == job.id))
+        self.session.add_all(self._skill_entities(job, analysis))
+        await self.session.commit()
+        refreshed = await self.repository.get(job.id)
+        if refreshed is None:
+            raise InvalidJobImportError("Refreshed job disappeared during persistence")
+        return refreshed
 
     async def _import_one(
         self,
@@ -167,7 +271,7 @@ class JobService:
     @staticmethod
     def _normalized_data(analysis: JobAnalysis) -> dict[str, object]:
         return {
-            "analysis_version": "JOB_EXTRACTION_V1",
+            "analysis_version": "JOB_EXTRACTION_V2",
             "structured_job": analysis.structured_job.model_dump(),
             "requirements": analysis.requirements.model_dump(),
             "skills": [skill.name for skill in analysis.skills],

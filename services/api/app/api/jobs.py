@@ -1,8 +1,13 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 
-from app.api.dependencies import get_job_service, get_matching_service, get_ranking_service
+from app.api.dependencies import (
+    get_job_service,
+    get_matching_service,
+    get_ranking_run_service,
+    get_ranking_service,
+)
 from app.schemas.job_intelligence import (
     JobAnalysisRead,
     JobImportRequest,
@@ -11,16 +16,28 @@ from app.schemas.job_intelligence import (
     JobSkillRead,
     StructuredJob,
 )
-from app.schemas.jobs import JobCreate, JobListResponse, JobRead
+from app.schemas.jobs import JobCreate, JobListResponse, JobRead, JobUpdate
 from app.schemas.matching import JobScoreRead, JobScoreRequest
-from app.schemas.ranking import JobRankingRequest, JobRankingResponse
-from app.services.jobs import DuplicateJobError, InvalidJobImportError, JobService
+from app.schemas.ranking import JobRankingRequest, JobRankingResponse, RankingRunRead
+from app.services.jobs import (
+    DuplicateJobError,
+    InvalidJobImportError,
+    JobInUseError,
+    JobNotFoundError,
+    JobService,
+)
 from app.services.matching import (
     MatchingJobNotFoundError,
     MatchingResumeNotFoundError,
     MatchingService,
 )
 from app.services.ranking import RankingService
+from app.services.ranking_runs import (
+    RankingRunNotFoundError,
+    RankingRunNotReadyError,
+    RankingRunService,
+    execute_ranking_run,
+)
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -96,6 +113,48 @@ async def rank_jobs(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
+@router.post(
+    "/rank-runs",
+    response_model=RankingRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_ranking_run(
+    payload: JobRankingRequest,
+    background_tasks: BackgroundTasks,
+    service: RankingRunService = Depends(get_ranking_run_service),
+) -> RankingRunRead:
+    try:
+        run = await service.create(payload)
+    except MatchingResumeNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    background_tasks.add_task(execute_ranking_run, run.id)
+    return RankingRunRead.model_validate(run)
+
+
+@router.get("/rank-runs/{run_id}", response_model=RankingRunRead)
+async def get_ranking_run(
+    run_id: UUID,
+    service: RankingRunService = Depends(get_ranking_run_service),
+) -> RankingRunRead:
+    try:
+        return RankingRunRead.model_validate(await service.get(run_id))
+    except RankingRunNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.get("/rank-runs/{run_id}/result", response_model=JobRankingResponse)
+async def get_ranking_run_result(
+    run_id: UUID,
+    service: RankingRunService = Depends(get_ranking_run_service),
+) -> JobRankingResponse:
+    try:
+        return await service.get_result(run_id)
+    except RankingRunNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RankingRunNotReadyError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
 @router.post("/{job_id}/analyze", response_model=JobAnalysisRead)
 async def analyze_job(
     job_id: UUID, service: JobService = Depends(get_job_service)
@@ -116,6 +175,7 @@ async def score_job(
         score = await service.score(
             job_id=job_id,
             resume_id=payload.resume_id if payload else None,
+            force=payload.force if payload else False,
         )
     except MatchingJobNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -130,3 +190,30 @@ async def get_job(job_id: UUID, service: JobService = Depends(get_job_service)) 
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return job
+
+
+@router.patch("/{job_id}", response_model=JobRead)
+async def update_job(
+    job_id: UUID,
+    payload: JobUpdate,
+    service: JobService = Depends(get_job_service),
+) -> JobRead:
+    try:
+        return await service.update_job(job_id, payload)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except DuplicateJobError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_job(
+    job_id: UUID,
+    service: JobService = Depends(get_job_service),
+) -> None:
+    try:
+        await service.delete_job(job_id)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except JobInUseError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc

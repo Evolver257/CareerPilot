@@ -8,9 +8,22 @@ export const metadata: Metadata = {
   description: "AI-assisted job search foundation"
 };
 
+const themeScript = `(() => {
+  try {
+    const storedTheme = window.localStorage.getItem("careerpilot-theme");
+    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    if (storedTheme === "dark" || (!storedTheme && prefersDark)) {
+      document.documentElement.classList.add("dark");
+    }
+  } catch {}
+})();`;
+
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="zh-CN">
+    <html lang="zh-CN" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+      </head>
       <body>
         <div className="min-h-screen lg:flex">
           <Navigation />

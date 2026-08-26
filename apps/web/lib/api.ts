@@ -37,6 +37,8 @@ export type JobRequirements = {
   education: string;
   experience: string;
   responsibilities: string[];
+  qualifications: string[];
+  preferred_qualifications: string[];
 };
 
 export type StructuredJob = {
@@ -111,6 +113,8 @@ export type JobScore = {
   recommendation: "strong_apply" | "apply" | "maybe" | "skip";
   reasoning_summary: string;
   score_version: string;
+  input_fingerprint: string | null;
+  judge_source: "llm" | "fallback";
   weights: Record<string, number>;
   created_at: string;
 };
@@ -120,7 +124,10 @@ export type RankingStageName =
   | "embedding_rank"
   | "reranker"
   | "llm_judge"
+  | "deterministic_rank"
   | "final_ranking";
+
+export type RankingScoringMode = "fast" | "llm";
 
 export type RankingTraceCandidate = {
   job_id: string;
@@ -151,6 +158,8 @@ export type JobRankingResponse = {
     started_at: string;
     completed_at: string;
     llm_calls: number;
+    cache_hits: number;
+    fallback_count: number;
     token_usage: LLMUsage;
     config: {
       candidate_limit: number;
@@ -158,9 +167,28 @@ export type JobRankingResponse = {
       top_k_rerank: number;
       top_k_llm: number;
       final_top_k: number;
+      scoring_mode: RankingScoringMode;
     };
     stages: RankingTraceStage[];
   };
+};
+
+export type RankingRun = {
+  id: string;
+  resume_id: string;
+  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  stage: string;
+  progress: number;
+  processed_candidates: number;
+  total_candidates: number;
+  cache_hits: number;
+  llm_calls: number;
+  fallback_count: number;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
 };
 
 export type CampaignStatus =
@@ -333,6 +361,31 @@ export type LLMUsage = {
   source: string;
 };
 
+export type LLMProviderName = "openai" | "anthropic";
+export type ActiveLLMProvider = "mock" | LLMProviderName;
+
+export type LLMProviderCredential = {
+  provider: LLMProviderName;
+  model: string;
+  base_url: string;
+  api_key_hint: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type LLMSettings = {
+  active_provider: ActiveLLMProvider;
+  providers: LLMProviderCredential[];
+};
+
+export type LLMConnectionTestResult = {
+  provider: LLMProviderName;
+  model: string;
+  latency_ms: number;
+  message: string;
+};
+
 export type DashboardResponse = {
   summary: {
     jobs_total: number;
@@ -415,11 +468,45 @@ export type BrowserTask = {
 
 export type BrowserTaskListResponse = { items: BrowserTask[]; total: number };
 
+export type BrowserTaskCampaignResponse = {
+  campaign_id: string;
+  queued_count: number;
+  created_count: number;
+  reused_count: number;
+  failed_count: number;
+  items: BrowserTask[];
+  failures: Array<{ application_id: string; reason: string }>;
+};
+
 export type PlatformAdapter = {
   name: string;
   label: string;
   mode: string;
   safe_for_automation: boolean;
+};
+
+export type BossVisibleJobCapture = {
+  external_job_id: string;
+  title: string;
+  description: string;
+  job_url: string;
+  location: string | null;
+  company_name: string | null;
+  salary_text: string | null;
+  tags: string[];
+  description_source: "detail_panel" | "card_summary";
+};
+
+export type BossVisibleImportResponse = {
+  platform: "boss";
+  collection_mode: "visible_page_only";
+  page_url: string;
+  items: Job[];
+  created: number;
+  duplicates: number;
+  updated: number;
+  total: number;
+  safety_notice: string;
 };
 
 export type ResumeEducation = {
@@ -504,10 +591,15 @@ export type ResumeChunk = {
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-    cache: "no-store",
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      cache: "no-store",
+    });
+  } catch {
+    throw new Error("无法连接 API 服务，请确认后端已启动并稍后重试。");
+  }
   if (!response.ok) {
     let detail = `API request failed: ${response.status}`;
     try {
@@ -518,31 +610,101 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new Error(detail);
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
-export function getJobs(search?: string): Promise<JobListResponse> {
-  const query = search ? `?search=${encodeURIComponent(search)}` : "";
-  return apiFetch<JobListResponse>(`/api/jobs${query}`);
+export function getJobs(options?: {
+  search?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<JobListResponse> {
+  const query = new URLSearchParams();
+  if (options?.search) query.set("search", options.search);
+  if (options?.page) query.set("page", String(options.page));
+  if (options?.page_size) query.set("page_size", String(options.page_size));
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return apiFetch<JobListResponse>(`/api/jobs${suffix}`);
 }
 
 export function getDashboard(): Promise<DashboardResponse> {
   return apiFetch<DashboardResponse>("/api/dashboard");
 }
 
+export function getLLMSettings(): Promise<LLMSettings> {
+  return apiFetch<LLMSettings>("/api/llm/settings");
+}
+
+export function testLLMConnection(payload: {
+  provider: LLMProviderName;
+  api_key: string;
+  model?: string;
+  base_url?: string;
+}): Promise<LLMConnectionTestResult> {
+  return apiFetch<LLMConnectionTestResult>("/api/llm/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function testSavedLLMProvider(provider: LLMProviderName): Promise<LLMConnectionTestResult> {
+  return apiFetch<LLMConnectionTestResult>(`/api/llm/providers/${provider}/test`, {
+    method: "POST",
+  });
+}
+
+export function saveLLMProvider(
+  provider: LLMProviderName,
+  payload: { api_key: string; model?: string; base_url?: string },
+): Promise<LLMSettings> {
+  return apiFetch<LLMSettings>(`/api/llm/providers/${provider}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function setActiveLLMProvider(provider: ActiveLLMProvider): Promise<LLMSettings> {
+  return apiFetch<LLMSettings>("/api/llm/active", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider }),
+  });
+}
+
+export function deleteLLMProvider(provider: LLMProviderName): Promise<void> {
+  return apiFetch<void>(`/api/llm/providers/${provider}`, { method: "DELETE" });
+}
+
 export function getJob(id: string): Promise<Job> {
   return apiFetch<Job>(`/api/jobs/${encodeURIComponent(id)}`);
+}
+
+export function updateJob(id: string, payload: Partial<Pick<Job,
+  "title" | "description" | "location" | "salary_min" | "salary_max" |
+  "job_type" | "education_requirement" | "experience_requirement" | "source_url"
+>>): Promise<Job> {
+  return apiFetch<Job>(`/api/jobs/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteJob(id: string): Promise<void> {
+  return apiFetch<void>(`/api/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export function analyzeJob(id: string): Promise<JobAnalysis> {
   return apiFetch<JobAnalysis>(`/api/jobs/${encodeURIComponent(id)}/analyze`, { method: "POST" });
 }
 
-export function scoreJob(id: string, resumeId?: string): Promise<JobScore> {
+export function scoreJob(id: string, resumeId?: string, force = false): Promise<JobScore> {
   return apiFetch<JobScore>(`/api/jobs/${encodeURIComponent(id)}/score`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(resumeId ? { resume_id: resumeId } : {}),
+    body: JSON.stringify({ ...(resumeId ? { resume_id: resumeId } : {}), force }),
   });
 }
 
@@ -552,6 +714,34 @@ export function rankJobs(resumeId?: string): Promise<JobRankingResponse> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(resumeId ? { resume_id: resumeId } : {}),
   });
+}
+
+export function startJobRanking(
+  resumeId?: string,
+  options: { scoringMode?: RankingScoringMode; deepLimit?: number } = {},
+): Promise<RankingRun> {
+  const scoringMode = options.scoringMode ?? "llm";
+  const scoringLimit = scoringMode === "fast" ? 50 : (options.deepLimit ?? 10);
+  return apiFetch<RankingRun>("/api/jobs/rank-runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...(resumeId ? { resume_id: resumeId } : {}),
+      scoring_mode: scoringMode,
+      top_k_rerank: scoringLimit,
+      top_k_llm: scoringLimit,
+    }),
+  });
+}
+
+export function getJobRankingRun(id: string): Promise<RankingRun> {
+  return apiFetch<RankingRun>(`/api/jobs/rank-runs/${encodeURIComponent(id)}`);
+}
+
+export function getJobRankingResult(id: string): Promise<JobRankingResponse> {
+  return apiFetch<JobRankingResponse>(
+    `/api/jobs/rank-runs/${encodeURIComponent(id)}/result`,
+  );
 }
 
 export function getCampaigns(): Promise<CampaignListResponse> {
@@ -572,6 +762,40 @@ export function createCampaign(payload: {
   target_cities?: string[];
 }): Promise<CampaignDetail> {
   return apiFetch<CampaignDetail>("/api/campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateCampaign(id: string, payload: {
+  name?: string;
+  resume_id?: string;
+  query?: string;
+  keywords?: string[];
+  min_score?: number;
+  max_jobs?: number;
+  target_cities?: string[];
+}): Promise<CampaignDetail> {
+  return apiFetch<CampaignDetail>(`/api/campaigns/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteCampaign(id: string): Promise<void> {
+  return apiFetch<void>(`/api/campaigns/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function createCuratedCampaign(payload: {
+  name: string;
+  resume_id?: string;
+  job_ids: string[];
+  query?: string;
+  message?: string;
+}): Promise<CampaignDetail> {
+  return apiFetch<CampaignDetail>("/api/campaigns/curated", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -622,6 +846,23 @@ export function createAgentRun(payload: {
   });
 }
 
+export function updateAgentRun(id: string, payload: {
+  goal?: string;
+  max_steps?: number;
+  timeout_seconds?: number;
+  max_retries?: number;
+}): Promise<AgentRun> {
+  return apiFetch<AgentRun>(`/api/agent-runs/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteAgentRun(id: string): Promise<void> {
+  return apiFetch<void>(`/api/agent-runs/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
 export function agentRunAction(
   id: string,
   action: "start" | "pause" | "cancel" | "retry",
@@ -656,11 +897,24 @@ export function getBrowserTask(id: string): Promise<BrowserTask> {
 
 export function createBrowserTask(payload: {
   application_id: string;
-  platform?: "mock" | "careerboard";
+  platform?: "mock" | "careerboard" | "boss";
   scenario?: string;
   auto_start?: boolean;
 }): Promise<BrowserTask> {
   return apiFetch<BrowserTask>("/api/browser-tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createCampaignBrowserTasks(payload: {
+  campaign_id: string;
+  platform?: "mock" | "careerboard" | "boss";
+  scenario?: string;
+  auto_start?: boolean;
+}): Promise<BrowserTaskCampaignResponse> {
+  return apiFetch<BrowserTaskCampaignResponse>("/api/browser-tasks/campaign", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -713,6 +967,17 @@ export function importJobs(payload: {
   });
 }
 
+export function importBossVisibleJobs(payload: {
+  page_url: string;
+  jobs: BossVisibleJobCapture[];
+}): Promise<BossVisibleImportResponse> {
+  return apiFetch<BossVisibleImportResponse>("/api/platforms/boss/import-visible", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 export function getResumes(): Promise<ResumeListResponse> {
   return apiFetch<ResumeListResponse>("/api/resumes");
 }
@@ -734,4 +999,20 @@ export function uploadResume(file: File, name?: string): Promise<Resume> {
 
 export function parseResume(id: string): Promise<Resume> {
   return apiFetch<Resume>(`/api/resumes/${encodeURIComponent(id)}/parse`, { method: "POST" });
+}
+
+export function updateResume(id: string, payload: {
+  name?: string;
+  raw_text?: string;
+  is_default?: boolean;
+}): Promise<Resume> {
+  return apiFetch<Resume>(`/api/resumes/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteResume(id: string): Promise<void> {
+  return apiFetch<void>(`/api/resumes/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

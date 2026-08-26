@@ -45,6 +45,8 @@ class JobParser:
             "岗位要求",
             "职位要求",
             "资格要求",
+            "任职资格",
+            "任职条件",
         },
         "preferred": {
             "preferred qualifications",
@@ -52,15 +54,31 @@ class JobParser:
             "bonus points",
             "加分项",
             "优先条件",
+            "加分条件",
         },
         "responsibilities": {
             "responsibilities",
             "what you will do",
+            "what you will work on",
+            "you will work on",
             "岗位职责",
+            "主要职责",
             "工作职责",
             "工作内容",
+            "工作职责与内容",
+            "职位职责",
+            "你将参与的工作",
+            "你将负责的工作",
+            "主要工作",
         },
-        "summary": {"summary", "about the role", "职位简介", "岗位简介", "职位描述"},
+        "summary": {
+            "summary",
+            "about the role",
+            "职位简介",
+            "岗位简介",
+            "职位描述",
+            "岗位描述",
+        },
         "skills": {"skills", "technical skills", "技能要求", "技术栈"},
     }
 
@@ -69,10 +87,12 @@ class JobParser:
         sections: dict[str, list[str]] = {"body": []}
         current = "body"
         for line in text.splitlines():
-            heading = self._heading_type(line)
+            heading, content = self._split_heading(line)
             if heading:
                 current = heading
                 sections.setdefault(current, [])
+                if content:
+                    sections[current].append(content)
                 continue
             sections.setdefault(current, []).append(line)
         return ParsedJob(raw_text=text, sections=sections)
@@ -83,12 +103,29 @@ class JobParser:
         return "\n".join(line for line in lines if line)
 
     def _heading_type(self, line: str) -> str | None:
-        cleaned = line.strip(" #:：-—")
+        # BOSS and other job boards frequently return Markdown headings such
+        # as "## 你将参与的工作". Strip the Markdown marker first so the
+        # semantic heading can still be matched against the aliases below.
+        cleaned = re.sub(r"^\s{0,3}#{1,6}\s*", "", line)
+        cleaned = cleaned.strip(" #:：-—【】[]（）()")
         normalized = cleaned.casefold()
         for section, aliases in self.section_aliases.items():
             if normalized in aliases:
                 return section
         return None
+
+    def _split_heading(self, line: str) -> tuple[str | None, str]:
+        heading = self._heading_type(line)
+        if heading:
+            return heading, ""
+        match = re.match(
+            r"^[【\[（(]?([^】\]）):：]{2,20})[】\]）)]?[：:]\s*(.+)$",
+            line,
+        )
+        if not match:
+            return None, line
+        heading = self._heading_type(match.group(1))
+        return (heading, match.group(2).strip()) if heading else (None, line)
 
 
 class SkillExtractor:
@@ -99,6 +136,7 @@ class SkillExtractor:
         "Flask",
         "Java",
         "Spring Boot",
+        "MyBatis",
         "Go",
         "Golang",
         "Rust",
@@ -124,6 +162,7 @@ class SkillExtractor:
         "Git",
         "Linux",
         "Kafka",
+        "RabbitMQ",
         "Spark",
         "Airflow",
         "Machine Learning",
@@ -131,6 +170,10 @@ class SkillExtractor:
         "NLP",
         "LLM",
         "RAG",
+        "Agent",
+        "LangChain",
+        "LlamaIndex",
+        "Dify",
         "PyTorch",
         "TensorFlow",
         "scikit-learn",
@@ -139,6 +182,15 @@ class SkillExtractor:
         "Product Management",
         "自动化测试",
     )
+    skill_aliases = {
+        "Spring Boot": ("SpringBoot", "Spring Boot"),
+        "MyBatis": ("MyBatis", "MyBatisPlus", "MyBatis-Plus"),
+        "Node.js": ("Node.js", "Nodejs"),
+        "Next.js": ("Next.js", "Nextjs"),
+        "scikit-learn": ("scikit-learn", "sklearn"),
+        "LangChain": ("LangChain", "Langchain"),
+        "LlamaIndex": ("LlamaIndex", "Llama Index"),
+    }
 
     def extract(self, parsed: ParsedJob) -> list[JobSkillDraft]:
         required_text = "\n".join(
@@ -160,10 +212,15 @@ class SkillExtractor:
         return drafts
 
     @staticmethod
-    def _pattern(skill: str) -> str:
-        if re.fullmatch(r"[A-Za-z0-9+.# -]+", skill):
-            return rf"(?<![A-Za-z0-9]){re.escape(skill)}(?![A-Za-z0-9])"
-        return re.escape(skill)
+    def _bounded_pattern(value: str) -> str:
+        if re.fullmatch(r"[A-Za-z0-9+.# -]+", value):
+            return rf"(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])"
+        return re.escape(value)
+
+    @classmethod
+    def _pattern(cls, skill: str) -> str:
+        aliases = cls.skill_aliases.get(skill, (skill,))
+        return "(?:" + "|".join(cls._bounded_pattern(value) for value in aliases) + ")"
 
 
 class RequirementExtractor:
@@ -184,11 +241,15 @@ class RequirementExtractor:
         experience = self._first_match(self.experience_pattern, all_lines)
         responsibilities = self._bullets(parsed.sections.get("responsibilities", []))
         if not responsibilities:
-            responsibilities = self._bullets(parsed.sections.get("body", []))
+            responsibilities = self._bullets(parsed.sections.get("body", []), plain=False)
+        qualifications = self._bullets(parsed.sections.get("requirements", []))
+        preferred = self._bullets(parsed.sections.get("preferred", []))
         return JobRequirements(
             education=education,
             experience=experience,
             responsibilities=responsibilities[:12],
+            qualifications=qualifications[:16],
+            preferred_qualifications=preferred[:12],
         )
 
     @staticmethod
@@ -199,16 +260,27 @@ class RequirementExtractor:
     def _first_match(pattern: re.Pattern[str], lines: list[str]) -> str:
         for line in lines:
             if pattern.search(line):
-                return line.lstrip("-•* ")
+                return re.sub(
+                    r"^\s*(?:[-•*·]|\(?\d{1,2}[.)、）])\s*",
+                    "",
+                    line,
+                ).strip()
         return ""
 
     @staticmethod
-    def _bullets(lines: list[str]) -> list[str]:
-        return [
-            line.lstrip("-•* ")
-            for line in lines
-            if line.startswith(("-", "•", "*")) and len(line.lstrip("-•* ")) > 4
-        ]
+    def _bullets(lines: list[str], *, plain: bool = True) -> list[str]:
+        items: list[str] = []
+        bullet_pattern = re.compile(
+            r"^\s*(?:[-•*·]|\(?\d{1,2}[.)、）]|[一二三四五六七八九十]+[、.])\s*"
+        )
+        for line in lines:
+            is_bullet = bool(bullet_pattern.match(line))
+            if not plain and not is_bullet:
+                continue
+            clean = bullet_pattern.sub("", line).strip()
+            if len(clean) > 4:
+                items.append(clean)
+        return list(dict.fromkeys(items))
 
 
 class JobNormalizer:
@@ -319,7 +391,7 @@ class JobNormalizer:
     @staticmethod
     def _salary(text: str) -> JobSalary:
         match = re.search(
-            r"(?:薪资|salary)?[^\n$¥￥]*[$¥￥]?\s*(\d{2,3})\s*[kK]?\s*[-–~至]\s*[$¥￥]?\s*(\d{2,3})\s*[kK]?",
+            r"(?:薪资|salary)?[^\n\d$¥￥]*[$¥￥]?\s*(\d{1,3})\s*[kK]?\s*[-–~至]\s*[$¥￥]?\s*(\d{1,3})\s*[kK]?",
             text,
         )
         if not match:
@@ -333,9 +405,20 @@ class JobNormalizer:
     def _summary(parsed: ParsedJob) -> str:
         summary_lines = parsed.sections.get("summary", [])
         if summary_lines:
-            return " ".join(summary_lines[:3])
-        body = parsed.sections.get("body", [])
-        return " ".join(body[:2])
+            return " ".join(JobNormalizer._summary_lines(summary_lines)[:3])
+        return " ".join(JobNormalizer._summary_lines(parsed.sections.get("body", []))[:2])
+
+    @staticmethod
+    def _summary_lines(lines: list[str]) -> list[str]:
+        metadata = re.compile(
+            r"^(?:company|location|salary|公司|地点|薪资|城市|经验|学历)[：:]",
+            re.IGNORECASE,
+        )
+        return [
+            re.sub(r"^\s*[-•*·]\s*", "", line).strip()
+            for line in lines
+            if len(line.strip()) > 4 and not metadata.match(line.strip())
+        ]
 
     @staticmethod
     def _keywords(title: str, skills: list[JobSkillDraft]) -> list[str]:

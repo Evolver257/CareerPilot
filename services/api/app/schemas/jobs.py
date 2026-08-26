@@ -24,6 +24,19 @@ class JobCreate(BaseModel):
     content_hash: str | None = Field(default=None, max_length=128)
 
 
+class JobUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=300)
+    description: str | None = Field(default=None, min_length=1)
+    location: str | None = Field(default=None, max_length=300)
+    salary_min: int | None = Field(default=None, ge=0)
+    salary_max: int | None = Field(default=None, ge=0)
+    job_type: str | None = Field(default=None, max_length=100)
+    education_requirement: str | None = Field(default=None, max_length=500)
+    experience_requirement: str | None = Field(default=None, max_length=500)
+    source_url: HttpUrl | None = None
+    raw_data: dict[str, Any] | None = None
+
+
 class JobRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

@@ -23,7 +23,7 @@ const statusLabels: Record<string, string> = {
   APPROVED: "已批准",
   QUEUED: "已排队",
   EXECUTING: "执行中",
-  SUBMITTED: "已提交",
+  SUBMITTED: "已投递",
   CAPTCHA_REQUIRED: "需要验证码",
   LOGIN_REQUIRED: "需要登录",
   PLATFORM_LIMIT: "平台限制",
@@ -55,6 +55,7 @@ export default function CampaignDetailPage() {
 
   async function runAction(action: "start" | "pause" | "resume" | "cancel") {
     if (!campaign) return;
+    if (action === "cancel" && !window.confirm("确认取消这个投递计划吗？取消后不能继续执行。")) return;
     setActionLoading(action);
     setError(null);
     try {
@@ -104,23 +105,23 @@ export default function CampaignDetailPage() {
     <div className="mx-auto max-w-7xl space-y-8">
       <header className="flex flex-wrap items-end justify-between gap-5">
         <div>
-          <Link className="text-sm font-medium text-indigo-700" href="/campaigns">← Campaign List</Link>
-          <p className="eyebrow mt-5">Campaign Detail</p>
+          <Link className="text-sm font-medium text-indigo-700" href="/campaigns">← 返回投递计划</Link>
+          <p className="eyebrow mt-5">投递计划详情</p>
           <h1 className="mt-3 text-3xl font-semibold tracking-tight">{campaign.name}</h1>
           <p className="mt-3 text-slate-500">最低 {campaign.min_score} 分 · 最多 {campaign.max_jobs} 个职位 · {campaign.target_cities.join("、") || "不限城市"}</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          {campaign.status === "DRAFT" && <button className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white disabled:opacity-50" disabled={actionLoading !== null} onClick={() => void runAction("start")} type="button">{actionLoading === "start" ? "搜索并排名中…" : "Start"}</button>}
-          {canPause && <button className="rounded-xl border border-amber-200 px-5 py-2.5 text-sm font-medium text-amber-700 disabled:opacity-50" disabled={actionLoading !== null} onClick={() => void runAction("pause")} type="button">Pause</button>}
-          {campaign.status === "PAUSED" && <button className="rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white disabled:opacity-50" disabled={actionLoading !== null} onClick={() => void runAction("resume")} type="button">Resume</button>}
-          {canCancel && <button className="rounded-xl border border-rose-200 px-5 py-2.5 text-sm font-medium text-rose-700 disabled:opacity-50" disabled={actionLoading !== null} onClick={() => void runAction("cancel")} type="button">Cancel</button>}
+          {campaign.status === "DRAFT" && <button className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white disabled:opacity-50" disabled={actionLoading !== null} onClick={() => void runAction("start")} type="button">{actionLoading === "start" ? "搜索并排名中…" : "启动计划"}</button>}
+          {canPause && <button className="rounded-xl border border-amber-200 px-5 py-2.5 text-sm font-medium text-amber-700 disabled:opacity-50" disabled={actionLoading !== null} onClick={() => void runAction("pause")} type="button">暂停</button>}
+          {campaign.status === "PAUSED" && <button className="rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-medium text-white disabled:opacity-50" disabled={actionLoading !== null} onClick={() => void runAction("resume")} type="button">继续</button>}
+          {canCancel && <button className="rounded-xl border border-rose-200 px-5 py-2.5 text-sm font-medium text-rose-700 disabled:opacity-50" disabled={actionLoading !== null} onClick={() => void runAction("cancel")} type="button">取消计划</button>}
         </div>
       </header>
 
       {error && <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-800">{error}</div>}
 
       <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="panel"><p className="text-xs text-slate-400">Campaign 状态</p><p className="mt-2 text-xl font-semibold text-indigo-700">{statusLabels[campaign.status] ?? campaign.status}</p></div>
+        <div className="panel"><p className="text-xs text-slate-400">计划状态</p><p className="mt-2 text-xl font-semibold text-indigo-700">{statusLabels[campaign.status] ?? campaign.status}</p></div>
         <div className="panel"><p className="text-xs text-slate-400">候选职位</p><p className="mt-2 text-2xl font-semibold">{campaign.candidate_count}</p></div>
         <div className="panel"><p className="text-xs text-slate-400">等待确认</p><p className="mt-2 text-2xl font-semibold">{campaign.waiting_approval_count}</p></div>
         <div className="panel"><p className="text-xs text-slate-400">队列中</p><p className="mt-2 text-2xl font-semibold">{campaign.queued_count}</p></div>
@@ -129,15 +130,15 @@ export default function CampaignDetailPage() {
       {campaign.status === "DRAFT" && (
         <section className="rounded-2xl border border-indigo-100 bg-indigo-50 p-6">
           <p className="font-semibold text-indigo-900">准备启动</p>
-          <p className="mt-2 text-sm leading-6 text-indigo-700">Start 将搜索符合关键词和城市条件的 Mock Jobs，调用 Phase 5 Ranking，然后停在 WAITING_APPROVAL 等待人工确认。</p>
+          <p className="mt-2 text-sm leading-6 text-indigo-700">启动后将搜索符合关键词和城市条件的职位并完成智能排名，随后停在“等待确认”，不会未经批准直接投递。</p>
         </section>
       )}
 
       <section className="panel overflow-hidden p-0">
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 px-6 py-5">
-          <div><p className="eyebrow">Candidate Jobs</p><h2 className="mt-2 text-xl font-semibold">Ranking 与人工确认</h2></div>
+          <div><p className="eyebrow">候选职位</p><h2 className="mt-2 text-xl font-semibold">智能排名与人工确认</h2></div>
           <button className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={selected.size === 0 || actionLoading !== null || campaign.status === "PAUSED"} onClick={() => void approveSelected()} type="button">
-            {actionLoading === "approve" ? "正在批准并排队…" : `Approve & Queue (${selected.size})`}
+            {actionLoading === "approve" ? "正在批准并排队…" : `批准并加入队列 (${selected.size})`}
           </button>
         </div>
         {campaign.candidate_jobs.length === 0 ? (

@@ -15,8 +15,10 @@ RankingStageName = Literal[
     "embedding_rank",
     "reranker",
     "llm_judge",
+    "deterministic_rank",
     "final_ranking",
 ]
+RankingScoringMode = Literal["fast", "llm"]
 
 
 class JobRankingRequest(BaseModel):
@@ -28,6 +30,7 @@ class JobRankingRequest(BaseModel):
     top_k_rerank: int | None = Field(default=None, ge=1, le=500)
     top_k_llm: int | None = Field(default=None, ge=1, le=500)
     final_top_k: int | None = Field(default=None, ge=1, le=100)
+    scoring_mode: RankingScoringMode = "llm"
 
 
 class RankingConfigRead(BaseModel):
@@ -36,6 +39,7 @@ class RankingConfigRead(BaseModel):
     top_k_rerank: int
     top_k_llm: int
     final_top_k: int
+    scoring_mode: RankingScoringMode = "llm"
 
 
 class RankingTraceCandidate(BaseModel):
@@ -64,6 +68,8 @@ class RankingTraceRead(BaseModel):
     started_at: datetime
     completed_at: datetime
     llm_calls: int
+    cache_hits: int = 0
+    fallback_count: int = 0
     token_usage: LLMUsageRead = Field(default_factory=LLMUsageRead)
     config: RankingConfigRead
     stages: list[RankingTraceStage]
@@ -79,3 +85,26 @@ class JobRankingResponse(BaseModel):
     items: list[RankedJobRead]
     total_candidates: int
     trace: RankingTraceRead
+
+
+RankingRunStatus = Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED"]
+
+
+class RankingRunRead(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: UUID
+    resume_id: UUID
+    status: RankingRunStatus
+    stage: str
+    progress: int = Field(ge=0, le=100)
+    processed_candidates: int
+    total_candidates: int
+    cache_hits: int
+    llm_calls: int
+    fallback_count: int
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None

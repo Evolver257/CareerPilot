@@ -39,6 +39,29 @@ class MatchingRepository:
             select(UserPreference).where(UserPreference.user_id == user_id)
         )
 
+    async def get_latest_score(
+        self,
+        *,
+        job_id: UUID,
+        resume_id: UUID,
+        score_version: str,
+        input_fingerprint: str | None = None,
+        judge_sources: tuple[str, ...] = ("llm",),
+    ) -> JobScore | None:
+        query = select(JobScore).where(
+            JobScore.job_id == job_id,
+            JobScore.resume_id == resume_id,
+            JobScore.score_version == score_version,
+            JobScore.judge_source.in_(judge_sources),
+        )
+        if input_fingerprint is not None:
+            query = query.where(JobScore.input_fingerprint == input_fingerprint)
+        return await self.session.scalar(
+            query
+            .order_by(JobScore.created_at.desc())
+            .limit(1)
+        )
+
     async def retrieve_resume_chunks(
         self,
         *,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -31,6 +32,7 @@ from app.schemas.browser import (
     BrowserAction,
     BrowserActionResult,
     BrowserExtensionHello,
+    BrowserTaskCampaignCreate,
     BrowserTaskCreate,
     BrowserTaskResumeRequest,
 )
@@ -44,6 +46,19 @@ class BrowserTaskNotFoundError(ValueError):
 
 class BrowserTaskActionError(ValueError):
     """Raised when a Browser Task action is invalid."""
+
+
+@dataclass
+class BrowserTaskCampaignResult:
+    campaign_id: UUID
+    queued_count: int
+    created: list[BrowserTask] = field(default_factory=list)
+    reused: list[BrowserTask] = field(default_factory=list)
+    failures: list[tuple[UUID, str]] = field(default_factory=list)
+
+    @property
+    def tasks(self) -> list[BrowserTask]:
+        return [*self.created, *self.reused]
 
 
 class BrowserSocketManager:
@@ -138,6 +153,44 @@ class BrowserTaskService:
         task = await self.repository.checkpoint(task)
         return await self.start(task.id) if payload.auto_start else task
 
+    async def create_for_campaign(
+        self, payload: BrowserTaskCampaignCreate
+    ) -> BrowserTaskCampaignResult:
+        campaign = await self.campaign_repository.get_campaign(payload.campaign_id)
+        if campaign is None:
+            raise BrowserTaskActionError("Campaign not found")
+        queued = [
+            application
+            for application in campaign.applications
+            if application.status == ApplicationStatus.QUEUED.value
+            and (payload.platform is None or application.platform == payload.platform)
+        ]
+        result = BrowserTaskCampaignResult(
+            campaign_id=campaign.id,
+            queued_count=len(queued),
+        )
+        active_tasks = await self.repository.get_active_tasks_for_applications(
+            [application.id for application in queued]
+        )
+        for application in queued:
+            existing = active_tasks.get(application.id)
+            if existing is not None:
+                result.reused.append(existing)
+                continue
+            try:
+                task = await self.create(
+                    BrowserTaskCreate(
+                        application_id=application.id,
+                        platform=application.platform,
+                        scenario=payload.scenario,
+                        auto_start=payload.auto_start,
+                    )
+                )
+                result.created.append(task)
+            except BrowserTaskActionError as exc:
+                result.failures.append((application.id, str(exc)))
+        return result
+
     async def start(self, task_id: UUID) -> BrowserTask:
         task = await self.get_task(task_id)
         if task.status not in {
@@ -204,6 +257,12 @@ class BrowserTaskService:
             payload=result.model_dump(mode="json"),
         )
         if not result.success:
+            if task.platform == "boss" and action.action == BrowserActionType.CLICK:
+                error = DomChangedError(
+                    result.error or "BOSS immediate communication button could not be clicked"
+                )
+                await self._mark_application_failure(task.application_id, error)
+                return await self._wait_for_user(task, str(error))
             return await self._fail_task(task, result.error or "Browser action failed")
         if action.action == BrowserActionType.CLICK:
             try:
@@ -249,7 +308,16 @@ class BrowserTaskService:
                 BrowserTaskEventType.TASK_COMPLETED.value,
                 payload=task.result,
             )
-            return await self._checkpoint(task)
+            task = await self._checkpoint(task)
+            await browser_socket_manager.send(
+                task.id,
+                {
+                    "type": "TASK_COMPLETED",
+                    "task_id": str(task.id),
+                    "status": BrowserTaskStatus.COMPLETED.value,
+                },
+            )
+            return task
         return await self._send_next_action(task)
 
     async def resume(self, task_id: UUID, payload: BrowserTaskResumeRequest) -> BrowserTask:
@@ -288,11 +356,30 @@ class BrowserTaskService:
             if task.status != BrowserTaskStatus.RUNNING.value:
                 return task
             action = self._current_action(task)
+            mock_data: dict[str, Any] = {"mock_extension": True, "page_state": action.action}
+            if task.platform == "boss":
+                context = task.payload.get("context", {})
+                source_url = context.get("source_url") if isinstance(context, dict) else None
+                mock_data.update(
+                    {
+                        "page_url": source_url,
+                        "text": "职位详情 立即沟通",
+                        "platform": "boss",
+                    }
+                )
+                if action.action == BrowserActionType.CLICK:
+                    mock_data.update(
+                        {
+                            "boss_action": "immediate_communication",
+                            "communication_status": "started",
+                            "clicked_text": "立即沟通",
+                        }
+                    )
             task = await self.handle_action_result(
                 task.id,
                 BrowserActionResult(
                     action_id=action.id,
-                    data={"mock_extension": True, "page_state": action.action},
+                    data=mock_data,
                 ),
             )
         raise BrowserTaskActionError("Mock Extension exceeded the action limit")
@@ -320,7 +407,16 @@ class BrowserTaskService:
         await self.repository.add_event(
             task, BrowserTaskEventType.TASK_CANCELLED.value, payload={}
         )
-        return await self._checkpoint(task)
+        task = await self._checkpoint(task)
+        await browser_socket_manager.send(
+            task.id,
+            {
+                "type": "TASK_CANCELLED",
+                "task_id": str(task.id),
+                "status": BrowserTaskStatus.CANCELLED.value,
+            },
+        )
+        return task
 
     async def _begin_extension_session(self, task: BrowserTask) -> BrowserTask:
         if task.status == BrowserTaskStatus.CONNECTING.value:
@@ -383,7 +479,17 @@ class BrowserTaskService:
         await self.repository.add_event(
             task, BrowserTaskEventType.TASK_FAILED.value, payload={"reason": reason}
         )
-        return await self._checkpoint(task)
+        task = await self._checkpoint(task)
+        await browser_socket_manager.send(
+            task.id,
+            {
+                "type": "TASK_FAILED",
+                "task_id": str(task.id),
+                "status": BrowserTaskStatus.FAILED.value,
+                "error": reason,
+            },
+        )
+        return task
 
     async def _mark_application_failure(self, application_id: UUID, error: Exception) -> None:
         action = {

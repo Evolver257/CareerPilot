@@ -11,6 +11,7 @@ Recommendation = Literal["strong_apply", "apply", "maybe", "skip"]
 
 class JobScoreRequest(BaseModel):
     resume_id: UUID | None = None
+    force: bool = False
 
 
 class ResumeEvidenceRead(BaseModel):
@@ -56,5 +57,7 @@ class JobScoreRead(BaseModel):
     recommendation: Recommendation
     reasoning_summary: str
     score_version: str
+    input_fingerprint: str | None = None
+    judge_source: str = "llm"
     weights: dict[str, float]
     created_at: datetime

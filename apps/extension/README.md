@@ -8,4 +8,4 @@ The background entrypoint connects to:
 ws://localhost:8010/api/browser-tasks/ws/{task_id}
 ```
 
-The content script only matches the local Mock Platform fixture. It resolves semantic actions such as `CLICK` with `target.name = "立即投递"`, reports structured results, and leaves CAPTCHA/login/risk-control/unknown-state handling to the user. The CareerBoard adapter prototype does not expand this match scope to external sites.
+The content script matches CareerPilot local pages, the Mock Platform fixture, and BOSS 直聘 pages. `/browser-tasks` can use a scoped `window.postMessage` bridge to ask the extension to open a structured BOSS search or a backend-generated BrowserTask URL. Campaign batches run sequentially in one reusable BOSS tab and advance only after the backend confirms the current task is terminal. On BOSS pages, the popup and page workflow collect only currently visible structured job cards; they never upload cookies, passwords, tokens, or raw HTML. BOSS application actions still require an explicit user approval, and CAPTCHA/login/risk-control/unknown-state handling pauses for the user.

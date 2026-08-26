@@ -3,13 +3,14 @@ from __future__ import annotations
 from pathlib import PurePath
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.llm.provider import LLMProvider
-from app.models.entities import Resume, ResumeChunk, User
+from app.models.entities import Application, Campaign, JobScore, Resume, ResumeChunk, User
 from app.repositories.resumes import ResumeRepository
+from app.schemas.resumes import ResumeUpdate
 from app.services.resume_chunking import ResumeChunkDraft, ResumeSemanticChunker
 from app.services.resume_extraction import HeuristicResumeExtractor
 from app.services.resume_parsing import ResumeFileParser
@@ -21,6 +22,14 @@ class ResumeNotFoundError(ValueError):
 
 class ResumeUserNotFoundError(ValueError):
     """Raised when a caller references an unknown user."""
+
+
+class ResumeInUseError(ValueError):
+    """Raised when deleting a resume would remove application history."""
+
+
+class ResumeDefaultError(ValueError):
+    """Raised when an operation would leave the user without a default resume."""
 
 
 class ResumeService:
@@ -79,6 +88,74 @@ class ResumeService:
         resume.structured_profile = profile.model_dump()
         await self.session.execute(delete(ResumeChunk).where(ResumeChunk.resume_id == resume.id))
         return await self._persist_chunks(resume, drafts)
+
+    async def update_resume(self, resume_id: UUID, payload: ResumeUpdate) -> Resume:
+        resume = await self.get_resume(resume_id)
+        if payload.name is not None:
+            resume.name = payload.name
+
+        if payload.is_default is not None and payload.is_default != resume.is_default:
+            if payload.is_default:
+                await self.session.execute(
+                    update(Resume)
+                    .where(Resume.user_id == resume.user_id, Resume.id != resume.id)
+                    .values(is_default=False)
+                )
+                resume.is_default = True
+            else:
+                replacement = await self.session.scalar(
+                    select(Resume)
+                    .where(Resume.user_id == resume.user_id, Resume.id != resume.id)
+                    .order_by(Resume.updated_at.desc())
+                    .limit(1)
+                )
+                if replacement is None:
+                    raise ResumeDefaultError("At least one resume must remain the default")
+                replacement.is_default = True
+                resume.is_default = False
+
+        if payload.raw_text is not None and payload.raw_text != resume.raw_text:
+            resume.raw_text = payload.raw_text
+            resume.version += 1
+            profile = self.extractor.extract(resume.raw_text)
+            resume.structured_profile = profile.model_dump()
+            drafts = self.chunker.chunk(resume.raw_text, profile)
+            await self.session.execute(
+                delete(ResumeChunk).where(ResumeChunk.resume_id == resume.id)
+            )
+            await self.session.execute(
+                delete(JobScore).where(JobScore.resume_id == resume.id)
+            )
+            return await self._persist_chunks(resume, drafts)
+
+        await self.session.commit()
+        refreshed = await self.repository.get(resume.id)
+        if refreshed is None:
+            raise ResumeNotFoundError("Resume disappeared during persistence")
+        return refreshed
+
+    async def delete_resume(self, resume_id: UUID) -> None:
+        resume = await self.get_resume(resume_id)
+        referenced = await self.session.scalar(
+            select(Campaign.id).where(Campaign.resume_id == resume.id).limit(1)
+        ) or await self.session.scalar(
+            select(Application.id).where(Application.resume_id == resume.id).limit(1)
+        )
+        if referenced:
+            raise ResumeInUseError(
+                "Resume is used by an application plan and cannot be deleted"
+            )
+        if resume.is_default:
+            replacement = await self.session.scalar(
+                select(Resume)
+                .where(Resume.user_id == resume.user_id, Resume.id != resume.id)
+                .order_by(Resume.updated_at.desc())
+                .limit(1)
+            )
+            if replacement:
+                replacement.is_default = True
+        await self.session.delete(resume)
+        await self.session.commit()
 
     async def _persist_resume(self, resume: Resume, drafts: list[ResumeChunkDraft]) -> Resume:
         self.session.add(resume)

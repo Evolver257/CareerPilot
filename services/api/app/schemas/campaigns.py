@@ -21,6 +21,27 @@ class CampaignCreate(BaseModel):
     filters: dict[str, Any] = Field(default_factory=dict)
 
 
+class CampaignUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=300)
+    resume_id: UUID | None = None
+    query: str | None = Field(default=None, max_length=500)
+    keywords: list[str] | None = Field(default=None, max_length=30)
+    min_score: float | None = Field(default=None, ge=0, le=100)
+    max_jobs: int | None = Field(default=None, ge=1, le=100)
+    target_cities: list[str] | None = Field(default=None, max_length=30)
+    filters: dict[str, Any] | None = None
+
+
+class CuratedCampaignCreate(BaseModel):
+    """Create an exact, user-selected candidate set without rerunning discovery."""
+
+    name: str = Field(min_length=1, max_length=300)
+    resume_id: UUID | None = None
+    job_ids: list[UUID] = Field(min_length=1, max_length=20)
+    query: str = Field(default="", max_length=500)
+    message: str = Field(default="", max_length=2000)
+
+
 class CampaignRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

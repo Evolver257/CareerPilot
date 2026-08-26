@@ -5,9 +5,17 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 
 from app.api.dependencies import get_resume_service
 from app.core.config import get_settings
-from app.schemas.resumes import ResumeChunkRead, ResumeListResponse, ResumeProfile, ResumeRead
+from app.schemas.resumes import (
+    ResumeChunkRead,
+    ResumeListResponse,
+    ResumeProfile,
+    ResumeRead,
+    ResumeUpdate,
+)
 from app.services.resume_parsing import ResumeFileError
 from app.services.resumes import (
+    ResumeDefaultError,
+    ResumeInUseError,
     ResumeNotFoundError,
     ResumeService,
     ResumeUserNotFoundError,
@@ -114,3 +122,30 @@ async def get_resume_chunks(
         )
         for chunk in chunks
     ]
+
+
+@router.patch("/{resume_id}", response_model=ResumeRead)
+async def update_resume(
+    resume_id: UUID,
+    payload: ResumeUpdate,
+    service: ResumeService = Depends(get_resume_service),
+) -> ResumeRead:
+    try:
+        return _resume_read(await service.update_resume(resume_id, payload))
+    except ResumeNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ResumeDefaultError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.delete("/{resume_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_resume(
+    resume_id: UUID,
+    service: ResumeService = Depends(get_resume_service),
+) -> None:
+    try:
+        await service.delete_resume(resume_id)
+    except ResumeNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ResumeInUseError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc

@@ -3,11 +3,12 @@ from __future__ import annotations
 import re
 from uuid import UUID
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.llm.provider import LLMProvider
-from app.models.entities import Application, Campaign, CampaignJob
+from app.models.entities import AgentRun, Application, BrowserTask, Campaign, CampaignJob
 from app.models.states import ApplicationStatus, CampaignJobStatus, CampaignStatus
 from app.repositories.campaigns import CampaignRepository
 from app.repositories.matching import MatchingRepository
@@ -15,6 +16,8 @@ from app.schemas.campaigns import (
     ApplicationAction,
     CampaignApproveRequest,
     CampaignCreate,
+    CampaignUpdate,
+    CuratedCampaignCreate,
 )
 from app.schemas.ranking import JobRankingRequest
 from app.services.application_state import (
@@ -35,6 +38,10 @@ class CampaignResumeNotFoundError(ValueError):
 
 class CampaignCandidateError(ValueError):
     """Raised when candidate approval input is invalid."""
+
+
+class CampaignMaintenanceError(ValueError):
+    """Raised when a campaign cannot safely be edited or deleted."""
 
 
 class ApplicationNotFoundError(ValueError):
@@ -89,6 +96,118 @@ class CampaignService:
             target_cities=payload.target_cities,
             filters=filters,
         )
+        return await self.repository.commit_campaign(campaign)
+
+    async def update(self, campaign_id: UUID, payload: CampaignUpdate) -> Campaign:
+        campaign = await self.get_campaign(campaign_id)
+        if campaign.status != CampaignStatus.DRAFT.value:
+            raise CampaignMaintenanceError("Only draft campaigns can be edited")
+
+        if "resume_id" in payload.model_fields_set:
+            if payload.resume_id is None:
+                raise CampaignResumeNotFoundError("A campaign must use a resume")
+            resume = await self.matching_repository.get_resume(payload.resume_id)
+            if resume is None:
+                raise CampaignResumeNotFoundError("Resume not found")
+            campaign.resume_id = resume.id
+
+        for field in ("name", "query", "min_score", "max_jobs", "target_cities"):
+            value = getattr(payload, field)
+            if value is not None:
+                setattr(campaign, field, value)
+
+        filters = dict(payload.filters) if payload.filters is not None else dict(campaign.filters)
+        if payload.keywords is not None:
+            filters["keywords"] = list(
+                dict.fromkeys(value.strip() for value in payload.keywords if value.strip())
+            )
+        campaign.filters = filters
+        return await self.repository.commit_campaign(campaign)
+
+    async def delete(self, campaign_id: UUID) -> None:
+        campaign = await self.get_campaign(campaign_id)
+        deletable = {
+            CampaignStatus.DRAFT.value,
+            CampaignStatus.COMPLETED.value,
+            CampaignStatus.CANCELLED.value,
+            CampaignStatus.FAILED.value,
+        }
+        if campaign.status not in deletable:
+            raise CampaignMaintenanceError(
+                "Active campaigns must be cancelled before deletion"
+            )
+        await self.session.execute(
+            update(AgentRun)
+            .where(AgentRun.campaign_id == campaign.id)
+            .values(campaign_id=None)
+        )
+        await self.session.execute(
+            update(BrowserTask)
+            .where(BrowserTask.campaign_id == campaign.id)
+            .values(campaign_id=None)
+        )
+        await self.session.delete(campaign)
+        await self.session.commit()
+
+    async def create_curated(self, payload: CuratedCampaignCreate) -> Campaign:
+        """Create a campaign from an exact set explicitly selected by the user."""
+
+        resume = (
+            await self.matching_repository.get_resume(payload.resume_id)
+            if payload.resume_id
+            else await self.matching_repository.get_default_resume()
+        )
+        if resume is None:
+            raise CampaignResumeNotFoundError(
+                "Upload or select a resume before creating a campaign"
+            )
+        requested_ids = list(dict.fromkeys(payload.job_ids))
+        jobs = await self.repository.get_jobs_by_ids(requested_ids)
+        jobs_by_id = {job.id: job for job in jobs}
+        missing = [job_id for job_id in requested_ids if job_id not in jobs_by_id]
+        if missing:
+            raise CampaignCandidateError("One or more selected jobs do not exist")
+
+        campaign = Campaign(
+            user_id=resume.user_id,
+            resume_id=resume.id,
+            name=payload.name,
+            status=CampaignStatus.DRAFT.value,
+            query=payload.query,
+            min_score=0,
+            max_jobs=len(requested_ids),
+            target_cities=[],
+            filters={
+                "selection_mode": "user_curated",
+                "job_ids": [str(job_id) for job_id in requested_ids],
+            },
+        )
+        self.session.add(campaign)
+        await self.session.flush()
+        self.campaign_state.transition(campaign, CampaignStatus.RANKING)
+        for rank, job_id in enumerate(requested_ids, start=1):
+            job = jobs_by_id[job_id]
+            campaign_job = CampaignJob(
+                campaign_id=campaign.id,
+                job_id=job.id,
+                rank=rank,
+                score=0,
+                status=CampaignJobStatus.WAITING_APPROVAL.value,
+            )
+            application = Application(
+                user_id=campaign.user_id,
+                campaign_id=campaign.id,
+                job_id=job.id,
+                resume_id=resume.id,
+                platform=job.platform,
+                status=ApplicationStatus.DISCOVERED.value,
+                message=payload.message,
+                application_metadata={"selection_source": "user_curated"},
+            )
+            self.application_state.initialize(application)
+            self.application_state.advance_to_waiting_approval(application)
+            self.session.add_all([campaign_job, application])
+        self.campaign_state.transition(campaign, CampaignStatus.WAITING_APPROVAL)
         return await self.repository.commit_campaign(campaign)
 
     async def start(self, campaign_id: UUID) -> Campaign:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from uuid import UUID
@@ -8,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.llm.prompts.job_judge import build_job_judge_prompt
-from app.llm.provider import LLMProvider
+from app.llm.provider import LLMProvider, LLMProviderError
 from app.llm.usage import UsageAccumulator, UsageRecord, estimate_tokens
 from app.models.entities import Job, JobScore, UserPreference
 from app.repositories.matching import MatchingRepository
@@ -17,6 +18,9 @@ from app.schemas.matching import LLMJudgeOutput, ResumeEvidenceRead
 from app.schemas.resumes import ResumeProfile
 from app.services.jobs import JobService
 from app.services.resume_rag import ResumeRAG
+from app.services.score_cache import build_score_fingerprint
+
+logger = logging.getLogger(__name__)
 
 
 class MatchingJobNotFoundError(ValueError):
@@ -75,7 +79,9 @@ class SkillCoverage:
         "ml": "machine learning",
     }
 
-    def score(self, job: Job, profile: ResumeProfile) -> SkillCoverageResult:
+    def score(
+        self, job: Job, profile: ResumeProfile, *, resume_text: str = ""
+    ) -> SkillCoverageResult:
         resume_map = {self._canonical(skill): skill for skill in profile.skills}
         required = self._unique(
             skill.skill_name for skill in job.skills if skill.skill_type == "required"
@@ -84,6 +90,11 @@ class SkillCoverage:
             skill.skill_name for skill in job.skills if skill.skill_type == "preferred"
         )
         all_job_skills = required + [skill for skill in preferred if skill not in required]
+        for skill in all_job_skills:
+            if self._appears_in_text(skill, resume_text):
+                resume_map.setdefault(self._canonical(skill), skill)
+        if "mysql" in resume_map or "postgresql" in resume_map:
+            resume_map.setdefault("sql", "SQL")
         matched = [skill for skill in all_job_skills if self._canonical(skill) in resume_map]
         missing = [skill for skill in required if self._canonical(skill) not in resume_map]
 
@@ -109,6 +120,20 @@ class SkillCoverage:
         if not skills:
             return 1.0
         return sum(cls._canonical(skill) in resume_map for skill in skills) / len(skills)
+
+    @classmethod
+    def _appears_in_text(cls, skill: str, text: str) -> bool:
+        if not text:
+            return False
+        canonical = cls._canonical(skill)
+        variants = {skill, canonical, *(
+            alias for alias, target in cls.aliases.items() if target == canonical
+        )}
+        return any(
+            re.search(rf"(?<!\w){re.escape(variant.casefold())}(?!\w)", text.casefold())
+            for variant in variants
+            if variant
+        )
 
     @staticmethod
     def _unique(values) -> list[str]:
@@ -229,6 +254,9 @@ class LLMJudge:
     def __init__(self, provider: LLMProvider) -> None:
         self.provider = provider
         self.usage = UsageAccumulator()
+        self.fallback_count = 0
+        self.last_source = "llm"
+        self.last_error: str | None = None
 
     async def judge(
         self,
@@ -248,7 +276,29 @@ class LLMJudge:
             evidence=evidence,
             sub_scores=sub_scores,
         )
-        provider_result = await self.provider.generate_structured(prompt, LLMJudgeOutput)
+        self.last_source = "llm"
+        self.last_error = None
+        try:
+            provider_result = await self.provider.generate_structured(prompt, LLMJudgeOutput)
+        except LLMProviderError as exc:
+            self.last_source = "fallback"
+            self.last_error = str(exc)
+            self.fallback_count += 1
+            logger.warning("LLM judge failed; using deterministic fallback: %s", exc)
+            fallback = self._deterministic_judge(
+                matched_skills=matched_skills,
+                missing_skills=missing_skills,
+                evidence=evidence,
+                sub_scores=sub_scores,
+            )
+            return fallback.model_copy(
+                update={
+                    "risks": [
+                        *fallback.risks,
+                        "LLM 服务本次未返回有效结果，已使用确定性评分降级。",
+                    ]
+                }
+            )
         provider_usage = getattr(self.provider, "last_usage", None)
         if not isinstance(provider_usage, UsageRecord):
             provider_usage = UsageRecord(
@@ -259,6 +309,10 @@ class LLMJudge:
         self.usage.add(provider_usage)
         if provider_result.reasoning_summary or provider_result.strengths or provider_result.gaps:
             return provider_result
+        self.last_source = "fallback"
+        self.last_error = "provider returned an empty structured result"
+        self.fallback_count += 1
+        logger.warning("LLM judge returned an empty structured result; using fallback")
         return self._deterministic_judge(
             matched_skills=matched_skills,
             missing_skills=missing_skills,
@@ -333,7 +387,13 @@ class MatchingService:
         self.preference_scorer = PreferenceScorer()
         self.llm_judge = LLMJudge(provider)
 
-    async def score(self, *, job_id: UUID, resume_id: UUID | None) -> JobScore:
+    async def score(
+        self,
+        *,
+        job_id: UUID,
+        resume_id: UUID | None,
+        force: bool = False,
+    ) -> JobScore:
         job = await self.repository.get_job(job_id)
         if job is None:
             raise MatchingJobNotFoundError("Job not found")
@@ -353,12 +413,31 @@ class MatchingService:
         if resume is None:
             raise MatchingResumeNotFoundError("Upload or select a resume before scoring")
 
+        weights = self._normalized_weights()
+        input_fingerprint = build_score_fingerprint(
+            job=job,
+            resume=resume,
+            provider=self.provider,
+            score_version=self.settings.matching_score_version,
+            weights=weights,
+        )
+        if not force:
+            cached = await self.repository.get_latest_score(
+                job_id=job.id,
+                resume_id=resume.id,
+                score_version=self.settings.matching_score_version,
+                input_fingerprint=input_fingerprint,
+                judge_sources=self._cacheable_judge_sources(),
+            )
+            if cached is not None:
+                return cached
+
         profile = ResumeProfile.model_validate(resume.structured_profile or {})
         preferences = await self.repository.get_preferences(resume.user_id)
         rule_result = self.rules.evaluate(job, preferences)
         evidence = await self.rag.retrieve(job, resume)
         semantic_score = self.rag.semantic_score(evidence)
-        skill_result = self.skill_coverage.score(job, profile)
+        skill_result = self.skill_coverage.score(job, profile, resume_text=resume.raw_text)
         education_score = self.education_matcher.score(job.education_requirement or "", profile)
         experience_score = self.experience_matcher.score(job.experience_requirement or "", profile)
         location_score = self.preference_scorer.location_score(job, preferences)
@@ -383,7 +462,6 @@ class MatchingService:
             evidence=evidence,
             sub_scores=sub_scores,
         )
-        weights = self._normalized_weights()
         final_score = sum(
             weights[key] * value for key, value in {**sub_scores, "llm": judge.score}.items()
         )
@@ -415,9 +493,19 @@ class MatchingService:
             recommendation=recommendation,
             reasoning_summary=judge.reasoning_summary,
             score_version=self.settings.matching_score_version,
+            input_fingerprint=input_fingerprint,
+            judge_source=self.llm_judge.last_source,
             weights=weights,
         )
         return await self.repository.add_score(score)
+
+    def _cacheable_judge_sources(self) -> tuple[str, ...]:
+        # Mock scoring is deterministic and has no remote failure to recover
+        # from. Remote fallback scores must be retried after the provider is
+        # fixed, so they must not mask a future successful LLM result.
+        if getattr(self.provider, "provider_name", None) == "mock":
+            return ("llm", "fallback")
+        return ("llm",)
 
     def _normalized_weights(self) -> dict[str, float]:
         weights = self.settings.matching_weights

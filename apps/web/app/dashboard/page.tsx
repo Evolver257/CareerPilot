@@ -11,7 +11,7 @@ const statusLabels: Record<string, string> = {
   APPROVED: "已批准",
   QUEUED: "已排队",
   EXECUTING: "执行中",
-  SUBMITTED: "已提交",
+  SUBMITTED: "已投递",
   PAUSED: "已暂停",
   CAPTCHA_REQUIRED: "需要验证码",
   LOGIN_REQUIRED: "需要登录",
@@ -80,11 +80,11 @@ export default function DashboardPage() {
               </div>
             ))}
           </div>
-          {dashboard.funnel.every((stage) => stage.count === 0) && <p className="mt-5 text-sm text-slate-500">还没有漏斗数据。先导入职位或创建 Campaign。</p>}
+          {dashboard.funnel.every((stage) => stage.count === 0) && <p className="mt-5 text-sm text-slate-500">还没有漏斗数据。先导入职位或创建投递计划。</p>}
         </div>
 
         <div className="panel">
-          <div className="flex items-end justify-between gap-4"><div><p className="eyebrow">Application Status</p><h2 className="mt-2 text-xl font-semibold">状态分布</h2></div><Link className="text-sm font-medium text-indigo-700" href="/campaigns">Campaign →</Link></div>
+          <div className="flex items-end justify-between gap-4"><div><p className="eyebrow">投递状态</p><h2 className="mt-2 text-xl font-semibold">状态分布</h2></div><Link className="text-sm font-medium text-indigo-700" href="/campaigns">投递计划 →</Link></div>
           {dashboard.application_status.length === 0 ? <p className="mt-7 text-sm text-slate-500">暂无 Application。</p> : <div className="mt-5 space-y-3">{dashboard.application_status.map((item) => <div className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-3 text-sm" key={item.status}><span>{statusLabels[item.status] ?? item.status}</span><span className="font-semibold text-slate-900">{item.count}</span></div>)}</div>}
         </div>
       </section>
@@ -93,7 +93,7 @@ export default function DashboardPage() {
         <div className="panel">
           <div className="flex items-end justify-between gap-4"><div><p className="eyebrow">Agent Trace</p><h2 className="mt-2 text-xl font-semibold">运行质量</h2></div><Link className="text-sm font-medium text-indigo-700" href="/agent-runs">打开 Trace →</Link></div>
           <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">{[["总 Runs", agent.total_runs], ["进行中", agent.active_runs], ["已完成", agent.completed_runs], ["失败/超时", agent.failed_runs]].map(([label, value]) => <div className="rounded-xl bg-slate-50 p-4" key={String(label)}><p className="text-xs text-slate-500">{label}</p><p className="mt-2 text-2xl font-semibold">{value}</p></div>)}</div>
-          <div className="mt-5 flex flex-wrap gap-3 text-sm text-slate-500"><span>Steps {agent.total_steps}</span><span>失败 Steps {agent.failed_steps}</span><span>重试 {agent.retry_count}</span><span>平均延迟 {agent.average_latency_ms.toFixed(1)} ms</span></div>
+          <div className="mt-5 flex flex-wrap gap-3 text-sm text-slate-500"><span>步骤 {agent.total_steps}</span><span>失败步骤 {agent.failed_steps}</span><span>重试 {agent.retry_count}</span><span>平均延迟 {agent.average_latency_ms.toFixed(1)} ms</span></div>
         </div>
         <div className="panel">
           <div className="flex items-end justify-between gap-4"><div><p className="eyebrow">LLM Cost & Token Usage</p><h2 className="mt-2 text-xl font-semibold">模型用量</h2></div><Link className="text-sm font-medium text-indigo-700" href="/ranking">Ranking →</Link></div>

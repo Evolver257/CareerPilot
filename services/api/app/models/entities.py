@@ -36,6 +36,7 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+    llm_active_provider: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
     preferences: Mapped[UserPreference | None] = relationship(back_populates="user", uselist=False)
     resumes: Mapped[list[Resume]] = relationship(
@@ -48,6 +49,9 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan"
     )
     agent_runs: Mapped[list[AgentRun]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    llm_credentials: Mapped[list[LLMProviderCredential]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
     browser_tasks: Mapped[list[BrowserTask]] = relationship(
@@ -80,6 +84,28 @@ class UserPreference(Base):
     user: Mapped[User] = relationship(back_populates="preferences")
 
 
+class LLMProviderCredential(Base):
+    __tablename__ = "llm_provider_credentials"
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_llm_provider_credentials_user_provider"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(30), index=True)
+    model: Mapped[str] = mapped_column(String(200), default="")
+    base_url: Mapped[str] = mapped_column(String(2000), default="")
+    api_key_encrypted: Mapped[str] = mapped_column(Text)
+    api_key_hint: Mapped[str] = mapped_column(String(30))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    user: Mapped[User] = relationship(back_populates="llm_credentials")
+
+
 class Resume(Base):
     __tablename__ = "resumes"
 
@@ -101,6 +127,9 @@ class Resume(Base):
         back_populates="resume", cascade="all, delete-orphan"
     )
     scores: Mapped[list[JobScore]] = relationship(
+        back_populates="resume", cascade="all, delete-orphan"
+    )
+    ranking_runs: Mapped[list[RankingRun]] = relationship(
         back_populates="resume", cascade="all, delete-orphan"
     )
     campaigns: Mapped[list[Campaign]] = relationship(back_populates="resume")
@@ -230,11 +259,41 @@ class JobScore(Base):
     recommendation: Mapped[str] = mapped_column(String(30))
     reasoning_summary: Mapped[str] = mapped_column(Text, default="")
     score_version: Mapped[str] = mapped_column(String(50))
+    input_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    judge_source: Mapped[str] = mapped_column(String(30), default="llm")
     weights: Mapped[dict[str, float]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     job: Mapped[Job] = relationship(back_populates="scores")
     resume: Mapped[Resume] = relationship(back_populates="scores")
+
+
+class RankingRun(Base):
+    __tablename__ = "ranking_runs"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    resume_id: Mapped[UUID] = mapped_column(
+        ForeignKey("resumes.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
+    stage: Mapped[str] = mapped_column(String(50), default="queued")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    processed_candidates: Mapped[int] = mapped_column(Integer, default=0)
+    total_candidates: Mapped[int] = mapped_column(Integer, default=0)
+    cache_hits: Mapped[int] = mapped_column(Integer, default=0)
+    llm_calls: Mapped[int] = mapped_column(Integer, default=0)
+    fallback_count: Mapped[int] = mapped_column(Integer, default=0)
+    request_payload: Mapped[dict[str, Any]] = mapped_column("request", JSON, default=dict)
+    result_payload: Mapped[dict[str, Any]] = mapped_column("result", JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    resume: Mapped[Resume] = relationship(back_populates="ranking_runs")
 
 
 class Campaign(Base):

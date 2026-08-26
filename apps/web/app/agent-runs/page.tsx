@@ -6,8 +6,10 @@ import { useEffect, useState } from "react";
 
 import {
   createAgentRun,
+  deleteAgentRun,
   getAgentRuns,
   getResumes,
+  updateAgentRun,
   type AgentRun,
   type Resume,
 } from "../../lib/api";
@@ -32,6 +34,7 @@ export default function AgentRunsPage() {
   const [autoStart, setAutoStart] = useState(true);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [maintaining, setMaintaining] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -65,11 +68,50 @@ export default function AgentRunsPage() {
     }
   }
 
+  async function reloadRuns() {
+    const response = await getAgentRuns();
+    setRuns(response.items);
+  }
+
+  async function handleEdit(run: AgentRun) {
+    const nextGoal = window.prompt("求职目标", String(run.input.goal ?? ""));
+    if (nextGoal === null) return;
+    const nextMaxSteps = window.prompt("最大执行步数", String(run.max_steps));
+    if (nextMaxSteps === null) return;
+    setMaintaining(true);
+    setError(null);
+    try {
+      await updateAgentRun(run.id, {
+        goal: nextGoal.trim(),
+        max_steps: Number(nextMaxSteps),
+      });
+      await reloadRuns();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Agent 任务保存失败。");
+    } finally {
+      setMaintaining(false);
+    }
+  }
+
+  async function handleDelete(run: AgentRun) {
+    if (!window.confirm("确定删除这条 Agent 执行记录吗？运行中或等待审批的任务需先取消。")) return;
+    setMaintaining(true);
+    setError(null);
+    try {
+      await deleteAgentRun(run.id);
+      await reloadRuns();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Agent 任务删除失败。");
+    } finally {
+      setMaintaining(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-7xl space-y-8">
       <header>
-        <p className="eyebrow">Agent Runtime</p>
-        <h1 className="mt-3 text-3xl font-semibold tracking-tight">Agent Runs</h1>
+        <p className="eyebrow">求职 Agent</p>
+        <h1 className="mt-3 text-3xl font-semibold tracking-tight">求职任务</h1>
         <p className="mt-3 max-w-3xl text-slate-500">
           用自然语言发起求职目标，查看 Planner、Tool 调用、状态检查点与人工审批轨迹。
         </p>
@@ -77,7 +119,7 @@ export default function AgentRunsPage() {
 
       <section className="panel">
         <div className="flex flex-wrap items-end justify-between gap-4">
-          <div><p className="eyebrow">New Run</p><h2 className="mt-2 text-xl font-semibold">启动求职 Agent</h2></div>
+          <div><p className="eyebrow">新任务</p><h2 className="mt-2 text-xl font-semibold">启动求职 Agent</h2></div>
           <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">Single Orchestrator</span>
         </div>
         <label className="mt-6 block text-sm font-medium text-slate-700">
@@ -106,20 +148,21 @@ export default function AgentRunsPage() {
 
       <section>
         <div className="mb-4 flex items-end justify-between gap-4">
-          <div><p className="eyebrow">Run History</p><h2 className="mt-2 text-xl font-semibold">执行记录</h2></div>
-          <p className="text-sm text-slate-500">{runs.length} 个 Run</p>
+          <div><p className="eyebrow">任务历史</p><h2 className="mt-2 text-xl font-semibold">执行记录</h2></div>
+          <p className="text-sm text-slate-500">{runs.length} 个任务</p>
         </div>
         {loading && <div className="panel text-center text-slate-500">加载中…</div>}
         {!loading && runs.length === 0 && <div className="panel text-center text-slate-500">还没有 Agent Run。</div>}
         <div className="grid gap-4 lg:grid-cols-2">
           {runs.map((run) => (
-            <Link className="panel block transition hover:-translate-y-0.5 hover:border-indigo-200 hover:shadow-md" href={`/agent-runs/${run.id}`} key={run.id}>
+            <article className="panel transition hover:border-indigo-200 hover:shadow-md" key={run.id}>
               <div className="flex items-start justify-between gap-4">
-                <div><h3 className="line-clamp-2 font-semibold text-slate-900">{run.input.goal ?? "未命名目标"}</h3><p className="mt-2 text-xs text-slate-500">{new Date(run.created_at).toLocaleString("zh-CN")}</p></div>
+                <div><Link className="line-clamp-2 font-semibold text-slate-900 hover:text-indigo-700" href={`/agent-runs/${run.id}`}>{run.input.goal ?? "未命名目标"}</Link><p className="mt-2 text-xs text-slate-500">{new Date(run.created_at).toLocaleString("zh-CN")}</p></div>
                 <span className="whitespace-nowrap rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">{statusLabels[run.status]}</span>
               </div>
               <div className="mt-5 flex items-center justify-between border-t border-slate-100 pt-4 text-sm text-slate-500"><span>{run.steps.length} steps</span><span>{run.campaign_id ? "Campaign 已创建" : "尚无 Campaign"}</span></div>
-            </Link>
+              <div className="mt-4 flex justify-end gap-3 border-t border-slate-100 pt-4 text-sm"><Link className="font-medium text-indigo-700" href={`/agent-runs/${run.id}`}>查看详情</Link>{run.status === "PENDING" && <button className="font-medium text-indigo-700" disabled={maintaining} onClick={() => void handleEdit(run)} type="button">编辑</button>}<button className="font-medium text-rose-600 disabled:opacity-40" disabled={maintaining} onClick={() => void handleDelete(run)} type="button">删除</button></div>
+            </article>
           ))}
         </div>
       </section>

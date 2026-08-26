@@ -19,6 +19,8 @@ class JobRequirements(BaseModel):
     education: str = ""
     experience: str = ""
     responsibilities: list[str] = Field(default_factory=list)
+    qualifications: list[str] = Field(default_factory=list)
+    preferred_qualifications: list[str] = Field(default_factory=list)
 
 
 class StructuredJob(BaseModel):

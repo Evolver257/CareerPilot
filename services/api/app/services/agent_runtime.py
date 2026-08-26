@@ -16,7 +16,7 @@ from app.models.entities import AgentEvent, AgentRun, AgentStep
 from app.models.states import AgentEventType, AgentRunStatus, AgentStepStatus
 from app.repositories.agents import AgentRepository
 from app.repositories.matching import MatchingRepository
-from app.schemas.agents import AgentRunCreate, AgentRunResumeRequest
+from app.schemas.agents import AgentRunCreate, AgentRunResumeRequest, AgentRunUpdate
 from app.services.agent_tools import AgentTool, AgentToolService, ToolRegistry
 
 
@@ -246,6 +246,33 @@ class AgentRuntime:
         self.events.emit(run, AgentEventType.RUN_CREATED, {"goal": payload.goal})
         run = await self.repository.checkpoint(run)
         return await self.start(run.id) if payload.auto_start else run
+
+    async def update(self, run_id: UUID, payload: AgentRunUpdate) -> AgentRun:
+        run = await self.get_run(run_id)
+        if run.status != AgentRunStatus.PENDING.value:
+            raise AgentRunActionError("Only pending Agent Runs can be edited")
+        if payload.goal is not None:
+            run.run_input = {**run.run_input, "goal": payload.goal}
+            run.agent_state = self.planner.create_state(payload.goal).dump()
+            resume_id = UUID(str(run.run_input["resume_id"]))
+            run.memory = AgentMemory.initialize(goal=payload.goal, resume_id=resume_id)
+        for setting_name in ("max_steps", "timeout_seconds", "max_retries"):
+            value = getattr(payload, setting_name)
+            if value is not None:
+                setattr(run, setting_name, value)
+        return await self.repository.checkpoint(run)
+
+    async def delete(self, run_id: UUID) -> None:
+        run = await self.get_run(run_id)
+        deletable = {status.value for status in self.terminal} | {
+            AgentRunStatus.PENDING.value
+        }
+        if run.status not in deletable:
+            raise AgentRunActionError(
+                "Running or waiting Agent Runs must be cancelled before deletion"
+            )
+        await self.session.delete(run)
+        await self.session.commit()
 
     async def start(self, run_id: UUID) -> AgentRun:
         run = await self.get_run(run_id)

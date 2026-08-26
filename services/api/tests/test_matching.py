@@ -1,5 +1,17 @@
 from httpx import AsyncClient
 
+from app.api.dependencies import get_llm_provider
+from app.llm.provider import LLMProviderError, MockLLMProvider
+from app.main import app
+
+
+class EmptyResponseProvider(MockLLMProvider):
+    provider_name = "empty-test"
+    model = "empty-test-model"
+
+    async def generate_structured(self, prompt, schema, *, model=None):
+        raise LLMProviderError("provider returned an empty response")
+
 
 async def _upload_resume(client: AsyncClient) -> str:
     resume_text = """Alex Chen
@@ -116,3 +128,96 @@ Requirements
 
     assert response.status_code == 409
     assert "resume" in response.json()["detail"].lower()
+
+
+async def test_scoring_reuses_cache_until_forced_or_job_changes(client: AsyncClient) -> None:
+    resume_id = await _upload_resume(client)
+    job_id = await _import_job(
+        client,
+        "Backend Engineer\nRequirements\n- Python and FastAPI.",
+        "score-cache-001",
+    )
+
+    first = await client.post(
+        f"/api/jobs/{job_id}/score", json={"resume_id": resume_id}
+    )
+    cached = await client.post(
+        f"/api/jobs/{job_id}/score", json={"resume_id": resume_id}
+    )
+    forced = await client.post(
+        f"/api/jobs/{job_id}/score",
+        json={"resume_id": resume_id, "force": True},
+    )
+
+    assert first.json()["id"] == cached.json()["id"]
+    assert forced.json()["id"] != cached.json()["id"]
+
+    changed = await client.patch(
+        f"/api/jobs/{job_id}", json={"location": "北京"}
+    )
+    assert changed.status_code == 200
+    rescored = await client.post(
+        f"/api/jobs/{job_id}/score", json={"resume_id": resume_id}
+    )
+    assert rescored.json()["id"] != forced.json()["id"]
+
+
+async def test_skill_coverage_agrees_with_technologies_present_in_resume_text(
+    client: AsyncClient,
+) -> None:
+    resume = await client.post(
+        "/api/resumes",
+        files={
+            "file": (
+                "narrative-resume.txt",
+                "专业技能\n熟悉 Java，掌握 MySQL 与 PostgreSQL 数据库开发。".encode(),
+                "text/plain",
+            )
+        },
+    )
+    job_id = await _import_job(
+        client,
+        "Backend Engineer\nRequirements\n- Java, SQL, MySQL and PostgreSQL.",
+        "narrative-skills-001",
+    )
+
+    scored = await client.post(
+        f"/api/jobs/{job_id}/score", json={"resume_id": resume.json()["id"]}
+    )
+
+    assert scored.status_code == 200
+    result = scored.json()
+    assert {"Java", "SQL", "MySQL", "PostgreSQL"}.issubset(result["matched_skills"])
+    assert not {"SQL", "MySQL", "PostgreSQL"}.intersection(result["missing_skills"])
+
+
+async def test_llm_empty_response_falls_back_without_failing_the_score(
+    client: AsyncClient,
+) -> None:
+    resume_id = await _upload_resume(client)
+    job_id = await _import_job(
+        client,
+        "Backend Engineer\nRequirements\n- Python, FastAPI and PostgreSQL.",
+        "fallback-score-001",
+    )
+    provider = EmptyResponseProvider()
+
+    async def override_provider():
+        return provider
+
+    app.dependency_overrides[get_llm_provider] = override_provider
+    try:
+        response = await client.post(
+            f"/api/jobs/{job_id}/score",
+            json={"resume_id": resume_id, "force": True},
+        )
+        retried = await client.post(f"/api/jobs/{job_id}/score", json={"resume_id": resume_id})
+    finally:
+        app.dependency_overrides.pop(get_llm_provider, None)
+
+    assert response.status_code == 200
+    score = response.json()
+    assert score["judge_source"] == "fallback"
+    assert any("确定性评分降级" in risk for risk in score["risks"])
+    assert retried.status_code == 200
+    assert retried.json()["id"] != score["id"]

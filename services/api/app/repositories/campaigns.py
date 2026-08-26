@@ -70,6 +70,19 @@ class CampaignRepository:
             ).all()
         )
 
+    async def get_jobs_by_ids(self, job_ids: list[UUID]) -> list[Job]:
+        if not job_ids:
+            return []
+        return list(
+            (
+                await self.session.scalars(
+                    select(Job)
+                    .options(selectinload(Job.skills), selectinload(Job.company))
+                    .where(Job.id.in_(job_ids))
+                )
+            ).all()
+        )
+
     async def list_applications(self) -> tuple[list[Application], int]:
         query = (
             select(Application)

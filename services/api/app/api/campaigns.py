@@ -16,12 +16,15 @@ from app.schemas.campaigns import (
     CampaignJobRead,
     CampaignListResponse,
     CampaignRead,
+    CampaignUpdate,
+    CuratedCampaignCreate,
 )
 from app.schemas.jobs import JobRead
 from app.services.application_state import InvalidStateTransitionError
 from app.services.campaigns import (
     ApplicationNotFoundError,
     CampaignCandidateError,
+    CampaignMaintenanceError,
     CampaignNotFoundError,
     CampaignResumeNotFoundError,
     CampaignService,
@@ -127,6 +130,21 @@ async def create_campaign(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
+@router.post(
+    "/curated",
+    response_model=CampaignDetailRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_curated_campaign(
+    payload: CuratedCampaignCreate,
+    service: CampaignService = Depends(get_campaign_service),
+) -> CampaignDetailRead:
+    try:
+        return _campaign_detail(await service.create_curated(payload))
+    except (CampaignResumeNotFoundError, CampaignCandidateError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
 @router.get("/{campaign_id}", response_model=CampaignDetailRead)
 async def get_campaign(
     campaign_id: UUID,
@@ -136,6 +154,33 @@ async def get_campaign(
         return _campaign_detail(await service.get_campaign(campaign_id))
     except CampaignNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.patch("/{campaign_id}", response_model=CampaignDetailRead)
+async def update_campaign(
+    campaign_id: UUID,
+    payload: CampaignUpdate,
+    service: CampaignService = Depends(get_campaign_service),
+) -> CampaignDetailRead:
+    try:
+        return _campaign_detail(await service.update(campaign_id, payload))
+    except CampaignNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (CampaignMaintenanceError, CampaignResumeNotFoundError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.delete("/{campaign_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_campaign(
+    campaign_id: UUID,
+    service: CampaignService = Depends(get_campaign_service),
+) -> None:
+    try:
+        await service.delete(campaign_id)
+    except CampaignNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except CampaignMaintenanceError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 async def _campaign_action(campaign_id: UUID, action, service: CampaignService):

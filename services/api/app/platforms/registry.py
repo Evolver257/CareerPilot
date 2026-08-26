@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.platforms.base import JobPlatformAdapter, PlatformAdapterError
+from app.platforms.boss import BossZhipinAdapter
 from app.platforms.careerboard import CareerBoardAdapter
 from app.platforms.mock import MockPlatformAdapter
 
@@ -14,6 +15,7 @@ class PlatformAdapterRegistry:
         self._adapters: dict[str, JobPlatformAdapter] = {
             "mock": MockPlatformAdapter(session),
             "careerboard": CareerBoardAdapter(session),
+            "boss": BossZhipinAdapter(session),
         }
 
     def get(self, platform: str) -> JobPlatformAdapter:
@@ -33,6 +35,12 @@ class PlatformAdapterRegistry:
             {
                 "name": "careerboard",
                 "label": "CareerBoard Prototype",
+                "mode": "user_browser_session",
+                "safe_for_automation": False,
+            },
+            {
+                "name": "boss",
+                "label": "BOSS 直聘 · 可见页面兼容",
                 "mode": "user_browser_session",
                 "safe_for_automation": False,
             },

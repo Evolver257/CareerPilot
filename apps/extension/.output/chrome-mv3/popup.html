@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CareerPilot BOSS 采集</title>
+    <style>
+      body { width: 300px; margin: 0; padding: 16px; color: #1e293b; font: 14px/1.5 Arial, sans-serif; }
+      h1 { margin: 0 0 8px; font-size: 16px; }
+      p { color: #64748b; }
+      button { width: 100%; border: 0; border-radius: 8px; padding: 10px 12px; color: white; background: #4f46e5; cursor: pointer; }
+      button:disabled { cursor: wait; opacity: .6; }
+      #status { margin-top: 10px; }
+      .ok { color: #047857; }
+      .error { color: #be123c; }
+    </style>
+    <script type="module" crossorigin src="/chunks/popup-CwtNxi60.js"></script>
+  </head>
+  <body>
+    <h1>CareerPilot · BOSS 直聘</h1>
+    <p>只采集当前可见职位，不读取 Cookie、密码或 Token。</p>
+    <button id="capture" type="button">采集当前可见职位</button>
+    <div id="status" role="status"></div>
+  </body>
+</html>

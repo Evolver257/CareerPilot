@@ -18,6 +18,13 @@ class AgentRunCreate(BaseModel):
     max_retries: int = Field(default=2, ge=0, le=5)
 
 
+class AgentRunUpdate(BaseModel):
+    goal: str | None = Field(default=None, min_length=1, max_length=2000)
+    max_steps: int | None = Field(default=None, ge=1, le=50)
+    timeout_seconds: int | None = Field(default=None, ge=5, le=300)
+    max_retries: int | None = Field(default=None, ge=0, le=5)
+
+
 class AgentRunResumeRequest(BaseModel):
     approved: bool | None = None
     selected_job_ids: list[UUID] = Field(default_factory=list, max_length=100)

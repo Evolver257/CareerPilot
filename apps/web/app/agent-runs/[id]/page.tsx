@@ -29,7 +29,7 @@ const toolLabels: Record<string, string> = {
   analyze_job: "Analyze Jobs",
   retrieve_resume: "Retrieve Resume",
   rank_jobs: "Rank Jobs",
-  create_campaign: "Create Campaign",
+  create_campaign: "创建投递计划",
   request_approval: "Request Approval",
   queue_application: "Queue Applications",
 };
@@ -136,7 +136,7 @@ export default function AgentRunDetailPage() {
           {run.status === "PAUSED" && <button className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => void handleResume({})} type="button">Resume</button>}
           {(["FAILED", "TIMED_OUT"] as AgentRunStatus[]).includes(run.status) && <button className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => void handleAction("retry")} type="button">Retry as new Run</button>}
           {canCancel && <button className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-700 disabled:opacity-50" disabled={busy} onClick={() => void handleAction("cancel")} type="button">Cancel</button>}
-          {run.campaign_id && <Link className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700" href={`/campaigns/${run.campaign_id}`}>查看 Campaign</Link>}
+          {run.campaign_id && <Link className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700" href={`/campaigns/${run.campaign_id}`}>查看投递计划</Link>}
         </div>
       </header>
 
@@ -167,7 +167,7 @@ export default function AgentRunDetailPage() {
       )}
 
       <section>
-        <div className="mb-4 flex items-end justify-between gap-4"><div><p className="eyebrow">Execution Trace</p><h2 className="mt-2 text-xl font-semibold">Agent Steps</h2></div><p className="text-sm text-slate-500">{run.steps.length} / {run.max_steps} steps</p></div>
+        <div className="mb-4 flex items-end justify-between gap-4"><div><p className="eyebrow">执行轨迹</p><h2 className="mt-2 text-xl font-semibold">Agent 步骤</h2></div><p className="text-sm text-slate-500">已执行 {run.steps.length} 步 · 安全上限 {run.max_steps} 步</p></div>
         <ol className="space-y-4">
           {run.steps.map((step) => (
             <li className="panel" key={step.id}>

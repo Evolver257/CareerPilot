@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.entities import BrowserTask, BrowserTaskEvent
+from app.models.states import BrowserTaskStatus
 
 
 class BrowserTaskRepository:
@@ -30,6 +31,33 @@ class BrowserTaskRepository:
             .options(selectinload(BrowserTask.events))
             .where(BrowserTask.id == task_id)
         )
+
+    async def get_active_tasks_for_applications(
+        self, application_ids: list[UUID]
+    ) -> dict[UUID, BrowserTask]:
+        if not application_ids:
+            return {}
+        terminal_statuses = {
+            BrowserTaskStatus.COMPLETED.value,
+            BrowserTaskStatus.CANCELLED.value,
+            BrowserTaskStatus.FAILED.value,
+        }
+        tasks = list(
+            (
+                await self.session.scalars(
+                    select(BrowserTask)
+                    .options(selectinload(BrowserTask.events))
+                    .where(
+                        BrowserTask.application_id.in_(application_ids),
+                        BrowserTask.status.not_in(terminal_statuses),
+                    )
+                    .order_by(BrowserTask.created_at.desc())
+                )
+            )
+            .unique()
+            .all()
+        )
+        return {task.application_id: task for task in tasks}
 
     async def add_event(
         self,

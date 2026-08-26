@@ -10,7 +10,7 @@ export default function MockPlatformPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    getJobs()
+    getJobs({ page_size: 100 })
       .then((response) => setJobs(response.items))
       .catch((reason) => setError(reason instanceof Error ? reason.message : "职位加载失败。"));
   }, []);
