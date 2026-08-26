@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.entities import BrowserTask, BrowserTaskEvent
+from app.models.entities import Application, BrowserTask, BrowserTaskEvent
 from app.models.states import BrowserTaskStatus
 
 
@@ -58,6 +58,30 @@ class BrowserTaskRepository:
             .all()
         )
         return {task.application_id: task for task in tasks}
+
+    async def list_campaign_tasks(
+        self, campaign_id: UUID | None = None
+    ) -> list[BrowserTask]:
+        query = (
+            select(BrowserTask)
+            .options(
+                selectinload(BrowserTask.events),
+                selectinload(BrowserTask.application).selectinload(Application.job),
+                selectinload(BrowserTask.campaign),
+            )
+            .where(BrowserTask.campaign_id.is_not(None))
+            .order_by(BrowserTask.created_at.desc())
+        )
+        if campaign_id is not None:
+            query = query.where(BrowserTask.campaign_id == campaign_id)
+        return list((await self.session.scalars(query)).unique().all())
+
+    async def delete_campaign_tasks(self, campaign_id: UUID) -> int:
+        result = await self.session.execute(
+            delete(BrowserTask).where(BrowserTask.campaign_id == campaign_id)
+        )
+        await self.session.commit()
+        return int(result.rowcount or 0)
 
     async def add_event(
         self,

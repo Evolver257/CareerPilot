@@ -17,6 +17,9 @@ from app.schemas.browser import (
     BrowserExtensionHello,
     BrowserTaskCampaignCreate,
     BrowserTaskCampaignFailure,
+    BrowserTaskCampaignGroupListResponse,
+    BrowserTaskCampaignGroupRead,
+    BrowserTaskCampaignItemRead,
     BrowserTaskCampaignResponse,
     BrowserTaskCreate,
     BrowserTaskEventRead,
@@ -73,6 +76,60 @@ def _task_read(task: BrowserTask) -> BrowserTaskRead:
     )
 
 
+def _campaign_group_read(tasks: list[BrowserTask]) -> BrowserTaskCampaignGroupRead:
+    campaign = tasks[0].campaign
+    statuses = [task.status for task in tasks]
+    submitted_count = sum(task.application.status == "SUBMITTED" for task in tasks)
+    waiting_count = statuses.count(BrowserTaskStatus.WAITING_FOR_USER.value)
+    failed_count = statuses.count(BrowserTaskStatus.FAILED.value)
+    cancelled_count = statuses.count(BrowserTaskStatus.CANCELLED.value)
+    active_count = sum(
+        status_value
+        in {
+            BrowserTaskStatus.PENDING.value,
+            BrowserTaskStatus.CONNECTING.value,
+            BrowserTaskStatus.RUNNING.value,
+        }
+        for status_value in statuses
+    )
+    if waiting_count:
+        group_status = BrowserTaskStatus.WAITING_FOR_USER.value
+    elif active_count:
+        group_status = BrowserTaskStatus.RUNNING.value
+    elif submitted_count == len(tasks):
+        group_status = BrowserTaskStatus.COMPLETED.value
+    elif failed_count:
+        group_status = BrowserTaskStatus.FAILED.value
+    elif cancelled_count == len(tasks):
+        group_status = BrowserTaskStatus.CANCELLED.value
+    else:
+        group_status = "PARTIAL"
+    return BrowserTaskCampaignGroupRead(
+        campaign_id=tasks[0].campaign_id,
+        campaign_name=campaign.name if campaign else "已删除的投递计划",
+        campaign_status=campaign.status if campaign else "UNKNOWN",
+        status=group_status,
+        platforms=sorted({task.platform for task in tasks}),
+        task_count=len(tasks),
+        submitted_count=submitted_count,
+        active_count=active_count,
+        waiting_count=waiting_count,
+        failed_count=failed_count,
+        cancelled_count=cancelled_count,
+        created_at=min(task.created_at for task in tasks),
+        updated_at=max(task.updated_at for task in tasks),
+        items=[
+            BrowserTaskCampaignItemRead(
+                task=_task_read(task),
+                job_id=task.application.job_id,
+                job_title=task.application.job.title,
+                application_status=task.application.status,
+            )
+            for task in sorted(tasks, key=lambda item: item.created_at)
+        ],
+    )
+
+
 @router.get("", response_model=BrowserTaskListResponse)
 async def list_browser_tasks(
     service: BrowserTaskService = Depends(get_browser_task_service),
@@ -117,6 +174,54 @@ async def create_campaign_browser_tasks(
             for application_id, reason in result.failures
         ],
     )
+
+
+@router.get("/campaigns", response_model=BrowserTaskCampaignGroupListResponse)
+async def list_campaign_browser_task_records(
+    service: BrowserTaskService = Depends(get_browser_task_service),
+) -> BrowserTaskCampaignGroupListResponse:
+    groups = await service.list_campaign_task_groups()
+    return BrowserTaskCampaignGroupListResponse(
+        items=[_campaign_group_read(tasks) for tasks in groups],
+        total=len(groups),
+    )
+
+
+@router.get("/campaigns/{campaign_id}", response_model=BrowserTaskCampaignGroupRead)
+async def get_campaign_browser_task_record(
+    campaign_id: UUID,
+    service: BrowserTaskService = Depends(get_browser_task_service),
+) -> BrowserTaskCampaignGroupRead:
+    try:
+        return _campaign_group_read(await service.get_campaign_task_group(campaign_id))
+    except BrowserTaskNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.post("/campaigns/{campaign_id}/cancel", response_model=BrowserTaskCampaignGroupRead)
+async def cancel_campaign_browser_tasks(
+    campaign_id: UUID,
+    service: BrowserTaskService = Depends(get_browser_task_service),
+) -> BrowserTaskCampaignGroupRead:
+    try:
+        return _campaign_group_read(await service.cancel_campaign_tasks(campaign_id))
+    except BrowserTaskNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except BrowserTaskActionError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.delete("/campaigns/{campaign_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_campaign_browser_task_records(
+    campaign_id: UUID,
+    service: BrowserTaskService = Depends(get_browser_task_service),
+) -> None:
+    try:
+        await service.delete_campaign_task_records(campaign_id)
+    except BrowserTaskNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except BrowserTaskActionError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.get("/platforms", response_model=list[PlatformAdapterRead])

@@ -101,6 +101,60 @@ class BrowserTaskService:
     async def list_tasks(self) -> tuple[list[BrowserTask], int]:
         return await self.repository.list_tasks()
 
+    async def list_campaign_task_groups(self) -> list[list[BrowserTask]]:
+        tasks = await self.repository.list_campaign_tasks()
+        grouped: dict[UUID, list[BrowserTask]] = {}
+        for task in tasks:
+            if task.campaign_id is not None:
+                grouped.setdefault(task.campaign_id, []).append(task)
+        return sorted(
+            grouped.values(),
+            key=lambda items: max(task.updated_at for task in items),
+            reverse=True,
+        )
+
+    async def get_campaign_task_group(self, campaign_id: UUID) -> list[BrowserTask]:
+        tasks = await self.repository.list_campaign_tasks(campaign_id)
+        if not tasks:
+            raise BrowserTaskNotFoundError("Campaign Browser Task record not found")
+        return tasks
+
+    async def cancel_campaign_tasks(self, campaign_id: UUID) -> list[BrowserTask]:
+        tasks = await self.get_campaign_task_group(campaign_id)
+        task_ids = [task.id for task in tasks]
+        terminal = {
+            BrowserTaskStatus.COMPLETED.value,
+            BrowserTaskStatus.CANCELLED.value,
+        }
+        for task in tasks:
+            if task.status not in terminal:
+                await self.cancel(task.id, notify_extension=False)
+        for task_id in task_ids:
+            delivered = await browser_socket_manager.send(
+                task_id,
+                {
+                    "type": "TASK_BATCH_CANCELLED",
+                    "task_ids": [str(value) for value in task_ids],
+                },
+            )
+            if delivered:
+                break
+        return await self.get_campaign_task_group(campaign_id)
+
+    async def delete_campaign_task_records(self, campaign_id: UUID) -> None:
+        tasks = await self.get_campaign_task_group(campaign_id)
+        active = {
+            BrowserTaskStatus.PENDING.value,
+            BrowserTaskStatus.CONNECTING.value,
+            BrowserTaskStatus.RUNNING.value,
+            BrowserTaskStatus.WAITING_FOR_USER.value,
+        }
+        if any(task.status in active for task in tasks):
+            raise BrowserTaskActionError(
+                "Active Campaign Browser Tasks must be cancelled before deletion"
+            )
+        await self.repository.delete_campaign_tasks(campaign_id)
+
     async def get_task(self, task_id: UUID) -> BrowserTask:
         task = await self.repository.get_task(task_id)
         if task is None:
@@ -384,7 +438,7 @@ class BrowserTaskService:
             )
         raise BrowserTaskActionError("Mock Extension exceeded the action limit")
 
-    async def cancel(self, task_id: UUID) -> BrowserTask:
+    async def cancel(self, task_id: UUID, *, notify_extension: bool = True) -> BrowserTask:
         task = await self.get_task(task_id)
         if task.status in {
             BrowserTaskStatus.COMPLETED.value,
@@ -408,14 +462,15 @@ class BrowserTaskService:
             task, BrowserTaskEventType.TASK_CANCELLED.value, payload={}
         )
         task = await self._checkpoint(task)
-        await browser_socket_manager.send(
-            task.id,
-            {
-                "type": "TASK_CANCELLED",
-                "task_id": str(task.id),
-                "status": BrowserTaskStatus.CANCELLED.value,
-            },
-        )
+        if notify_extension:
+            await browser_socket_manager.send(
+                task.id,
+                {
+                    "type": "TASK_CANCELLED",
+                    "task_id": str(task.id),
+                    "status": BrowserTaskStatus.CANCELLED.value,
+                },
+            )
         return task
 
     async def _begin_extension_session(self, task: BrowserTask) -> BrowserTask:

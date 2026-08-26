@@ -41,6 +41,7 @@ from app.services.campaigns import CampaignService
 from app.services.jobs import JobService
 from app.services.matching import MatchingResumeNotFoundError, MatchingService
 from app.services.ranking import RankingService
+from app.services.ranking_runs import RankingRunService
 
 ToolHandler = Callable[[BaseModel], Awaitable[BaseModel]]
 
@@ -283,7 +284,10 @@ class AgentToolService:
                 target_cities=payload.cities,
             )
         )
-        campaign = await service.start(campaign.id)
+        campaign, ranking_run = await service.start(campaign.id)
+        if ranking_run is not None:
+            await RankingRunService(self.session).execute(ranking_run.id, self.provider)
+            campaign = await service.get_campaign(campaign.id)
         score_ids = {
             item.job_id: item.application_metadata.get("ranking_score_id")
             for item in campaign.applications

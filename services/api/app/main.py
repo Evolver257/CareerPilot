@@ -20,13 +20,22 @@ from app.api import (
     resumes,
 )
 from app.core.config import get_settings
-from app.services.ranking_runs import fail_interrupted_ranking_runs
+from app.services.ranking_runs import (
+    recover_interrupted_ranking_runs,
+    schedule_ranking_run,
+    shutdown_ranking_tasks,
+)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    await fail_interrupted_ranking_runs()
-    yield
+    recovered_run_ids = await recover_interrupted_ranking_runs()
+    for run_id in recovered_run_ids:
+        schedule_ranking_run(run_id)
+    try:
+        yield
+    finally:
+        await shutdown_ranking_tasks()
 
 
 settings = get_settings()

@@ -1,5 +1,7 @@
 from httpx import AsyncClient
 
+from app.services.dashboard import DashboardService
+
 
 async def test_dashboard_returns_product_metrics_and_safe_empty_states(
     client: AsyncClient,
@@ -34,3 +36,25 @@ async def test_dashboard_returns_product_metrics_and_safe_empty_states(
     assert populated.status_code == 200
     assert populated.json()["summary"]["jobs_total"] == 1
     assert populated.json()["funnel"][0]["count"] == 1
+
+
+async def test_dashboard_caps_non_monotonic_funnel_conversion_rates() -> None:
+    class NonMonotonicDashboardRepository:
+        async def snapshot(self):
+            return {
+                "jobs_total": 10,
+                "high_match_jobs": 1,
+                "campaigns_total": 1,
+                "campaign_candidates": 8,
+                "application_status": {"QUEUED": 8},
+                "agent_runs": [],
+            }
+
+    dashboard = await DashboardService(NonMonotonicDashboardRepository()).overview()
+    queued = next(stage for stage in dashboard.funnel if stage.key == "queued")
+    assert queued.count == 8
+    assert queued.conversion_rate == 100.0
+    assert all(
+        stage.conversion_rate is None or 0 <= stage.conversion_rate <= 100
+        for stage in dashboard.funnel
+    )

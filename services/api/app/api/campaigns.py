@@ -20,6 +20,7 @@ from app.schemas.campaigns import (
     CuratedCampaignCreate,
 )
 from app.schemas.jobs import JobRead
+from app.schemas.ranking import RankingRunRead
 from app.services.application_state import InvalidStateTransitionError
 from app.services.campaigns import (
     ApplicationNotFoundError,
@@ -29,6 +30,7 @@ from app.services.campaigns import (
     CampaignResumeNotFoundError,
     CampaignService,
 )
+from app.services.ranking_runs import schedule_ranking_run
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 applications_router = APIRouter(prefix="/api/applications", tags=["applications"])
@@ -66,6 +68,7 @@ def _campaign_read(campaign: Campaign) -> CampaignRead:
         }
         for item in campaign.campaign_jobs
     )
+    ranking_run = max(campaign.ranking_runs, key=lambda item: item.created_at, default=None)
     return CampaignRead(
         id=campaign.id,
         user_id=campaign.user_id,
@@ -75,6 +78,7 @@ def _campaign_read(campaign: Campaign) -> CampaignRead:
         query=campaign.query,
         min_score=campaign.min_score,
         max_jobs=campaign.max_jobs,
+        scoring_mode=campaign.scoring_mode,
         target_cities=campaign.target_cities,
         filters=campaign.filters,
         candidate_count=len(campaign.campaign_jobs),
@@ -84,6 +88,7 @@ def _campaign_read(campaign: Campaign) -> CampaignRead:
         updated_at=campaign.updated_at,
         started_at=campaign.started_at,
         finished_at=campaign.finished_at,
+        ranking_run=(RankingRunRead.model_validate(ranking_run) if ranking_run else None),
     )
 
 
@@ -197,7 +202,31 @@ async def start_campaign(
     campaign_id: UUID,
     service: CampaignService = Depends(get_campaign_service),
 ) -> CampaignDetailRead:
-    return await _campaign_action(campaign_id, service.start, service)
+    try:
+        campaign, ranking_run = await service.start(campaign_id)
+    except CampaignNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (CampaignResumeNotFoundError, InvalidStateTransitionError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if ranking_run is not None:
+        schedule_ranking_run(ranking_run.id)
+    return _campaign_detail(campaign)
+
+
+@router.post("/{campaign_id}/retry", response_model=CampaignDetailRead)
+async def retry_campaign_ranking(
+    campaign_id: UUID,
+    service: CampaignService = Depends(get_campaign_service),
+) -> CampaignDetailRead:
+    try:
+        campaign, ranking_run = await service.retry(campaign_id)
+    except CampaignNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (CampaignResumeNotFoundError, InvalidStateTransitionError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if ranking_run is not None:
+        schedule_ranking_run(ranking_run.id)
+    return _campaign_detail(campaign)
 
 
 @router.post("/{campaign_id}/approve", response_model=CampaignDetailRead)

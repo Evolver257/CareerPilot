@@ -176,7 +176,9 @@ export type JobRankingResponse = {
 export type RankingRun = {
   id: string;
   resume_id: string;
-  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  campaign_id: string | null;
+  timeout_seconds: number;
+  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "TIMED_OUT";
   stage: string;
   progress: number;
   processed_candidates: number;
@@ -248,6 +250,7 @@ export type Campaign = {
   query: string;
   min_score: number;
   max_jobs: number;
+  scoring_mode: RankingScoringMode;
   target_cities: string[];
   filters: Record<string, unknown>;
   candidate_count: number;
@@ -257,6 +260,7 @@ export type Campaign = {
   updated_at: string;
   started_at: string | null;
   finished_at: string | null;
+  ranking_run: RankingRun | null;
 };
 
 export type CampaignJob = {
@@ -476,6 +480,33 @@ export type BrowserTaskCampaignResponse = {
   failed_count: number;
   items: BrowserTask[];
   failures: Array<{ application_id: string; reason: string }>;
+};
+
+export type BrowserTaskCampaignGroup = {
+  campaign_id: string;
+  campaign_name: string;
+  campaign_status: string;
+  status: BrowserTaskStatus | "PARTIAL";
+  platforms: string[];
+  task_count: number;
+  submitted_count: number;
+  active_count: number;
+  waiting_count: number;
+  failed_count: number;
+  cancelled_count: number;
+  created_at: string;
+  updated_at: string;
+  items: Array<{
+    task: BrowserTask;
+    job_id: string;
+    job_title: string;
+    application_status: ApplicationStatus;
+  }>;
+};
+
+export type BrowserTaskCampaignGroupListResponse = {
+  items: BrowserTaskCampaignGroup[];
+  total: number;
 };
 
 export type PlatformAdapter = {
@@ -759,6 +790,7 @@ export function createCampaign(payload: {
   keywords?: string[];
   min_score: number;
   max_jobs: number;
+  scoring_mode: RankingScoringMode;
   target_cities?: string[];
 }): Promise<CampaignDetail> {
   return apiFetch<CampaignDetail>("/api/campaigns", {
@@ -775,6 +807,7 @@ export function updateCampaign(id: string, payload: {
   keywords?: string[];
   min_score?: number;
   max_jobs?: number;
+  scoring_mode?: RankingScoringMode;
   target_cities?: string[];
 }): Promise<CampaignDetail> {
   return apiFetch<CampaignDetail>(`/api/campaigns/${encodeURIComponent(id)}`, {
@@ -804,7 +837,7 @@ export function createCuratedCampaign(payload: {
 
 export function campaignAction(
   id: string,
-  action: "start" | "pause" | "resume" | "cancel",
+  action: "start" | "retry" | "pause" | "resume" | "cancel",
 ): Promise<CampaignDetail> {
   return apiFetch<CampaignDetail>(`/api/campaigns/${encodeURIComponent(id)}/${action}`, {
     method: "POST",
@@ -885,6 +918,22 @@ export function resumeAgentRun(
 
 export function getBrowserTasks(): Promise<BrowserTaskListResponse> {
   return apiFetch<BrowserTaskListResponse>("/api/browser-tasks");
+}
+
+export function getBrowserTaskCampaigns(): Promise<BrowserTaskCampaignGroupListResponse> {
+  return apiFetch<BrowserTaskCampaignGroupListResponse>("/api/browser-tasks/campaigns");
+}
+
+export function cancelBrowserTaskCampaign(id: string): Promise<BrowserTaskCampaignGroup> {
+  return apiFetch<BrowserTaskCampaignGroup>(`/api/browser-tasks/campaigns/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+  });
+}
+
+export function deleteBrowserTaskCampaign(id: string): Promise<void> {
+  return apiFetch<void>(`/api/browser-tasks/campaigns/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 export function getPlatformAdapters(): Promise<PlatformAdapter[]> {

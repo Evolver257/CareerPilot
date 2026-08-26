@@ -25,7 +25,7 @@ Bachelor's degree in Computer Science
     return response.json()["id"]
 
 
-async def _import_campaign_jobs(client: AsyncClient) -> None:
+async def _import_campaign_jobs(client: AsyncClient) -> list[str]:
     skills = [
         "Python, FastAPI, PostgreSQL, and Docker",
         "Python, RAG, LLM, and vector search",
@@ -34,6 +34,7 @@ async def _import_campaign_jobs(client: AsyncClient) -> None:
         "TypeScript, React, Next.js, and CSS",
         "Kotlin, Android, and Firebase",
     ]
+    job_ids: list[str] = []
     for index, requirements in enumerate(skills, start=1):
         response = await client.post(
             "/api/jobs/import",
@@ -48,30 +49,25 @@ async def _import_campaign_jobs(client: AsyncClient) -> None:
             },
         )
         assert response.status_code == 201
+        job_ids.append(response.json()["items"][0]["job"]["id"])
+    return job_ids
 
 
 async def test_campaign_full_flow_preserves_pause_resume_state(client: AsyncClient) -> None:
     resume_id = await _upload_campaign_resume(client)
-    await _import_campaign_jobs(client)
+    job_ids = await _import_campaign_jobs(client)
 
     created = await client.post(
-        "/api/campaigns",
+        "/api/campaigns/curated",
         json={
             "name": "AI Agent Internship",
             "resume_id": resume_id,
-            "keywords": ["Campaign Engineer"],
-            "target_cities": ["Remote"],
-            "min_score": 0,
-            "max_jobs": 4,
+            "job_ids": job_ids[:4],
         },
     )
     assert created.status_code == 201
     campaign_id = created.json()["id"]
-    assert created.json()["status"] == "DRAFT"
-
-    started = await client.post(f"/api/campaigns/{campaign_id}/start")
-    assert started.status_code == 200
-    campaign = started.json()
+    campaign = created.json()
     assert campaign["status"] == "WAITING_APPROVAL"
     assert campaign["candidate_count"] == 4
     assert campaign["waiting_approval_count"] == 4
@@ -149,6 +145,45 @@ async def test_campaign_full_flow_preserves_pause_resume_state(client: AsyncClie
         item["application"]["status"] == "CANCELLED"
         for item in cancelled.json()["candidate_jobs"]
     )
+
+
+async def test_campaign_start_creates_cancelable_persisted_ranking_run(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:
+    resume_id = await _upload_campaign_resume(client)
+    await _import_campaign_jobs(client)
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        "app.api.campaigns.schedule_ranking_run",
+        lambda run_id: scheduled.append(str(run_id)),
+    )
+    created = await client.post(
+        "/api/campaigns",
+        json={
+            "name": "Durable deep ranking",
+            "resume_id": resume_id,
+            "keywords": ["Campaign Engineer"],
+            "min_score": 0,
+            "max_jobs": 4,
+            "scoring_mode": "llm",
+        },
+    )
+
+    started = await client.post(f"/api/campaigns/{created.json()['id']}/start")
+
+    assert started.status_code == 200
+    campaign = started.json()
+    assert campaign["status"] == "RANKING"
+    assert campaign["scoring_mode"] == "llm"
+    assert campaign["ranking_run"]["status"] == "PENDING"
+    assert campaign["ranking_run"]["campaign_id"] == campaign["id"]
+    assert scheduled == [campaign["ranking_run"]["id"]]
+
+    cancelled = await client.post(f"/api/campaigns/{campaign['id']}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "CANCELLED"
+    assert cancelled.json()["ranking_run"]["status"] == "CANCELLED"
 
 
 async def test_campaign_requires_resume_and_rejects_invalid_transition(

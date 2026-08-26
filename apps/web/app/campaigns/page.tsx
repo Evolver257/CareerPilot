@@ -11,6 +11,7 @@ import {
   getResumes,
   updateCampaign,
   type Campaign,
+  type RankingScoringMode,
   type Resume,
 } from "../../lib/api";
 
@@ -35,6 +36,7 @@ export default function CampaignsPage() {
   const [cities, setCities] = useState("");
   const [minScore, setMinScore] = useState(50);
   const [maxJobs, setMaxJobs] = useState(10);
+  const [scoringMode, setScoringMode] = useState<RankingScoringMode>("fast");
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [maintaining, setMaintaining] = useState(false);
@@ -64,6 +66,7 @@ export default function CampaignsPage() {
         target_cities: cities.split(/[,，]/).map((value) => value.trim()).filter(Boolean),
         min_score: minScore,
         max_jobs: maxJobs,
+        scoring_mode: scoringMode,
       });
       router.push(`/campaigns/${campaign.id}`);
     } catch (reason) {
@@ -166,6 +169,21 @@ export default function CampaignsPage() {
             最大职位数
             <input className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" max="100" min="1" onChange={(event) => setMaxJobs(Number(event.target.value))} type="number" value={maxJobs} />
           </label>
+          <fieldset className="md:col-span-2 xl:col-span-3">
+            <legend className="text-sm font-medium text-slate-700">匹配评分方式</legend>
+            <div className="mt-2 grid gap-3 md:grid-cols-2">
+              <label className={`cursor-pointer rounded-xl border p-4 transition ${scoringMode === "fast" ? "border-indigo-500 bg-indigo-50 ring-2 ring-indigo-100" : "border-slate-200"}`}>
+                <input checked={scoringMode === "fast"} className="mr-3 accent-indigo-600" name="scoring-mode" onChange={() => setScoringMode("fast")} type="radio" />
+                <span className="font-semibold text-slate-900">快速评分</span>
+                <span className="mt-1 block pl-7 text-xs leading-5 text-slate-500">不调用 LLM，使用语义、技能、学历、经验和偏好综合评分，适合批量计划。</span>
+              </label>
+              <label className={`cursor-pointer rounded-xl border p-4 transition ${scoringMode === "llm" ? "border-violet-500 bg-violet-50 ring-2 ring-violet-100" : "border-slate-200"}`}>
+                <input checked={scoringMode === "llm"} className="mr-3 accent-violet-600" name="scoring-mode" onChange={() => setScoringMode("llm")} type="radio" />
+                <span className="font-semibold text-slate-900">LLM 深度评分</span>
+                <span className="mt-1 block pl-7 text-xs leading-5 text-slate-500">逐个深度判断，质量更高但耗时和 API 成本随最大职位数增加；任务将在后台运行。</span>
+              </label>
+            </div>
+          </fieldset>
         </div>
         <button className="mt-5 rounded-xl bg-indigo-600 px-5 py-3 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50" disabled={creating || !name.trim() || !resumeId} onClick={() => void handleCreate()} type="button">
           {creating ? "创建中…" : "创建投递计划"}
@@ -185,7 +203,7 @@ export default function CampaignsPage() {
           {campaigns.map((campaign) => (
             <article className="panel transition hover:border-indigo-200 hover:shadow-md" key={campaign.id}>
               <div className="flex items-start justify-between gap-4">
-                <div><Link className="font-semibold text-slate-900 hover:text-indigo-700" href={`/campaigns/${campaign.id}`}>{campaign.name}</Link><p className="mt-2 text-sm text-slate-500">最低 {campaign.min_score} 分 · 最多 {campaign.max_jobs} 个职位</p></div>
+                <div><Link className="font-semibold text-slate-900 hover:text-indigo-700" href={`/campaigns/${campaign.id}`}>{campaign.name}</Link><p className="mt-2 text-sm text-slate-500">最低 {campaign.min_score} 分 · 最多 {campaign.max_jobs} 个职位 · {campaign.scoring_mode === "llm" ? "深度评分" : "快速评分"}</p></div>
                 <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">{statusLabels[campaign.status]}</span>
               </div>
               <div className="mt-5 grid grid-cols-3 gap-3 border-t border-slate-100 pt-4 text-center">

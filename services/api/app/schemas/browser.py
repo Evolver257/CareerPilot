@@ -115,6 +115,35 @@ class BrowserTaskCampaignResponse(BaseModel):
     failures: list[BrowserTaskCampaignFailure]
 
 
+class BrowserTaskCampaignItemRead(BaseModel):
+    task: BrowserTaskRead
+    job_id: UUID
+    job_title: str
+    application_status: str
+
+
+class BrowserTaskCampaignGroupRead(BaseModel):
+    campaign_id: UUID
+    campaign_name: str
+    campaign_status: str
+    status: str
+    platforms: list[str]
+    task_count: int
+    submitted_count: int
+    active_count: int
+    waiting_count: int
+    failed_count: int
+    cancelled_count: int
+    created_at: datetime
+    updated_at: datetime
+    items: list[BrowserTaskCampaignItemRead]
+
+
+class BrowserTaskCampaignGroupListResponse(BaseModel):
+    items: list[BrowserTaskCampaignGroupRead]
+    total: int
+
+
 class PlatformAdapterRead(BaseModel):
     name: str
     label: str

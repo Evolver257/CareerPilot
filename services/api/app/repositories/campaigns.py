@@ -19,6 +19,7 @@ class CampaignRepository:
             .options(
                 selectinload(Campaign.campaign_jobs).selectinload(CampaignJob.job),
                 selectinload(Campaign.applications).selectinload(Application.job),
+                selectinload(Campaign.ranking_runs),
             )
             .order_by(Campaign.created_at.desc())
         )
@@ -34,6 +35,7 @@ class CampaignRepository:
                 selectinload(Campaign.campaign_jobs).selectinload(CampaignJob.job),
                 selectinload(Campaign.applications).selectinload(Application.job),
                 selectinload(Campaign.resume),
+                selectinload(Campaign.ranking_runs),
             )
             .where(Campaign.id == campaign_id)
         )

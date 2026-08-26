@@ -275,6 +275,10 @@ class RankingRun(Base):
     resume_id: Mapped[UUID] = mapped_column(
         ForeignKey("resumes.id", ondelete="CASCADE"), index=True
     )
+    campaign_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=1800)
     status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
     stage: Mapped[str] = mapped_column(String(50), default="queued")
     progress: Mapped[int] = mapped_column(Integer, default=0)
@@ -294,6 +298,7 @@ class RankingRun(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     resume: Mapped[Resume] = relationship(back_populates="ranking_runs")
+    campaign: Mapped[Campaign | None] = relationship(back_populates="ranking_runs")
 
 
 class Campaign(Base):
@@ -310,6 +315,7 @@ class Campaign(Base):
     query: Mapped[str] = mapped_column(Text, default="")
     min_score: Mapped[float] = mapped_column(Float, default=70.0)
     max_jobs: Mapped[int] = mapped_column(Integer, default=20)
+    scoring_mode: Mapped[str] = mapped_column(String(20), default="fast")
     target_cities: Mapped[list[str]] = mapped_column(JSON, default=list)
     filters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -325,6 +331,9 @@ class Campaign(Base):
         back_populates="campaign", cascade="all, delete-orphan"
     )
     applications: Mapped[list[Application]] = relationship(
+        back_populates="campaign", cascade="all, delete-orphan"
+    )
+    ranking_runs: Mapped[list[RankingRun]] = relationship(
         back_populates="campaign", cascade="all, delete-orphan"
     )
     agent_runs: Mapped[list[AgentRun]] = relationship(back_populates="campaign")

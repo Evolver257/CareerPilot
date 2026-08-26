@@ -5,6 +5,7 @@ from tests.test_campaigns import _upload_campaign_resume
 
 async def _create_queued_applications(client: AsyncClient) -> list[str]:
     resume_id = await _upload_campaign_resume(client)
+    job_ids: list[str] = []
     for index in range(1, 3):
         imported = await client.post(
             "/api/jobs/import",
@@ -19,22 +20,17 @@ async def _create_queued_applications(client: AsyncClient) -> list[str]:
             },
         )
         assert imported.status_code == 201
+        job_ids.append(imported.json()["items"][0]["job"]["id"])
     created = await client.post(
-        "/api/campaigns",
+        "/api/campaigns/curated",
         json={
             "name": "Phase 8 Mock Browser Campaign",
             "resume_id": resume_id,
-            "keywords": ["Browser Phase 8"],
-            "target_cities": ["Remote"],
-            "min_score": 0,
-            "max_jobs": 2,
+            "job_ids": job_ids,
         },
     )
     assert created.status_code == 201
     campaign_id = created.json()["id"]
-    started = await client.post(f"/api/campaigns/{campaign_id}/start")
-    assert started.status_code == 200
-    job_ids = [item["job_id"] for item in started.json()["candidate_jobs"]]
     approved = await client.post(
         f"/api/campaigns/{campaign_id}/approve", json={"job_ids": job_ids}
     )
@@ -135,6 +131,50 @@ async def test_campaign_browser_tasks_create_all_queued_applications_idempotentl
         if item["id"] in application_ids
     }
     assert statuses == {application_id: "SUBMITTED" for application_id in application_ids}
+
+
+async def test_campaign_task_records_are_grouped_cancelled_and_deleted_as_one_unit(
+    client: AsyncClient,
+) -> None:
+    application_ids = await _create_queued_applications(client)
+    applications = await client.get("/api/applications")
+    campaign_id = next(
+        item["campaign_id"]
+        for item in applications.json()["items"]
+        if item["id"] == application_ids[0]
+    )
+    created = await client.post(
+        "/api/browser-tasks/campaign",
+        json={"campaign_id": campaign_id, "auto_start": False},
+    )
+    assert created.status_code == 201
+
+    records = await client.get("/api/browser-tasks/campaigns")
+    assert records.status_code == 200
+    record = next(
+        item for item in records.json()["items"] if item["campaign_id"] == campaign_id
+    )
+    assert record["task_count"] == 2
+    assert len(record["items"]) == 2
+    assert {item["job_title"] for item in record["items"]} == {
+        "Browser Phase 8 Engineer 1",
+        "Browser Phase 8 Engineer 2",
+    }
+
+    active_delete = await client.delete(f"/api/browser-tasks/campaigns/{campaign_id}")
+    assert active_delete.status_code == 409
+
+    cancelled = await client.post(
+        f"/api/browser-tasks/campaigns/{campaign_id}/cancel"
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "CANCELLED"
+    assert cancelled.json()["cancelled_count"] == 2
+
+    deleted = await client.delete(f"/api/browser-tasks/campaigns/{campaign_id}")
+    assert deleted.status_code == 204
+    missing = await client.get(f"/api/browser-tasks/campaigns/{campaign_id}")
+    assert missing.status_code == 404
 
 
 async def test_mock_browser_task_pauses_on_captcha_and_resumes_after_user_action(

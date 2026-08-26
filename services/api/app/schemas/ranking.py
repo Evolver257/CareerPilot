@@ -87,7 +87,14 @@ class JobRankingResponse(BaseModel):
     trace: RankingTraceRead
 
 
-RankingRunStatus = Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED"]
+RankingRunStatus = Literal[
+    "PENDING",
+    "RUNNING",
+    "SUCCEEDED",
+    "FAILED",
+    "CANCELLED",
+    "TIMED_OUT",
+]
 
 
 class RankingRunRead(BaseModel):
@@ -95,6 +102,8 @@ class RankingRunRead(BaseModel):
 
     id: UUID
     resume_id: UUID
+    campaign_id: UUID | None = None
+    timeout_seconds: int
     status: RankingRunStatus
     stage: str
     progress: int = Field(ge=0, le=100)

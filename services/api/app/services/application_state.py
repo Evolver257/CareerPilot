@@ -175,7 +175,7 @@ class CampaignStateMachine:
             CampaignStatus.COMPLETED,
             CampaignStatus.CANCELLED,
         },
-        CampaignStatus.FAILED: {CampaignStatus.CANCELLED},
+        CampaignStatus.FAILED: {CampaignStatus.RANKING, CampaignStatus.CANCELLED},
     }
     terminal = {CampaignStatus.COMPLETED, CampaignStatus.CANCELLED}
 

@@ -42,6 +42,7 @@ from app.services.resume_rag import ResumeRAG
 from app.services.score_cache import build_score_fingerprint
 
 RankingProgressCallback = Callable[[str, int, int, int, int, int, int], Awaitable[None]]
+RankingCandidateCallback = Callable[[Job, JobScore, int, int], Awaitable[None]]
 
 
 @dataclass
@@ -100,6 +101,7 @@ class RankingService:
         self,
         payload: JobRankingRequest,
         progress: RankingProgressCallback | None = None,
+        candidate_completed: RankingCandidateCallback | None = None,
     ) -> JobRankingResponse:
         started_at = datetime.now(UTC)
         config = self._effective_config(payload)
@@ -199,7 +201,6 @@ class RankingService:
         weights = self._normalized_weights(use_llm=use_llm)
         cache_hits = 0
         llm_calls = 0
-        new_scores: list[JobScore] = []
         score_by_job: dict[UUID, JobScore] = {}
         scoring_stage: RankingStageName = "llm_judge" if use_llm else "deterministic_rank"
         await self._report(
@@ -258,8 +259,15 @@ class RankingService:
                     2,
                 )
                 score = self._build_score(candidate, resume, weights)
-                new_scores.append(score)
+                await self.matching_repository.add_score(score)
                 score_by_job[candidate.job.id] = score
+            if candidate_completed is not None:
+                await candidate_completed(
+                    candidate.job,
+                    score_by_job[candidate.job.id],
+                    index,
+                    len(rerank_selected),
+                )
             await self._report(
                 progress,
                 scoring_stage,
@@ -270,8 +278,6 @@ class RankingService:
                 llm_calls,
                 self.llm_judge.fallback_count,
             )
-        if new_scores:
-            await self.matching_repository.add_scores(new_scores)
         if use_llm:
             scored_ranked = sorted(
                 rerank_selected,

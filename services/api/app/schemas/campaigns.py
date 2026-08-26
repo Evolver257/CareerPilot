@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.states import ApplicationStatus, CampaignJobStatus, CampaignStatus
 from app.schemas.jobs import JobRead
+from app.schemas.ranking import RankingRunRead, RankingScoringMode
 
 
 class CampaignCreate(BaseModel):
@@ -17,6 +18,7 @@ class CampaignCreate(BaseModel):
     keywords: list[str] = Field(default_factory=list, max_length=30)
     min_score: float = Field(default=50.0, ge=0, le=100)
     max_jobs: int = Field(default=20, ge=1, le=100)
+    scoring_mode: RankingScoringMode = "fast"
     target_cities: list[str] = Field(default_factory=list, max_length=30)
     filters: dict[str, Any] = Field(default_factory=dict)
 
@@ -28,6 +30,7 @@ class CampaignUpdate(BaseModel):
     keywords: list[str] | None = Field(default=None, max_length=30)
     min_score: float | None = Field(default=None, ge=0, le=100)
     max_jobs: int | None = Field(default=None, ge=1, le=100)
+    scoring_mode: RankingScoringMode | None = None
     target_cities: list[str] | None = Field(default=None, max_length=30)
     filters: dict[str, Any] | None = None
 
@@ -53,6 +56,7 @@ class CampaignRead(BaseModel):
     query: str
     min_score: float
     max_jobs: int
+    scoring_mode: RankingScoringMode
     target_cities: list[str]
     filters: dict[str, Any]
     candidate_count: int = 0
@@ -62,6 +66,7 @@ class CampaignRead(BaseModel):
     updated_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    ranking_run: RankingRunRead | None = None
 
 
 class ApplicationRead(BaseModel):

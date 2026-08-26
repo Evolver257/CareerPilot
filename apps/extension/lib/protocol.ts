@@ -22,6 +22,11 @@ export type BrowserTaskLifecycleMessage = {
   error?: string;
 };
 
+export type BrowserTaskBatchLifecycleMessage = {
+  type: "TASK_BATCH_CANCELLED";
+  task_ids: string[];
+};
+
 export type ActionResultMessage = {
   type: "ACTION_RESULT";
   action_id: string;

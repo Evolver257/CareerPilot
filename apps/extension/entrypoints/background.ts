@@ -8,6 +8,7 @@ import type {
   BossCaptureResponse,
   BossSearchRequest,
   BossTaskLaunchRequest,
+  BrowserTaskBatchLifecycleMessage,
   BrowserTaskLifecycleMessage,
 } from "../lib/protocol";
 
@@ -49,7 +50,7 @@ async function runBossSearch(message: BossSearchRequest): Promise<BossBridgeResp
     const maxJobs = Math.min(Math.max(message.payload.max_jobs, 1), 50);
     if (!requirements) throw new Error("请填写岗位要求");
     const tab = await browser.tabs.create({
-      active: true,
+      active: false,
       url: buildBossSearchUrl(requirements, message.payload.city),
     });
     if (!tab.id) throw new Error("无法创建 BOSS 搜索标签页");
@@ -145,6 +146,20 @@ function finishBatchTask(taskId: string): void {
   globalThis.setTimeout(() => void startNextBatchTask(), 600);
 }
 
+function cancelBatchTasks(taskIds: string[]): void {
+  const cancelled = new Set(taskIds);
+  for (let index = batchQueue.length - 1; index >= 0; index -= 1) {
+    if (cancelled.has(batchQueue[index].task_id)) batchQueue.splice(index, 1);
+  }
+  for (const taskId of cancelled) {
+    sockets.get(taskId)?.close();
+    sockets.delete(taskId);
+    activeTabs.delete(taskId);
+  }
+  if (activeBatchTaskId && cancelled.has(activeBatchTaskId)) activeBatchTaskId = null;
+  globalThis.setTimeout(() => void startNextBatchTask(), 100);
+}
+
 async function captureVisibleJobs(tabId: number, maxJobs: number): Promise<BossCaptureResponse> {
   let lastResult: BossCaptureResponse | null = null;
   let lastError: unknown = null;
@@ -225,7 +240,11 @@ function connectTask(taskId: string, tabId: number) {
   socket.addEventListener("message", async (event) => {
     let message: ActionMessage | null = null;
     try {
-      const incoming = JSON.parse(String(event.data)) as ActionMessage | BrowserTaskLifecycleMessage;
+      const incoming = JSON.parse(String(event.data)) as ActionMessage | BrowserTaskLifecycleMessage | BrowserTaskBatchLifecycleMessage;
+      if (incoming.type === "TASK_BATCH_CANCELLED") {
+        cancelBatchTasks(incoming.task_ids);
+        return;
+      }
       if (["TASK_COMPLETED", "TASK_FAILED", "TASK_CANCELLED"].includes(incoming.type)) {
         finishBatchTask(incoming.task_id);
         return;

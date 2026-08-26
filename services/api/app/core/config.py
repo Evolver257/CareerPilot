@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     top_k_llm: int = Field(default=10, validation_alias="TOP_K_LLM")
     final_ranking_top_k: int = Field(default=10, validation_alias="FINAL_RANKING_TOP_K")
     ranking_version: str = Field(default="RANKING_V1", validation_alias="RANKING_VERSION")
+    ranking_timeout_seconds: int = Field(
+        default=1800, validation_alias="RANKING_TIMEOUT_SECONDS", ge=30, le=7200
+    )
 
     @property
     def allowed_origins(self) -> list[str]:

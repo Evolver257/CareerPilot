@@ -132,7 +132,7 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
     setJobs([]);
     setTasks([]);
     setError(null);
-    setNotice("扩展正在打开 BOSS 搜索页并读取当前可见职位；如需登录，请在打开的标签页中人工完成。");
+    setNotice("扩展已在后台新建 BOSS 标签页并开始采集，当前页面会保持不动；如需登录或验证，请手动切换到该标签页处理。");
     window.postMessage({
       source: "careerpilot-web",
       type: "BOSS_SEARCH_REQUEST",
@@ -202,7 +202,7 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
         <div>
           <p className="eyebrow">BOSS Extension Workflow</p>
           <h2 className="mt-2 text-xl font-semibold">按要求采集并对接投递</h2>
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">在这里发送搜索条件给本地扩展。扩展只打开用户可见的 BOSS 页面并提取当前结果，导入后由你勾选、批准，再创建投递任务。</p>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">在这里发送搜索条件给本地扩展。扩展会在后台新建 BOSS 标签页执行采集，当前页面保持不动；导入后由你勾选、批准，再创建投递任务。</p>
         </div>
         <span className={`rounded-full px-3 py-1 text-xs font-semibold ${extensionStatus === "connected" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
           {extensionStatus === "connected" ? `插件已连接 ${extensionVersion}` : extensionStatus === "checking" ? "正在检测插件" : "未检测到插件"}

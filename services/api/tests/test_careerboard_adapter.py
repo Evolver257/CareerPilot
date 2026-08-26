@@ -80,24 +80,19 @@ async def _create_queued_careerboard_application(client: AsyncClient) -> str:
         },
     )
     assert imported.status_code == 201
+    job_id = imported.json()["items"][0]["job"]["id"]
     created = await client.post(
-        "/api/campaigns",
+        "/api/campaigns/curated",
         json={
             "name": "Phase 9 CareerBoard Campaign",
             "resume_id": resume_id,
-            "keywords": ["CareerBoard Phase 9"],
-            "target_cities": ["Remote"],
-            "min_score": 0,
-            "max_jobs": 1,
+            "job_ids": [job_id],
         },
     )
     assert created.status_code == 201
     campaign_id = created.json()["id"]
-    started = await client.post(f"/api/campaigns/{campaign_id}/start")
-    assert started.status_code == 200
-    job_ids = [item["job_id"] for item in started.json()["candidate_jobs"]]
     approved = await client.post(
-        f"/api/campaigns/{campaign_id}/approve", json={"job_ids": job_ids}
+        f"/api/campaigns/{campaign_id}/approve", json={"job_ids": [job_id]}
     )
     assert approved.status_code == 200
     return approved.json()["candidate_jobs"][0]["application"]["id"]
