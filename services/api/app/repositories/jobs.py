@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -11,18 +11,52 @@ class JobRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def list(self, *, page: int, page_size: int, search: str | None) -> tuple[list[Job], int]:
+    async def list(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        search: str | None,
+        company: str | None,
+        location: str | None,
+        platform: str | None,
+        education: str | None,
+        experience: str | None,
+        salary_floor: int | None,
+        salary_ceiling: int | None,
+    ) -> tuple[list[Job], int]:
         query = select(Job).options(selectinload(Job.skills))
         count_query = select(func.count(Job.id))
+        conditions = []
         if search:
             pattern = f"%{search}%"
-            condition = or_(
+            conditions.append(or_(
                 Job.title.ilike(pattern),
                 Job.description.ilike(pattern),
                 Job.location.ilike(pattern),
-            )
-            query = query.where(condition)
-            count_query = count_query.where(condition)
+                cast(Job.raw_data, String).ilike(pattern),
+            ))
+        if company:
+            company_pattern = f"%{company}%"
+            conditions.append(or_(
+                Job.raw_data["company_name"].as_string().ilike(company_pattern),
+                cast(Job.raw_data, String).ilike(company_pattern),
+            ))
+        if location:
+            conditions.append(Job.location.ilike(f"%{location}%"))
+        if platform:
+            conditions.append(Job.platform == platform)
+        if education:
+            conditions.append(Job.education_requirement.ilike(f"%{education}%"))
+        if experience:
+            conditions.append(Job.experience_requirement.ilike(f"%{experience}%"))
+        if salary_floor is not None:
+            conditions.append(func.coalesce(Job.salary_max, Job.salary_min) >= salary_floor)
+        if salary_ceiling is not None:
+            conditions.append(func.coalesce(Job.salary_min, Job.salary_max) <= salary_ceiling)
+        if conditions:
+            query = query.where(*conditions)
+            count_query = count_query.where(*conditions)
 
         total = int((await self.session.scalar(count_query)) or 0)
         jobs = list(

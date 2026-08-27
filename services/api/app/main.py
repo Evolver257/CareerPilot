@@ -16,10 +16,16 @@ from app.api import (
     health,
     jobs,
     llm,
+    market_insights,
     platforms,
     resumes,
 )
 from app.core.config import get_settings
+from app.services.market_insights import (
+    recover_interrupted_market_insights,
+    schedule_market_insight,
+    shutdown_market_insight_tasks,
+)
 from app.services.ranking_runs import (
     recover_interrupted_ranking_runs,
     schedule_ranking_run,
@@ -32,10 +38,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     recovered_run_ids = await recover_interrupted_ranking_runs()
     for run_id in recovered_run_ids:
         schedule_ranking_run(run_id)
+    recovered_report_ids = await recover_interrupted_market_insights()
+    for report_id in recovered_report_ids:
+        schedule_market_insight(report_id)
     try:
         yield
     finally:
         await shutdown_ranking_tasks()
+        await shutdown_market_insight_tasks()
 
 
 settings = get_settings()
@@ -116,3 +126,4 @@ app.include_router(browser_tasks.router)
 app.include_router(dashboard.router)
 app.include_router(platforms.router)
 app.include_router(llm.router)
+app.include_router(market_insights.router)

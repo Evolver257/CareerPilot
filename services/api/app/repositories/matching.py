@@ -21,6 +21,19 @@ class MatchingRepository:
             .where(Job.id == job_id)
         )
 
+    async def get_jobs(self, job_ids: list[UUID]) -> list[Job]:
+        if not job_ids:
+            return []
+        return list(
+            (
+                await self.session.scalars(
+                    select(Job)
+                    .options(selectinload(Job.skills), selectinload(Job.company))
+                    .where(Job.id.in_(job_ids))
+                )
+            ).all()
+        )
+
     async def get_resume(self, resume_id: UUID) -> Resume | None:
         return await self.session.scalar(
             select(Resume).options(selectinload(Resume.chunks)).where(Resume.id == resume_id)

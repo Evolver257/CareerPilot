@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { LlmDeepScoreBadge } from "../../components/scoring-mode-badge";
 import {
   getJobRankingResult,
   getJobRankingRun,
@@ -175,13 +176,16 @@ export default function RankingPage() {
           </p>
         </div>
         {result && (
-          <div className="ranking-meta rounded-2xl px-5 py-3 text-sm">
-            <span className="font-semibold">{result.trace.version}</span>
-            <span className="mx-2 opacity-60">·</span>
-            {result.trace.config.scoring_mode === "fast" ? "快速评分 · 未调用 LLM" : `LLM 调用 ${result.trace.llm_calls} 次`}
-            <span className="mx-2 opacity-60">·</span>
-            缓存命中 {result.trace.cache_hits} 个
-            {result.trace.config.scoring_mode === "llm" && <><span className="mx-2 opacity-60">·</span>{result.trace.token_usage.total_tokens.toLocaleString()} tokens</>}
+          <div className="flex flex-col items-end gap-2">
+            {result.trace.config.scoring_mode === "llm" && <LlmDeepScoreBadge kind="report" />}
+            <div className="ranking-meta rounded-2xl px-5 py-3 text-sm">
+              <span className="font-semibold">{result.trace.version}</span>
+              <span className="mx-2 opacity-60">·</span>
+              {result.trace.config.scoring_mode === "fast" ? "快速评分 · 未调用 LLM" : `LLM 调用 ${result.trace.llm_calls} 次`}
+              <span className="mx-2 opacity-60">·</span>
+              缓存命中 {result.trace.cache_hits} 个
+              {result.trace.config.scoring_mode === "llm" && <><span className="mx-2 opacity-60">·</span>{result.trace.token_usage.total_tokens.toLocaleString()} tokens</>}
+            </div>
           </div>
         )}
       </header>

@@ -14,6 +14,28 @@ class JobScoreRequest(BaseModel):
     force: bool = False
 
 
+class QuickScoreBatchRequest(BaseModel):
+    job_ids: list[UUID] = Field(min_length=1, max_length=200)
+    resume_id: UUID | None = None
+
+
+class QuickScoreRead(BaseModel):
+    job_id: UUID
+    resume_id: UUID
+    score: float = Field(ge=0, le=100)
+    rules_passed: bool
+    rule_reasons: list[str] = Field(default_factory=list)
+    matched_skills: list[str] = Field(default_factory=list)
+    missing_skills: list[str] = Field(default_factory=list)
+    recommendation: Recommendation
+    reasoning_summary: str = ""
+    cached: bool = False
+
+
+class QuickScoreBatchResponse(BaseModel):
+    items: list[QuickScoreRead]
+
+
 class ResumeEvidenceRead(BaseModel):
     chunk_id: UUID
     chunk_type: str

@@ -54,7 +54,21 @@ class BossZhipinDetector:
             raise LoginRequiredError("BOSS login is required")
         if any(marker in content for marker in ("操作频繁", "访问频繁", "platform limit")):
             raise PlatformLimitError("BOSS platform limit requires user action")
-        if any(marker in content for marker in ("安全验证", "风控", "risk control")):
+        if any(
+            marker in content
+            for marker in (
+                "安全验证",
+                "风险验证",
+                "请完成验证",
+                "拖动滑块",
+                "人机校验",
+                "异常访问",
+                "账号存在风险",
+                "风险提示",
+                "risk control verification",
+                "security verification",
+            )
+        ):
             raise RiskControlDetectedError("BOSS risk control requires user action")
         if any(marker in content for marker in ("页面不存在", "dom changed")):
             raise DomChangedError("BOSS page structure changed; user review is required")

@@ -5,6 +5,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, s
 from app.api.dependencies import (
     get_job_service,
     get_matching_service,
+    get_quick_matching_service,
     get_ranking_run_service,
     get_ranking_service,
 )
@@ -17,7 +18,12 @@ from app.schemas.job_intelligence import (
     StructuredJob,
 )
 from app.schemas.jobs import JobCreate, JobListResponse, JobRead, JobUpdate
-from app.schemas.matching import JobScoreRead, JobScoreRequest
+from app.schemas.matching import (
+    JobScoreRead,
+    JobScoreRequest,
+    QuickScoreBatchRequest,
+    QuickScoreBatchResponse,
+)
 from app.schemas.ranking import JobRankingRequest, JobRankingResponse, RankingRunRead
 from app.services.jobs import (
     DuplicateJobError,
@@ -30,6 +36,11 @@ from app.services.matching import (
     MatchingJobNotFoundError,
     MatchingResumeNotFoundError,
     MatchingService,
+)
+from app.services.quick_matching import (
+    QuickMatchingJobNotFoundError,
+    QuickMatchingResumeNotFoundError,
+    QuickMatchingService,
 )
 from app.services.ranking import RankingService
 from app.services.ranking_runs import (
@@ -72,9 +83,32 @@ async def list_jobs(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     search: str | None = Query(default=None, min_length=1, max_length=100),
+    company: str | None = Query(default=None, min_length=1, max_length=100),
+    location: str | None = Query(default=None, min_length=1, max_length=100),
+    platform: str | None = Query(default=None, min_length=1, max_length=100),
+    education: str | None = Query(default=None, min_length=1, max_length=100),
+    experience: str | None = Query(default=None, min_length=1, max_length=100),
+    salary_floor: int | None = Query(default=None, ge=0),
+    salary_ceiling: int | None = Query(default=None, ge=0),
     service: JobService = Depends(get_job_service),
 ) -> JobListResponse:
-    jobs, total = await service.list_jobs(page=page, page_size=page_size, search=search)
+    if salary_floor is not None and salary_ceiling is not None and salary_floor > salary_ceiling:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="salary_floor cannot be greater than salary_ceiling",
+        )
+    jobs, total = await service.list_jobs(
+        page=page,
+        page_size=page_size,
+        search=search,
+        company=company,
+        location=location,
+        platform=platform,
+        education=education,
+        experience=experience,
+        salary_floor=salary_floor,
+        salary_ceiling=salary_ceiling,
+    )
     return JobListResponse(items=jobs, total=total, page=page, page_size=page_size)
 
 
@@ -110,6 +144,19 @@ async def rank_jobs(
     try:
         return await service.rank(payload)
     except MatchingResumeNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/quick-score", response_model=QuickScoreBatchResponse)
+async def quick_score_jobs(
+    payload: QuickScoreBatchRequest,
+    service: QuickMatchingService = Depends(get_quick_matching_service),
+) -> QuickScoreBatchResponse:
+    try:
+        return await service.score_many(job_ids=payload.job_ids, resume_id=payload.resume_id)
+    except QuickMatchingJobNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except QuickMatchingResumeNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 

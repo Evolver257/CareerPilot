@@ -57,6 +57,9 @@ class User(Base):
     browser_tasks: Mapped[list[BrowserTask]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    market_insight_reports: Mapped[list[MarketInsightReport]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class UserPreference(Base):
@@ -299,6 +302,36 @@ class RankingRun(Base):
 
     resume: Mapped[Resume] = relationship(back_populates="ranking_runs")
     campaign: Mapped[Campaign | None] = relationship(back_populates="ranking_runs")
+
+
+class MarketInsightReport(Base):
+    __tablename__ = "market_insight_reports"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    query: Mapped[str] = mapped_column(String(500), index=True)
+    mode: Mapped[str] = mapped_column(String(20), default="fast")
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
+    stage: Mapped[str] = mapped_column(String(50), default="queued")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    confidence: Mapped[str] = mapped_column(String(20), default="insufficient")
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    request_payload: Mapped[dict[str, Any]] = mapped_column("request", JSON, default=dict)
+    report_payload: Mapped[dict[str, Any]] = mapped_column("report", JSON, default=dict)
+    source_job_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    llm_source: Mapped[str] = mapped_column(String(30), default="deterministic")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="market_insight_reports")
 
 
 class Campaign(Base):

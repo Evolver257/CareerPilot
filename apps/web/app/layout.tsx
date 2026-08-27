@@ -27,7 +27,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <body>
         <div className="min-h-screen lg:flex">
           <Navigation />
-          <main className="flex-1 p-5 sm:p-8 lg:p-10">{children}</main>
+          <main className="min-w-0 flex-1 p-5 sm:p-8 lg:p-10">{children}</main>
         </div>
       </body>
     </html>

@@ -121,6 +121,23 @@ export type JobScore = {
   created_at: string;
 };
 
+export type QuickJobScore = {
+  job_id: string;
+  resume_id: string;
+  score: number;
+  rules_passed: boolean;
+  rule_reasons: string[];
+  matched_skills: string[];
+  missing_skills: string[];
+  recommendation: JobScore["recommendation"];
+  reasoning_summary: string;
+  cached: boolean;
+};
+
+export type QuickScoreBatchResponse = {
+  items: QuickJobScore[];
+};
+
 export type RankingStageName =
   | "rule_filter"
   | "embedding_rank"
@@ -621,7 +638,104 @@ export type ResumeChunk = {
   created_at: string;
 };
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+export type MarketInsightStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+export type MarketInsightMode = "fast" | "llm";
+
+export type InsightDistribution = { label: string; count: number; percentage: number };
+export type InsightSalaryBand = {
+  unit: string;
+  unit_label: string;
+  sample_count: number;
+  minimum: number;
+  p25: number;
+  median: number;
+  p75: number;
+  maximum: number;
+};
+export type InsightSkill = {
+  name: string;
+  count: number;
+  percentage: number;
+  required_count: number;
+  preferred_count: number;
+  category: "core" | "high_frequency" | "bonus" | "emerging";
+  job_ids: string[];
+};
+export type InsightResponsibilityTheme = {
+  name: string;
+  count: number;
+  percentage: number;
+  examples: string[];
+  job_ids: string[];
+};
+export type InsightRoleCluster = {
+  name: string;
+  count: number;
+  percentage: number;
+  titles: string[];
+};
+export type InsightLearningPhase = {
+  weeks: string;
+  title: string;
+  objectives: string[];
+  skills: string[];
+  deliverables: string[];
+  success_criteria: string[];
+};
+export type InsightEvidenceJob = {
+  id: string;
+  title: string;
+  company: string | null;
+  location: string | null;
+  salary_text: string | null;
+  education: string | null;
+  experience: string | null;
+  source_url: string | null;
+  relevance: number;
+};
+export type MarketInsightResult = {
+  query: string;
+  generated_at: string;
+  data_as_of: string | null;
+  sample_count: number;
+  confidence: string;
+  warnings: string[];
+  salary_bands: InsightSalaryBand[];
+  education_distribution: InsightDistribution[];
+  experience_distribution: InsightDistribution[];
+  skills: InsightSkill[];
+  responsibility_themes: InsightResponsibilityTheme[];
+  role_clusters: InsightRoleCluster[];
+  learning_roadmap: InsightLearningPhase[];
+  summary_markdown: string;
+  source_jobs: InsightEvidenceJob[];
+  llm_source: string;
+};
+export type MarketInsight = {
+  id: string;
+  user_id: string;
+  query: string;
+  mode: MarketInsightMode;
+  status: MarketInsightStatus;
+  stage: string;
+  progress: number;
+  sample_count: number;
+  confidence: string;
+  fingerprint: string;
+  request: Record<string, unknown>;
+  report: MarketInsightResult | null;
+  source_job_ids: string[];
+  llm_source: string;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  cached: boolean;
+};
+export type MarketInsightListResponse = { items: MarketInsight[]; total: number };
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8010";
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
@@ -649,11 +763,25 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function getJobs(options?: {
   search?: string;
+  company?: string;
+  location?: string;
+  platform?: string;
+  education?: string;
+  experience?: string;
+  salary_floor?: number;
+  salary_ceiling?: number;
   page?: number;
   page_size?: number;
 }): Promise<JobListResponse> {
   const query = new URLSearchParams();
   if (options?.search) query.set("search", options.search);
+  if (options?.company) query.set("company", options.company);
+  if (options?.location) query.set("location", options.location);
+  if (options?.platform) query.set("platform", options.platform);
+  if (options?.education) query.set("education", options.education);
+  if (options?.experience) query.set("experience", options.experience);
+  if (options?.salary_floor !== undefined) query.set("salary_floor", String(options.salary_floor));
+  if (options?.salary_ceiling !== undefined) query.set("salary_ceiling", String(options.salary_ceiling));
   if (options?.page) query.set("page", String(options.page));
   if (options?.page_size) query.set("page_size", String(options.page_size));
   const suffix = query.size ? `?${query.toString()}` : "";
@@ -738,6 +866,17 @@ export function scoreJob(id: string, resumeId?: string, force = false): Promise<
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...(resumeId ? { resume_id: resumeId } : {}), force }),
+  });
+}
+
+export function quickScoreJobs(payload: {
+  job_ids: string[];
+  resume_id?: string;
+}): Promise<QuickScoreBatchResponse> {
+  return apiFetch<QuickScoreBatchResponse>("/api/jobs/quick-score", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
 }
 
@@ -1074,4 +1213,40 @@ export function updateResume(id: string, payload: {
 
 export function deleteResume(id: string): Promise<void> {
   return apiFetch<void>(`/api/resumes/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function getMarketInsights(): Promise<MarketInsightListResponse> {
+  return apiFetch<MarketInsightListResponse>("/api/market-insights");
+}
+
+export function getMarketInsight(id: string): Promise<MarketInsight> {
+  return apiFetch<MarketInsight>(`/api/market-insights/${encodeURIComponent(id)}`);
+}
+
+export function createMarketInsight(payload: {
+  query: string;
+  mode: MarketInsightMode;
+  cities?: string[];
+  job_types?: string[];
+  max_jobs?: number;
+  force?: boolean;
+}): Promise<MarketInsight> {
+  return apiFetch<MarketInsight>("/api/market-insights", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function marketInsightAction(
+  id: string,
+  action: "cancel" | "retry",
+): Promise<MarketInsight> {
+  return apiFetch<MarketInsight>(`/api/market-insights/${encodeURIComponent(id)}/${action}`, {
+    method: "POST",
+  });
+}
+
+export function deleteMarketInsight(id: string): Promise<void> {
+  return apiFetch<void>(`/api/market-insights/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

@@ -38,8 +38,19 @@ export type ActionResultMessage = {
 
 export type BossCaptureRequest = {
   type: "CAPTURE_BOSS_VISIBLE";
+  request_id?: string;
   max_jobs?: number;
   include_details?: boolean;
+};
+
+export type BossCaptureProgress = {
+  type: "BOSS_CAPTURE_PROGRESS";
+  request_id: string;
+  page_url: string;
+  jobs: import("./platforms/boss").BossVisibleJob[];
+  collected_count: number;
+  target_count: number;
+  page_state: import("./platforms/boss").BossPageState;
 };
 
 export type BossCaptureResponse = {
@@ -72,7 +83,14 @@ export type BossSearchRequest = {
     requirements: string;
     city: string;
     max_jobs: number;
+    quick_score_threshold: number;
   };
+};
+
+export type BossSearchResumeRequest = {
+  source: "careerpilot-web";
+  type: "BOSS_SEARCH_RESUME_REQUEST";
+  request_id: string;
 };
 
 export type BossSearchResponse = {
@@ -83,7 +101,65 @@ export type BossSearchResponse = {
   page_url: string;
   jobs: import("./platforms/boss").BossVisibleJob[];
   page_state: import("./platforms/boss").BossPageState;
+  background_task?: BossBackgroundSearchTask;
   error?: string;
+};
+
+export type BossSearchProgress = {
+  source: "careerpilot-extension";
+  type: "BOSS_SEARCH_PROGRESS";
+  request_id: string;
+  page_url: string;
+  jobs: import("./platforms/boss").BossVisibleJob[];
+  collected_count: number;
+  target_count: number;
+  page_state: import("./platforms/boss").BossPageState;
+  background_task?: BossBackgroundSearchTask;
+};
+
+export type BossPersistedJobSummary = {
+  id: string;
+  external_job_id: string | null;
+  title: string;
+  location: string | null;
+  company_name: string | null;
+  salary_text: string | null;
+  description_source: "detail_panel" | "card_summary";
+};
+
+export type BossBackgroundSearchTask = {
+  request_id: string;
+  status: "RUNNING" | "WAITING_FOR_USER" | "COMPLETED" | "FAILED";
+  requirements: string;
+  city: string;
+  target_count: number;
+  quick_score_threshold?: number;
+  collected_count: number;
+  persisted_count: number;
+  created_count: number;
+  updated_count: number;
+  detailed_count: number;
+  page_url: string;
+  tab_id?: number;
+  page_state: import("./platforms/boss").BossPageState;
+  persisted_jobs: BossPersistedJobSummary[];
+  error?: string;
+  started_at: string;
+  updated_at: string;
+  finished_at?: string;
+};
+
+export type BossSearchStatusRequest = {
+  source: "careerpilot-web";
+  type: "BOSS_SEARCH_STATUS_REQUEST";
+  request_id: string;
+};
+
+export type BossSearchStatusResponse = {
+  source: "careerpilot-extension";
+  type: "BOSS_SEARCH_STATUS_RESULT";
+  request_id: string;
+  task: BossBackgroundSearchTask | null;
 };
 
 export type BossTaskLaunchRequest = {
@@ -119,8 +195,8 @@ export type BossTaskBatchLaunchResponse = {
   error?: string;
 };
 
-export type BossBridgeRequest = BossExtensionPing | BossSearchRequest | BossTaskLaunchRequest | BossTaskBatchLaunchRequest;
-export type BossBridgeResponse = BossExtensionPong | BossSearchResponse | BossTaskLaunchResponse | BossTaskBatchLaunchResponse;
+export type BossBridgeRequest = BossExtensionPing | BossSearchRequest | BossSearchResumeRequest | BossSearchStatusRequest | BossTaskLaunchRequest | BossTaskBatchLaunchRequest;
+export type BossBridgeResponse = BossExtensionPong | BossSearchProgress | BossSearchResponse | BossSearchStatusResponse | BossTaskLaunchResponse | BossTaskBatchLaunchResponse;
 
 export function findSemanticElement(action: BrowserAction): Element | null {
   if (action.target?.selector) {

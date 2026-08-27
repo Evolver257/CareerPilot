@@ -10,7 +10,9 @@ from app.services.campaigns import CampaignService
 from app.services.dashboard import DashboardService
 from app.services.jobs import JobService
 from app.services.llm_settings import LLMSettingsService
+from app.services.market_insights import MarketInsightService
 from app.services.matching import MatchingService
+from app.services.quick_matching import QuickMatchingService
 from app.services.ranking import RankingService
 from app.services.ranking_runs import RankingRunService
 from app.services.resumes import ResumeService
@@ -53,6 +55,10 @@ def get_matching_service(
     return MatchingService(session, provider, embedding_provider=embedding_provider)
 
 
+def get_quick_matching_service(session: AsyncSession = Depends(get_db)) -> QuickMatchingService:
+    return QuickMatchingService(session)
+
+
 def get_ranking_service(
     session: AsyncSession = Depends(get_db),
     provider: LLMProvider = Depends(get_llm_provider),
@@ -91,3 +97,9 @@ def get_browser_task_service(
 
 def get_dashboard_service(session: AsyncSession = Depends(get_db)) -> DashboardService:
     return DashboardService(DashboardRepository(session))
+
+
+def get_market_insight_service(
+    session: AsyncSession = Depends(get_db),
+) -> MarketInsightService:
+    return MarketInsightService(session)

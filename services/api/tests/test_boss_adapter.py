@@ -122,6 +122,15 @@ def test_boss_detector_accepts_visible_ready_page() -> None:
     ) == BossPageState.READY
 
 
+def test_boss_detector_does_not_treat_job_copy_as_risk_control() -> None:
+    assert detector.detect(
+        BossPageSnapshot(
+            url="https://www.zhipin.com/zhaopin/",
+            text="职位搜索 立即沟通 负责风控策略与模型建设",
+        )
+    ) == BossPageState.READY
+
+
 async def test_boss_visible_import_deduplicates_without_raw_html(client: AsyncClient) -> None:
     payload = {
         "page_url": "https://www.zhipin.com/zhaopin/?query=AI",

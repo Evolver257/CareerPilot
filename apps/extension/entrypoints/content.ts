@@ -1,4 +1,4 @@
-import { detectBossPageState, extractVisibleBossJobs, extractVisibleBossJobsWithDetails, isBossPageUrl } from "../lib/platforms/boss";
+import { describeBossJobSurface, detectBossPageState, extractVisibleBossJobs, extractVisibleBossJobsWithDetails, isBossPageUrl } from "../lib/platforms/boss";
 import {
   findSemanticElement,
   type ActionMessage,
@@ -6,7 +6,9 @@ import {
   type BossBridgeRequest,
   type BossBridgeResponse,
   type BossCaptureRequest,
+  type BossCaptureProgress,
   type BossCaptureResponse,
+  type BossSearchProgress,
 } from "../lib/protocol";
 
 export default defineContentScript({
@@ -22,7 +24,7 @@ export default defineContentScript({
               source: "careerpilot-extension",
               type: "BOSS_EXTENSION_PONG",
               request_id: event.data.request_id,
-              version: "0.1.0",
+              version: "0.2.6",
             },
             window.location.origin,
           );
@@ -31,7 +33,15 @@ export default defineContentScript({
         void forwardBridgeRequest(event.data);
       });
     }
-    browser.runtime.onMessage.addListener(async (message: ActionMessage | BossCaptureRequest): Promise<ActionResultMessage | BossCaptureResponse | undefined> => {
+    browser.runtime.onMessage.addListener(async (
+      message: ActionMessage | BossCaptureRequest | BossSearchProgress,
+    ): Promise<ActionResultMessage | BossCaptureResponse | undefined> => {
+      if (message.type === "BOSS_SEARCH_PROGRESS") {
+        if (window.location.origin === "http://localhost:3000") {
+          window.postMessage(message, window.location.origin);
+        }
+        return;
+      }
       if (message.type === "CAPTURE_BOSS_VISIBLE") return captureBossVisible(message);
       if (message.type !== "ACTION" && message.type !== "REQUEST_USER_ACTION") return;
       const result: ActionResultMessage = await executeAction(message);
@@ -47,6 +57,8 @@ function isBossBridgeRequest(value: unknown): value is BossBridgeRequest {
   return message.source === "careerpilot-web" && [
     "BOSS_EXTENSION_PING",
     "BOSS_SEARCH_REQUEST",
+    "BOSS_SEARCH_RESUME_REQUEST",
+    "BOSS_SEARCH_STATUS_REQUEST",
     "BOSS_TASK_LAUNCH_REQUEST",
     "BOSS_TASK_BATCH_LAUNCH_REQUEST",
   ].includes(message.type ?? "");
@@ -68,6 +80,8 @@ async function forwardBridgeRequest(message: BossBridgeRequest): Promise<void> {
       response = { ...common, type: "BOSS_TASK_LAUNCH_RESULT", task_id: message.task_id };
     } else if (message.type === "BOSS_TASK_BATCH_LAUNCH_REQUEST") {
       response = { ...common, type: "BOSS_TASK_BATCH_LAUNCH_RESULT", accepted_count: 0 };
+    } else if (message.type === "BOSS_SEARCH_STATUS_REQUEST") {
+      response = { source: "careerpilot-extension", type: "BOSS_SEARCH_STATUS_RESULT", request_id: message.request_id, task: null };
     } else {
       response = { ...common, type: "BOSS_SEARCH_RESULT", page_url: "", jobs: [], page_state: "UNKNOWN_STATE" };
     }
@@ -81,14 +95,40 @@ async function captureBossVisible(request: BossCaptureRequest): Promise<BossCapt
   }
   const pageState = detectBossPageState();
   if (pageState !== "READY") {
-    return { type: "BOSS_CAPTURE_RESULT", success: false, page_url: window.location.href, jobs: [], page_state: pageState, error: `BOSS 页面状态为 ${pageState}，需要人工处理` };
+    const diagnostics = describeBossJobSurface();
+    const error = pageState === "UNKNOWN_STATE"
+      ? `BOSS 搜索结果仍在加载，或当前页面不是职位结果页。${diagnostics}`
+      : `BOSS 页面状态为 ${pageState}，需要人工处理。${diagnostics}`;
+    return { type: "BOSS_CAPTURE_RESULT", success: false, page_url: window.location.href, jobs: [], page_state: pageState, error };
   }
   const jobs = request.include_details === false
     ? extractVisibleBossJobs().slice(0, request.max_jobs ?? 20)
-    : await extractVisibleBossJobsWithDetails(request.max_jobs ?? 20);
+    : await extractVisibleBossJobsWithDetails(
+      request.max_jobs ?? 20,
+      async (job, collectedCount, targetCount) => {
+        if (!request.request_id) return;
+        const progress: BossCaptureProgress = {
+          type: "BOSS_CAPTURE_PROGRESS",
+          request_id: request.request_id,
+          page_url: window.location.href,
+          jobs: [job],
+          collected_count: collectedCount,
+          target_count: targetCount,
+          page_state: detectBossPageState(),
+        };
+        await browser.runtime.sendMessage(progress);
+      },
+    );
   const finalPageState = detectBossPageState();
   if (finalPageState !== "READY") {
-    return { type: "BOSS_CAPTURE_RESULT", success: false, page_url: window.location.href, jobs, page_state: finalPageState, error: `采集过程中 BOSS 页面状态变为 ${finalPageState}，需要人工处理` };
+    return { type: "BOSS_CAPTURE_RESULT", success: false, page_url: window.location.href, jobs, page_state: finalPageState, error: `采集过程中 BOSS 页面状态变为 ${finalPageState}，需要人工处理。${describeBossJobSurface()}` };
+  }
+  if (jobs.length === 0) {
+    const diagnostics = describeBossJobSurface();
+    const error = diagnostics.includes("empty=true")
+      ? `BOSS 当前搜索没有返回匹配职位。${diagnostics}`
+      : `BOSS 页面尚未产生可解析的职位卡片。${diagnostics}`;
+    return { type: "BOSS_CAPTURE_RESULT", success: false, page_url: window.location.href, jobs, page_state: finalPageState, error };
   }
   return { type: "BOSS_CAPTURE_RESULT", success: true, page_url: window.location.href, jobs, page_state: finalPageState };
 }

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { LlmDeepScoreBadge } from "../../components/scoring-mode-badge";
 import {
   createCampaign,
   deleteCampaign,
@@ -203,7 +204,7 @@ export default function CampaignsPage() {
           {campaigns.map((campaign) => (
             <article className="panel transition hover:border-indigo-200 hover:shadow-md" key={campaign.id}>
               <div className="flex items-start justify-between gap-4">
-                <div><Link className="font-semibold text-slate-900 hover:text-indigo-700" href={`/campaigns/${campaign.id}`}>{campaign.name}</Link><p className="mt-2 text-sm text-slate-500">最低 {campaign.min_score} 分 · 最多 {campaign.max_jobs} 个职位 · {campaign.scoring_mode === "llm" ? "深度评分" : "快速评分"}</p></div>
+                <div><div className="flex flex-wrap items-center gap-2"><Link className="font-semibold text-slate-900 hover:text-indigo-700" href={`/campaigns/${campaign.id}`}>{campaign.name}</Link>{campaign.scoring_mode === "llm" && <LlmDeepScoreBadge kind="plan" />}</div><p className="mt-2 text-sm text-slate-500">最低 {campaign.min_score} 分 · 最多 {campaign.max_jobs} 个职位 · {campaign.scoring_mode === "llm" ? "模型深度复核" : "快速评分"}</p></div>
                 <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">{statusLabels[campaign.status]}</span>
               </div>
               <div className="mt-5 grid grid-cols-3 gap-3 border-t border-slate-100 pt-4 text-center">

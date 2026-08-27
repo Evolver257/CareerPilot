@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { LlmDeepScoreBadge } from "../../components/scoring-mode-badge";
 import {
   cancelBrowserTaskCampaign,
   createCampaignBrowserTasks,
@@ -105,7 +106,7 @@ export default function BrowserTasksPage() {
         }, window.location.origin);
       }
       const failed = batch.failed_count > 0 ? `，${batch.failed_count} 个创建失败` : "";
-      setNotice(`已创建 ${batch.created_count} 个、复用 ${batch.reused_count} 个 Browser Task；${bossTasks.length} 个 BOSS 岗位已进入单标签页串行队列${failed}。每次“立即沟通”成功后自动切换到下一岗位并更新为已投递。`);
+      setNotice(`已创建 ${batch.created_count} 个、复用 ${batch.reused_count} 个 Browser Task；${bossTasks.length} 个 BOSS 岗位已进入后台单标签页串行队列${failed}。你可以离开此页面，每次“立即沟通”成功后会自动切换到下一岗位并更新为已投递。`);
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Browser Task 创建失败。");
@@ -128,11 +129,11 @@ export default function BrowserTasksPage() {
       <section className="panel">
         <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="eyebrow">New Task</p><h2 className="mt-2 text-xl font-semibold">启动平台 Adapter 投递</h2></div><a className="text-sm font-medium text-indigo-700" href="https://www.zhipin.com/web/geek/jobs" rel="noreferrer" target="_blank">打开 BOSS 直聘 →</a></div>
         <div className="mt-6 grid gap-4 md:grid-cols-2">
-          <label className="text-sm font-medium text-slate-700">投递计划<select className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 font-normal outline-none focus:border-indigo-500" onChange={(event) => setCampaignId(event.target.value)} value={campaignId}><option value="">请选择投递计划</option>{campaigns.filter((campaign) => applications.some((item) => item.campaign_id === campaign.id)).map((campaign) => { const count = applications.filter((item) => item.campaign_id === campaign.id).length; return <option key={campaign.id} value={campaign.id}>{campaign.name} · {count} 个排队岗位</option>; })}</select></label>
+          <label className="text-sm font-medium text-slate-700">投递计划<select className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 font-normal outline-none focus:border-indigo-500" onChange={(event) => setCampaignId(event.target.value)} value={campaignId}><option value="">请选择投递计划</option>{campaigns.filter((campaign) => applications.some((item) => item.campaign_id === campaign.id)).map((campaign) => { const count = applications.filter((item) => item.campaign_id === campaign.id).length; return <option key={campaign.id} value={campaign.id}>{campaign.scoring_mode === "llm" ? "【LLM 深评】" : ""}{campaign.name} · {count} 个排队岗位</option>; })}</select></label>
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600"><p className="font-medium text-slate-700">自动选择 Platform Adapter</p><p className="mt-2">{platformSummary} · 共 {selectedApplications.length} 个 QUEUED Application</p></div>
           <label className="text-sm font-medium text-slate-700">Adapter 场景<select className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 font-normal outline-none focus:border-indigo-500" onChange={(event) => setScenario(event.target.value)} value={scenario}><option value="SUCCESS">SUCCESS · 正常投递</option><option value="CAPTCHA_REQUIRED">CAPTCHA_REQUIRED · 需要人工处理</option><option value="LOGIN_REQUIRED">LOGIN_REQUIRED · 需要登录</option><option value="RISK_CONTROL">RISK_CONTROL · 风控暂停</option><option value="UNKNOWN_STATE">UNKNOWN_STATE · 未知 DOM 暂停</option><option value="PLATFORM_LIMIT">PLATFORM_LIMIT · 平台限制</option><option value="DOM_CHANGED">DOM_CHANGED · DOM 变化</option></select></label>
         </div>
-        <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-800">点击后会为该计划中所有排队岗位创建任务。BOSS Adapter 只打开一个标签页，完成“立即沟通”后在同一标签页切换到下一岗位；验证码、登录、风控、平台限制和未知页面会暂停等待人工处理。</p>
+        <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-800">点击后会为该计划中所有排队岗位创建任务。BOSS Adapter 在后台只使用一个标签页，完成“立即沟通”后在同一标签页切换到下一岗位；你可以离开当前页面。验证码、登录、风控、平台限制和未知页面会暂停等待人工处理。</p>
         <button className="mt-5 rounded-xl bg-indigo-600 px-5 py-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={creating || !campaignId || selectedApplications.length === 0} onClick={() => void handleCreate()} type="button">{creating ? "正在启动投递计划…" : `一键投递 ${selectedApplications.length} 个排队岗位`}</button>
         {applications.length === 0 && <p className="mt-4 text-sm text-slate-500">暂无包含 QUEUED Application 的投递计划。请先在 Agent Trace 审批候选职位。</p>}
       </section>
@@ -143,13 +144,14 @@ export default function BrowserTasksPage() {
         {loading && <div className="panel text-center text-slate-500">加载中…</div>}
         {!loading && taskGroups.length === 0 && <div className="panel text-center text-slate-500">还没有投递计划任务记录。</div>}
         <div className="space-y-4">{taskGroups.map((group) => {
+          const relatedCampaign = campaigns.find((campaign) => campaign.id === group.campaign_id);
           const processed = group.submitted_count + group.failed_count + group.cancelled_count;
           const progress = group.task_count > 0 ? Math.round((processed / group.task_count) * 100) : 0;
           const busy = maintainingCampaignId === group.campaign_id;
           const hasActive = group.active_count > 0 || group.waiting_count > 0;
           return <article className="panel" key={group.campaign_id}>
             <div className="flex flex-wrap items-start justify-between gap-4">
-              <div><h3 className="text-lg font-semibold">{group.campaign_name}</h3><p className="mt-2 text-sm text-slate-500">{group.platforms.join("、")} · {group.task_count} 个岗位 · 更新于 {new Date(group.updated_at).toLocaleString("zh-CN")}</p></div>
+              <div><div className="flex flex-wrap items-center gap-2"><h3 className="text-lg font-semibold">{group.campaign_name}</h3>{relatedCampaign?.scoring_mode === "llm" && <LlmDeepScoreBadge kind="plan" />}</div><p className="mt-2 text-sm text-slate-500">{group.platforms.join("、")} · {group.task_count} 个岗位 · 更新于 {new Date(group.updated_at).toLocaleString("zh-CN")}</p></div>
               <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">{statusLabels[group.status]}</span>
             </div>
             <div className="mt-5 h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-indigo-600 transition-all" style={{ width: `${progress}%` }} /></div>

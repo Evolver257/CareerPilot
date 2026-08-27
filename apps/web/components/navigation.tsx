@@ -9,6 +9,7 @@ const links = [
   { href: "/dashboard", label: "工作台" },
   { href: "/jobs", label: "找职位" },
   { href: "/ranking", label: "智能匹配" },
+  { href: "/market-insights", label: "职业洞察" },
   { href: "/resume", label: "我的简历" },
   { href: "/agent-runs", label: "求职 Agent" },
   { href: "/campaigns", label: "投递计划" },

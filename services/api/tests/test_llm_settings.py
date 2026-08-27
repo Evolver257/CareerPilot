@@ -1,9 +1,15 @@
 import json
 
 import httpx
+import pytest
 from pydantic import BaseModel
 
-from app.llm.provider import AnthropicProvider, MockLLMProvider, OpenAIProvider
+from app.llm.provider import (
+    AnthropicProvider,
+    LLMProviderError,
+    MockLLMProvider,
+    OpenAIProvider,
+)
 from app.schemas.llm import LLMConnectionTestRead
 from app.services.llm_settings import LLMSettingsService
 
@@ -226,3 +232,33 @@ async def test_anthropic_structured_output_retries_thinking_only_max_tokens_resp
 
     assert result.score == 91
     assert [json.loads(request.content)["max_tokens"] for request in requests] == [2, 4]
+
+
+async def test_structured_output_token_override_uses_one_bounded_attempt() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "thinking", "thinking": "private"}],
+                "stop_reason": "max_tokens",
+            },
+        )
+
+    class Score(BaseModel):
+        score: int
+
+    provider = AnthropicProvider(
+        api_key="sk-ant-test-key",
+        model="deepseek-test",
+        base_url="https://proxy.example",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(LLMProviderError):
+        await provider.generate_structured("return data", Score, max_tokens=1200)
+
+    assert len(requests) == 1
+    assert json.loads(requests[0].content)["max_tokens"] == 1200

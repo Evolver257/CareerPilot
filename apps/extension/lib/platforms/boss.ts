@@ -21,17 +21,37 @@ export type BossPageState =
 
 const BOSS_HOSTS = new Set(["zhipin.com", "www.zhipin.com", "m.zhipin.com"]);
 const CARD_SELECTORS = [
+  "li.job-card-box",
   ".job-card-wrap",
   ".job-card-wrapper",
   ".job-card-box",
   ".card-area",
   ".job-card",
+  "li[class*='job-card']",
+  "[role='listitem'][class*='job']",
   "[data-jobid]",
   "[data-job-id]",
+  "[data-encrypt-job-id]",
 ];
-const TITLE_SELECTORS = [".job-name", ".job-title", "[data-job-title]"];
-const COMPANY_SELECTORS = [".boss-name", ".company-name", ".company-text", ".company-info"];
-const LOCATION_SELECTORS = [".company-location", ".job-area", ".job-location", ".job-card-location"];
+const JOB_LINK_SELECTORS = [
+  "a[href*='/job_detail/']",
+  "a.job-name",
+  "a.job-card-left",
+  "a[ka*='search_list_jname']",
+  "[data-jobid] a",
+  "[data-job-id] a",
+];
+const TITLE_SELECTORS = [
+  ".job-name",
+  ".job-title .job-name",
+  ".job-info .job-name",
+  ".job-title",
+  "[data-job-title]",
+  "a[href*='/job_detail/']",
+  "a[ka*='search_list_jname']",
+];
+const COMPANY_SELECTORS = [".boss-name", ".company-name", ".company-text", ".company-info", ".brand-name"];
+const LOCATION_SELECTORS = [".company-location", ".job-area", ".job-location", ".job-card-location", ".job-address"];
 const SALARY_SELECTORS = [".salary", ".job-salary", ".job-card-salary"];
 const DETAIL_DESCRIPTION_SELECTORS = [
   ".job-detail-box .job-detail-body .desc",
@@ -46,6 +66,21 @@ const DETAIL_TITLE_SELECTORS = [
   ".job-detail-container .job-name",
   ".job-detail-box .job-name",
 ];
+const BLOCKER_SCOPE_SELECTORS = [
+  "[role='dialog']",
+  "[aria-modal='true']",
+  "[class*='captcha']",
+  "[class*='verify']",
+  "[class*='security']",
+  "[class*='risk']",
+  "[id*='captcha']",
+  "[id*='verify']",
+  "[id*='security']",
+  "[id*='risk']",
+  ".geetest_panel",
+  ".geetest_holder",
+  ".nc-container",
+];
 const JOB_LIST_SELECTORS = [
   ".job-list-container",
   ".job-list-box",
@@ -53,10 +88,21 @@ const JOB_LIST_SELECTORS = [
   ".job-card-list",
   ".search-job-result",
   ".job-list",
+  ".page-jobs-main",
 ];
-const MAX_VISIBLE_JOBS = 50;
-const MAX_SCROLL_ROUNDS = 20;
-const MAX_STAGNANT_SCROLLS = 3;
+export const MAX_BOSS_BATCH_JOBS = 200;
+const MIN_SCROLL_ROUNDS = 20;
+const MAX_SCROLL_ROUNDS_PER_JOB = 2;
+const MAX_STAGNANT_SCROLLS = 8;
+const CARD_PACING_MS = 450;
+const SCROLL_SETTLE_MS = 600;
+const FOREGROUND_NEW_CARD_CHECKS = 16;
+const BACKGROUND_NEW_CARD_CHECKS = 12;
+const FOREGROUND_NEW_CARD_INTERVAL_MS = 250;
+const BACKGROUND_NEW_CARD_INTERVAL_MS = 1_000;
+const LIST_VIEWPORT_SCROLL_RATIO = 0.82;
+const MIN_CARDS_PER_LIST_SCROLL = 3;
+const LIST_BOTTOM_GAP_PX = 24;
 
 const CITY_CODES: Record<string, string> = {
   北京: "101010100",
@@ -94,18 +140,48 @@ export function isBossPageUrl(url = window.location.href): boolean {
 
 export function detectBossPageState(): BossPageState {
   if (!isBossPageUrl()) return "UNKNOWN_STATE";
-  const content = `${document.title}\n${document.body.innerText}`.toLocaleLowerCase();
+  const title = normalize(document.title).toLocaleLowerCase();
+  const pageText = normalize(document.body.innerText).toLocaleLowerCase();
+  const scopedBlockerText = readVisibleBlockerText().toLocaleLowerCase();
+  const hasJobSurface = hasVisibleJobSurface();
+  // When cards are present, only blocker scopes may override READY. Reading
+  // the whole JD here would reintroduce false positives such as a normal job
+  // description mentioning "风控" or "安全验证". When no job surface exists,
+  // fall back to the full page so standalone login/challenge pages are still
+  // classified correctly.
+  const content = hasJobSurface
+    ? `${title}\n${scopedBlockerText}`
+    : `${title}\n${scopedBlockerText}\n${pageText}`;
   if (["验证码", "人机验证", "captcha", "图形验证"].some((marker) => content.includes(marker))) return "CAPTCHA";
-  if (["请先登录", "登录后", "登录/注册", "登录注册"].some((marker) => content.includes(marker))) return "LOGIN_REQUIRED";
+  if (["请先登录", "登录后继续", "登录后查看", "登录/注册", "登录注册", "扫码登录", "手机登录", "短信登录", "立即登录", "login required", "sign in"].some((marker) => content.includes(marker))) return "LOGIN_REQUIRED";
   if (["操作频繁", "访问频繁", "platform limit"].some((marker) => content.includes(marker))) return "PLATFORM_LIMIT";
-  if (["安全验证", "风控", "risk control"].some((marker) => content.includes(marker))) return "RISK_CONTROL";
-  if (["职位搜索", "职位详情", "立即沟通", "立即投递", "薪资"].some((marker) => content.includes(marker))) return "READY";
+  if (["安全验证", "风险验证", "请完成验证", "拖动滑块", "人机校验", "异常访问", "账号存在风险", "风险提示", "risk control verification", "security verification"].some((marker) => content.includes(marker))) return "RISK_CONTROL";
+  if (hasJobSurface) return "READY";
+  if (["职位搜索", "职位详情", "立即沟通", "立即投递", "薪资"].some((marker) => pageText.includes(marker))) return "READY";
   return "UNKNOWN_STATE";
+}
+
+function readVisibleBlockerText(): string {
+  return uniqueVisibleElements(
+    BLOCKER_SCOPE_SELECTORS.flatMap((selector) => [...document.querySelectorAll<HTMLElement>(selector)]),
+  )
+    .map((element) => normalize(element.innerText || element.textContent || ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+function hasVisibleJobSurface(): boolean {
+  const hasCards = discoverJobCards().length > 0;
+  const hasDetail = DETAIL_DESCRIPTION_SELECTORS.some((selector) => {
+    const element = document.querySelector<HTMLElement>(selector);
+    return Boolean(element && isVisible(element));
+  });
+  return hasCards || hasDetail;
 }
 
 export function extractVisibleBossJobs(): BossVisibleJob[] {
   if (!isBossPageUrl()) return [];
-  const cards = uniqueVisibleElements(CARD_SELECTORS.flatMap((selector) => [...document.querySelectorAll<HTMLElement>(selector)]));
+  const cards = visibleJobCards();
   const jobs = cards.map((card) => extractCard(card)).filter((job): job is BossVisibleJob => job !== null);
   if (jobs.length > 0) return dedupe(jobs);
 
@@ -129,14 +205,19 @@ export function extractVisibleBossJobs(): BossVisibleJob[] {
   }];
 }
 
-export async function extractVisibleBossJobsWithDetails(maxJobs = 20): Promise<BossVisibleJob[]> {
-  const limit = Math.min(Math.max(maxJobs, 1), MAX_VISIBLE_JOBS);
+export async function extractVisibleBossJobsWithDetails(
+  maxJobs = 20,
+  onProgress?: (job: BossVisibleJob, collectedCount: number, targetCount: number) => void | Promise<void>,
+): Promise<BossVisibleJob[]> {
+  const limit = Math.min(Math.max(maxJobs, 1), MAX_BOSS_BATCH_JOBS);
+  const maxScrollRounds = Math.max(MIN_SCROLL_ROUNDS, limit * MAX_SCROLL_ROUNDS_PER_JOB);
   const collected = new Map<string, BossVisibleJob>();
   let stagnantScrolls = 0;
 
-  for (let round = 0; round < MAX_SCROLL_ROUNDS && collected.size < limit; round += 1) {
+  for (let round = 0; round < maxScrollRounds && collected.size < limit; round += 1) {
     if (detectBossPageState() !== "READY") break;
     const cards = visibleJobCards();
+    if (cards.length === 0) break;
 
     for (const card of cards) {
       if (collected.size >= limit) break;
@@ -145,6 +226,8 @@ export async function extractVisibleBossJobsWithDetails(maxJobs = 20): Promise<B
 
       let enriched = job;
       if (job.description_source !== "detail_panel" && card.isConnected) {
+        await paceCardIntoView(card);
+        if (detectBossPageState() !== "READY") break;
         const clickTarget = card.querySelector<HTMLElement>(".job-card-box") ?? card;
         clickTarget.click();
         const detailDescription = await waitForJobDetail(job.title, card);
@@ -157,25 +240,34 @@ export async function extractVisibleBossJobsWithDetails(maxJobs = 20): Promise<B
         }
       }
       collected.set(enriched.external_job_id, enriched);
+      await onProgress?.(enriched, collected.size, limit);
+      await wait(CARD_PACING_MS);
     }
 
     if (collected.size >= limit || detectBossPageState() !== "READY") break;
     const knownJobIds = new Set(collected.keys());
     const scrollTarget = findJobListScrollTarget(cards);
-    scrollJobList(scrollTarget, cards);
+    await scrollJobList(scrollTarget, cards);
     const foundNewCards = await waitForNewJobCards(knownJobIds);
-    stagnantScrolls = foundNewCards ? 0 : stagnantScrolls + 1;
-    if (stagnantScrolls >= MAX_STAGNANT_SCROLLS) break;
+    if (foundNewCards) {
+      stagnantScrolls = 0;
+    } else if (hasReachedJobListEnd()) {
+      break;
+    } else {
+      stagnantScrolls += 1;
+      if (stagnantScrolls >= MAX_STAGNANT_SCROLLS) break;
+    }
   }
 
   return [...collected.values()].slice(0, limit);
 }
 
 function extractCard(card: HTMLElement): BossVisibleJob | null {
-  const link = card.querySelector<HTMLAnchorElement>("a[href*='/job_detail/'], a.job-name, a.job-card-left");
+  const link = findJobLink(card);
   const jobUrl = link?.href || window.location.href;
-  const externalJobId = card.dataset.jobid || card.dataset.jobId || extractJobId(jobUrl);
-  const title = readFirst(card, TITLE_SELECTORS);
+  const externalJobId = readJobId(card, link, jobUrl);
+  const title = readFirst(card, TITLE_SELECTORS)
+    || normalize(link?.getAttribute("title") || link?.getAttribute("aria-label") || link?.textContent || "");
   if (!externalJobId || !title) return null;
   const activeCard = isActiveCard(card);
   const detailDescription = activeCard ? readDescription(document) : null;
@@ -195,20 +287,98 @@ function extractCard(card: HTMLElement): BossVisibleJob | null {
 }
 
 function visibleJobCards(): HTMLElement[] {
-  return uniqueVisibleElements(
-    CARD_SELECTORS.flatMap((selector) => [...document.querySelectorAll<HTMLElement>(selector)]),
+  return discoverJobCards();
+}
+
+function discoverJobCards(): HTMLElement[] {
+  const candidates = CARD_SELECTORS.flatMap((selector) => [
+    ...document.querySelectorAll<HTMLElement>(selector),
+  ]);
+  for (const selector of JOB_LINK_SELECTORS) {
+    for (const link of document.querySelectorAll<HTMLElement>(selector)) {
+      const card = link.closest<HTMLElement>(
+        "li.job-card-box, li.job-card-wrapper, .job-card-wrap, .job-card-wrapper, .job-card-box, .job-card, [data-jobid], [data-job-id], [data-encrypt-job-id], li, [role='listitem']",
+      );
+      candidates.push(card ?? link);
+    }
+  }
+  return uniqueVisibleElements(candidates).filter((candidate) => {
+    if (findJobLink(candidate)) return true;
+    return Boolean(readJobId(candidate, null, window.location.href) && readFirst(candidate, TITLE_SELECTORS));
+  });
+}
+
+function findJobLink(card: HTMLElement): HTMLAnchorElement | null {
+  if (card instanceof HTMLAnchorElement && isJobLink(card)) return card;
+  for (const selector of JOB_LINK_SELECTORS) {
+    const link = card.querySelector<HTMLAnchorElement>(selector);
+    if (link) return link;
+  }
+  return null;
+}
+
+function isJobLink(link: HTMLAnchorElement): boolean {
+  return link.pathname.includes("/job_detail/")
+    || link.classList.contains("job-name")
+    || (link.getAttribute("ka") || "").includes("search_list_jname");
+}
+
+function readJobId(card: HTMLElement, link: HTMLAnchorElement | null, jobUrl: string): string | null {
+  const sources = [card, link, link?.closest<HTMLElement>("[data-jobid], [data-job-id], [data-encrypt-job-id]")];
+  for (const source of sources) {
+    if (!source) continue;
+    const value = source.dataset.jobid
+      || source.dataset.jobId
+      || source.dataset.encryptJobId
+      || source.getAttribute("data-jobid")
+      || source.getAttribute("data-job-id")
+      || source.getAttribute("data-encrypt-job-id");
+    if (value) return value;
+  }
+  return extractJobId(jobUrl);
+}
+
+export function describeBossJobSurface(): string {
+  const linkCount = JOB_LINK_SELECTORS.reduce(
+    (count, selector) => count + document.querySelectorAll(selector).length,
+    0,
   );
+  const cards = discoverJobCards();
+  const parsedCount = cards.filter((card) => extractCard(card) !== null).length;
+  const noResult = ["暂无相关职位", "没有找到相关职位", "暂无职位", "无搜索结果"].some(
+    (marker) => document.body.innerText.replace(/\s+/g, "").includes(marker),
+  );
+  return [
+    `state=${detectBossPageState()}`,
+    `ready=${document.readyState}`,
+    `links=${linkCount}`,
+    `cards=${cards.length}`,
+    `parsed=${parsedCount}`,
+    `empty=${noResult}`,
+    `path=${window.location.pathname}`,
+  ].join(", ");
 }
 
 function findJobListScrollTarget(cards: HTMLElement[]): HTMLElement | null {
+  let ancestor = cards[0]?.parentElement ?? null;
+  while (ancestor && ancestor !== document.body && ancestor !== document.documentElement) {
+    if (isScrollable(ancestor)) return ancestor;
+    ancestor = ancestor.parentElement;
+  }
+
   for (const selector of JOB_LIST_SELECTORS) {
     const candidate = document.querySelector<HTMLElement>(selector);
     if (candidate && isScrollable(candidate)) return candidate;
   }
 
-  let ancestor = cards[0]?.parentElement ?? null;
+  for (const selector of JOB_LIST_SELECTORS) {
+    const candidate = document.querySelector<HTMLElement>(selector);
+    if (candidate && isScrollContainer(candidate)) return candidate;
+  }
+
+  ancestor = cards[0]?.parentElement ?? null;
   while (ancestor && ancestor !== document.body && ancestor !== document.documentElement) {
-    if (isScrollable(ancestor)) return ancestor;
+    if (isScrollContainer(ancestor)) return ancestor;
     ancestor = ancestor.parentElement;
   }
 
@@ -217,34 +387,121 @@ function findJobListScrollTarget(cards: HTMLElement[]): HTMLElement | null {
 }
 
 function isScrollable(element: HTMLElement): boolean {
-  if (element.scrollHeight <= element.clientHeight + 24) return false;
+  if (!isScrollContainer(element)) return false;
+  return element.scrollHeight > element.clientHeight + 8;
+}
+
+function isScrollContainer(element: HTMLElement): boolean {
+  if (element.clientHeight <= 0) return false;
   const overflowY = window.getComputedStyle(element).overflowY;
   return ["auto", "scroll", "overlay"].includes(overflowY);
 }
 
-function scrollJobList(target: HTMLElement | null, cards: HTMLElement[]): void {
+async function scrollJobList(target: HTMLElement | null, cards: HTMLElement[]): Promise<void> {
   if (!target) return;
-  const previousTop = target.scrollTop;
-  const distance = Math.max(Math.round(target.clientHeight * 0.8), 480);
-  const nextTop = Math.min(previousTop + distance, target.scrollHeight);
-  target.scrollTo({ top: nextTop, behavior: "instant" });
-  target.dispatchEvent(new Event("scroll", { bubbles: true }));
+  const cardHeight = Math.round(cards[0]?.getBoundingClientRect().height ?? 180);
+  const viewportHeight = getScrollViewportHeight(target);
+  const distance = Math.max(
+    cardHeight * MIN_CARDS_PER_LIST_SCROLL,
+    Math.round(viewportHeight * LIST_VIEWPORT_SCROLL_RATIO),
+  );
+  const maxTop = Math.max(0, target.scrollHeight - viewportHeight);
+  const nextTop = Math.min(
+    maxTop,
+    Math.max(target.scrollTop + distance, maxTop - LIST_BOTTOM_GAP_PX),
+  );
 
-  if (target.scrollTop <= previousTop) {
-    cards.at(-1)?.scrollIntoView({ block: "end", behavior: "instant" });
+  setScrollTopImmediately(target, nextTop);
+  notifyListScrolled(target);
+  await wait(document.hidden ? BACKGROUND_NEW_CARD_INTERVAL_MS : SCROLL_SETTLE_MS);
+
+  const lastCard = cards.at(-1);
+  if (lastCard?.isConnected) {
+    lastCard.scrollIntoView({ block: "end", inline: "nearest", behavior: "auto" });
+  }
+
+  // BOSS loads the next batch only when the list reaches its current bottom.
+  // Recalculate synchronously so hidden tabs do not depend on animation frames.
+  const refreshedViewportHeight = getScrollViewportHeight(target);
+  const refreshedMaxTop = Math.max(0, target.scrollHeight - refreshedViewportHeight);
+  setScrollTopImmediately(target, refreshedMaxTop);
+  void target.getBoundingClientRect().height;
+  notifyListScrolled(target);
+  await wait(document.hidden ? BACKGROUND_NEW_CARD_INTERVAL_MS : SCROLL_SETTLE_MS);
+}
+
+function setScrollTopImmediately(target: HTMLElement, top: number): void {
+  const normalizedTop = Math.max(0, Math.round(top));
+  if (
+    target === document.scrollingElement
+    || target === document.documentElement
+    || target === document.body
+  ) {
+    window.scrollTo({ top: normalizedTop, behavior: "auto" });
+  }
+  target.scrollTop = normalizedTop;
+}
+
+function notifyListScrolled(target: HTMLElement): void {
+  target.dispatchEvent(new Event("scroll", { bubbles: true }));
+  if (target === document.scrollingElement || target === document.documentElement || target === document.body) {
+    window.dispatchEvent(new Event("scroll"));
   }
 }
 
+function getScrollViewportHeight(target: HTMLElement): number {
+  if (
+    target === document.scrollingElement
+    || target === document.documentElement
+    || target === document.body
+  ) {
+    return Math.max(1, window.innerHeight);
+  }
+  return Math.max(1, target.clientHeight);
+}
+
+async function paceCardIntoView(card: HTMLElement): Promise<void> {
+  card.scrollIntoView({ block: "center", behavior: "smooth" });
+  await wait(CARD_PACING_MS);
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
 async function waitForNewJobCards(knownJobIds: Set<string>): Promise<boolean> {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < 1800) {
-    await new Promise((resolve) => window.setTimeout(resolve, 200));
+  const background = document.hidden;
+  const checks = background ? BACKGROUND_NEW_CARD_CHECKS : FOREGROUND_NEW_CARD_CHECKS;
+  const interval = background ? BACKGROUND_NEW_CARD_INTERVAL_MS : FOREGROUND_NEW_CARD_INTERVAL_MS;
+  for (let check = 0; check < checks; check += 1) {
+    await wait(interval);
     if (detectBossPageState() !== "READY") return false;
     const hasNewCard = visibleJobCards().some((card) => {
       const job = extractCard(card);
       return Boolean(job && !knownJobIds.has(job.external_job_id));
     });
     if (hasNewCard) return true;
+
+    // Hidden tabs may defer BOSS' observer callback. Reassert the real list bottom
+    // periodically without relying on requestAnimationFrame or smooth scrolling.
+    if (background && check > 0 && check % 3 === 0) {
+      const cards = visibleJobCards();
+      const target = findJobListScrollTarget(cards);
+      if (target) {
+        const viewportHeight = getScrollViewportHeight(target);
+        setScrollTopImmediately(target, Math.max(0, target.scrollHeight - viewportHeight));
+        void target.getBoundingClientRect().height;
+        notifyListScrolled(target);
+      }
+    }
+  }
+  return false;
+}
+
+function hasReachedJobListEnd(): boolean {
+  const pageText = document.body.innerText.replace(/\s+/g, "");
+  if (["没有更多职位", "没有更多了", "已加载全部", "到底了"].some((marker) => pageText.includes(marker))) {
+    return true;
   }
   return false;
 }
@@ -253,7 +510,7 @@ async function waitForJobDetail(title: string, card: HTMLElement): Promise<strin
   const expectedTitle = normalize(title).toLocaleLowerCase();
   const startedAt = Date.now();
   while (Date.now() - startedAt < 2500) {
-    await new Promise((resolve) => window.setTimeout(resolve, 150));
+    await wait(150);
     const detailTitle = (readFirst(document, DETAIL_TITLE_SELECTORS) ?? "").toLocaleLowerCase();
     const description = readDescription(document);
     if ((!card.isConnected || isActiveCard(card)) && description && description.length >= 20 && (

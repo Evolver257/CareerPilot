@@ -30,6 +30,10 @@
   --cp-success-text: #047857;
   --cp-danger-text: #be123c;
   --cp-warning-text: #b45309;
+  --cp-llm-badge-surface-start: #f5f3ff;
+  --cp-llm-badge-surface-end: #eef2ff;
+  --cp-llm-badge-border: #c4b5fd;
+  --cp-llm-badge-text: #6d28d9;
 }
 
 html.dark {
@@ -60,6 +64,10 @@ html.dark {
   --cp-success-text: #86efac;
   --cp-danger-text: #fda4af;
   --cp-warning-text: #fcd34d;
+  --cp-llm-badge-surface-start: #2e1065;
+  --cp-llm-badge-surface-end: #1e1b4b;
+  --cp-llm-badge-border: #7c3aed;
+  --cp-llm-badge-text: #ddd6fe;
 }
 
 body {
@@ -76,6 +84,14 @@ body {
 
   .eyebrow {
     @apply text-xs font-semibold uppercase tracking-[0.18em] text-indigo-600;
+  }
+
+  .llm-deep-score-badge {
+    @apply inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold;
+    border: 1px solid var(--cp-llm-badge-border);
+    background: linear-gradient(135deg, var(--cp-llm-badge-surface-start), var(--cp-llm-badge-surface-end));
+    color: var(--cp-llm-badge-text);
+    box-shadow: 0 1px 2px rgb(109 40 217 / 0.12);
   }
 
   .ranking-meta,

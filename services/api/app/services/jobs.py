@@ -45,9 +45,31 @@ class JobService:
         self.normalizer = JobNormalizer()
 
     async def list_jobs(
-        self, *, page: int, page_size: int, search: str | None
+        self,
+        *,
+        page: int,
+        page_size: int,
+        search: str | None,
+        company: str | None,
+        location: str | None,
+        platform: str | None,
+        education: str | None,
+        experience: str | None,
+        salary_floor: int | None,
+        salary_ceiling: int | None,
     ) -> tuple[list[Job], int]:
-        return await self.repository.list(page=page, page_size=page_size, search=search)
+        return await self.repository.list(
+            page=page,
+            page_size=page_size,
+            search=search,
+            company=company,
+            location=location,
+            platform=platform,
+            education=education,
+            experience=experience,
+            salary_floor=salary_floor,
+            salary_ceiling=salary_ceiling,
+        )
 
     async def get_job(self, job_id: UUID) -> Job | None:
         return await self.repository.get(job_id)

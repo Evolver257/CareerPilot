@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
+import { LlmDeepScoreBadge } from "../../../components/scoring-mode-badge";
 import {
   approveCampaignJobs,
   campaignAction,
@@ -155,8 +156,8 @@ export default function CampaignDetailPage() {
         <div>
           <Link className="text-sm font-medium text-indigo-700" href="/campaigns">← 返回投递计划</Link>
           <p className="eyebrow mt-5">投递计划详情</p>
-          <h1 className="mt-3 text-3xl font-semibold tracking-tight">{campaign.name}</h1>
-          <p className="mt-3 text-slate-500">最低 {campaign.min_score} 分 · 最多 {campaign.max_jobs} 个职位 · {campaign.scoring_mode === "llm" ? "LLM 深度评分" : "快速评分"} · {campaign.target_cities.join("、") || "不限城市"}</p>
+          <div className="mt-3 flex flex-wrap items-center gap-3"><h1 className="text-3xl font-semibold tracking-tight">{campaign.name}</h1>{campaign.scoring_mode === "llm" && <LlmDeepScoreBadge kind="plan" />}</div>
+          <p className="mt-3 text-slate-500">最低 {campaign.min_score} 分 · 最多 {campaign.max_jobs} 个职位 · {campaign.scoring_mode === "llm" ? "模型深度复核" : "快速评分"} · {campaign.target_cities.join("、") || "不限城市"}</p>
         </div>
         <div className="flex flex-wrap gap-2">
           {campaign.status === "DRAFT" && <button className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white disabled:opacity-50" disabled={actionLoading !== null} onClick={() => void runAction("start")} type="button">{actionLoading === "start" ? "搜索并排名中…" : "启动计划"}</button>}

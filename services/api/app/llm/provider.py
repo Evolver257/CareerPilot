@@ -46,7 +46,12 @@ class LLMProvider(Protocol):
     ) -> str: ...
 
     async def generate_structured(
-        self, prompt: str, schema: type[SchemaT], *, model: str | None = None
+        self,
+        prompt: str,
+        schema: type[SchemaT],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
     ) -> SchemaT: ...
 
     async def embed(self, text: str, *, model: str | None = None) -> list[float]: ...
@@ -82,7 +87,12 @@ class MockLLMProvider:
         return prompt
 
     async def generate_structured(
-        self, prompt: str, schema: type[SchemaT], *, model: str | None = None
+        self,
+        prompt: str,
+        schema: type[SchemaT],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
     ) -> SchemaT:
         result = schema.model_validate({})
         self.last_usage = UsageRecord(
@@ -180,7 +190,12 @@ class RemoteLLMProvider:
         return text
 
     async def generate_structured(
-        self, prompt: str, schema: type[SchemaT], *, model: str | None = None
+        self,
+        prompt: str,
+        schema: type[SchemaT],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
     ) -> SchemaT:
         schema_prompt = (
             f"{prompt}\n\nReturn JSON only. Do not wrap it in Markdown fences. "
@@ -188,14 +203,17 @@ class RemoteLLMProvider:
             f"{json.dumps(schema.model_json_schema(), ensure_ascii=False)}"
         )
         last_error: LLMProviderError | None = None
-        for attempt, max_tokens in enumerate(
-            (self.structured_max_tokens, self.structured_retry_max_tokens)
-        ):
+        token_limits = (
+            (max(1, max_tokens),)
+            if max_tokens is not None
+            else (self.structured_max_tokens, self.structured_retry_max_tokens)
+        )
+        for attempt, token_limit in enumerate(token_limits):
             try:
                 raw = await self.generate(
                     schema_prompt,
                     model=model,
-                    max_tokens=max_tokens,
+                    max_tokens=token_limit,
                 )
                 parsed = _parse_json_object(raw)
                 return schema.model_validate(parsed)
@@ -208,7 +226,7 @@ class RemoteLLMProvider:
                 )
                 last_error.__cause__ = exc
 
-            if attempt == 0 and last_error is not None and last_error.retryable:
+            if attempt < len(token_limits) - 1 and last_error is not None and last_error.retryable:
                 continue
             raise last_error
         raise last_error or LLMProviderError(
@@ -424,9 +442,9 @@ def _embedding_features(text: str) -> list[str]:
         if len(token) == 1:
             features.append(token)
             continue
-        features.extend(f"zh2:{token[index:index + 2]}" for index in range(len(token) - 1))
+        features.extend(f"zh2:{token[index : index + 2]}" for index in range(len(token) - 1))
         if len(token) >= 3:
-            features.extend(f"zh3:{token[index:index + 3]}" for index in range(len(token) - 2))
+            features.extend(f"zh3:{token[index : index + 3]}" for index in range(len(token) - 2))
     for phrase, canonical in _CANONICAL_EMBEDDING_TERMS.items():
         if phrase in normalized:
             features.append(f"canonical:{canonical}")
@@ -454,9 +472,7 @@ def _response_content_types(data: dict) -> list[str]:
     content = data.get("content")
     if isinstance(content, list):
         return [
-            str(item.get("type"))
-            for item in content
-            if isinstance(item, dict) and item.get("type")
+            str(item.get("type")) for item in content if isinstance(item, dict) and item.get("type")
         ]
     choices = data.get("choices")
     if isinstance(choices, list) and choices and isinstance(choices[0], dict):
