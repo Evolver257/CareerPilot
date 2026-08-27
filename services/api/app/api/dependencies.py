@@ -26,6 +26,12 @@ async def get_llm_provider(
     return await LLMSettingsService(session).get_runtime_provider()
 
 
+async def get_embedding_provider(
+    session: AsyncSession = Depends(get_db),
+) -> LLMProvider:
+    return await LLMSettingsService(session).get_runtime_embedding_provider()
+
+
 def get_llm_settings_service(
     session: AsyncSession = Depends(get_db),
 ) -> LLMSettingsService:
@@ -34,7 +40,7 @@ def get_llm_settings_service(
 
 def get_resume_service(
     session: AsyncSession = Depends(get_db),
-    provider: LLMProvider = Depends(get_llm_provider),
+    provider: LLMProvider = Depends(get_embedding_provider),
 ) -> ResumeService:
     return ResumeService(session, embedding_provider=provider)
 
@@ -42,15 +48,17 @@ def get_resume_service(
 def get_matching_service(
     session: AsyncSession = Depends(get_db),
     provider: LLMProvider = Depends(get_llm_provider),
+    embedding_provider: LLMProvider = Depends(get_embedding_provider),
 ) -> MatchingService:
-    return MatchingService(session, provider)
+    return MatchingService(session, provider, embedding_provider=embedding_provider)
 
 
 def get_ranking_service(
     session: AsyncSession = Depends(get_db),
     provider: LLMProvider = Depends(get_llm_provider),
+    embedding_provider: LLMProvider = Depends(get_embedding_provider),
 ) -> RankingService:
-    return RankingService(session, provider)
+    return RankingService(session, provider, embedding_provider=embedding_provider)
 
 
 def get_ranking_run_service(
@@ -69,8 +77,9 @@ def get_campaign_service(
 def get_agent_runtime(
     session: AsyncSession = Depends(get_db),
     provider: LLMProvider = Depends(get_llm_provider),
+    embedding_provider: LLMProvider = Depends(get_embedding_provider),
 ) -> AgentRuntime:
-    return AgentRuntime(session, provider)
+    return AgentRuntime(session, provider, embedding_provider=embedding_provider)
 
 
 def get_browser_task_service(

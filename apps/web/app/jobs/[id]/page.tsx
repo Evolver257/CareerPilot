@@ -111,6 +111,8 @@ function StructuredJobDescription({ analysis, rawDescription }: { analysis: JobA
         </div>
       </div>
 
+      {analysis.requirements.benefits.length > 0 && <div className="panel"><p className="eyebrow">职位提供</p><h2 className="mt-2 text-xl font-semibold">福利与实习收获</h2><RequirementList empty="" items={analysis.requirements.benefits} /></div>}
+
       <details className="panel group">
         <summary className="cursor-pointer font-semibold text-slate-800">查看原始职位描述</summary>
         <div className="mt-4 whitespace-pre-wrap rounded-xl bg-slate-50 p-5 text-sm leading-7 text-slate-600">{rawDescription}</div>

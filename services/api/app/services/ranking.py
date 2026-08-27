@@ -83,13 +83,15 @@ class RankingService:
         session: AsyncSession,
         provider: LLMProvider,
         settings: Settings | None = None,
+        embedding_provider: LLMProvider | None = None,
     ) -> None:
         self.session = session
         self.provider = provider
         self.settings = settings or get_settings()
         self.repository = RankingRepository(session)
         self.matching_repository = MatchingRepository(session)
-        self.rag = ResumeRAG(self.matching_repository, provider, self.settings)
+        self.embedding_provider = embedding_provider or provider
+        self.rag = ResumeRAG(self.matching_repository, self.embedding_provider, self.settings)
         self.rules = RulesFilter()
         self.skill_coverage = SkillCoverage()
         self.education_matcher = EducationMatcher()
@@ -212,6 +214,7 @@ class RankingService:
                 job=candidate.job,
                 resume=resume,
                 provider=self.provider,
+                embedding_provider=self.embedding_provider,
                 score_version=self.settings.ranking_version,
                 weights=weights,
             )
@@ -369,7 +372,12 @@ class RankingService:
         ready: list[Job] = []
         job_service = JobService(self.session)
         for job in jobs:
-            if not (job.normalized_data or {}).get("structured_job") or not job.skills:
+            if (
+                (job.normalized_data or {}).get("analysis_version")
+                != JobService.CURRENT_ANALYSIS_VERSION
+                or not (job.normalized_data or {}).get("structured_job")
+                or not job.skills
+            ):
                 await job_service.analyze_job(job.id)
                 refreshed = await self.matching_repository.get_job(job.id)
                 if refreshed is not None:

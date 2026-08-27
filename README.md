@@ -11,7 +11,7 @@ Phase 0 (repository audit) through Phase 10 (Productization) are implemented:
 - Async SQLAlchemy 2 data layer with PostgreSQL in development
 - Alembic migrations for the foundation entities and `resume_chunks` with pgvector embeddings
 - PDF, DOCX, Markdown, and TXT parsing with raw-text preservation and heuristic structured extraction
-- Provider interface plus deterministic `MockLLMProvider` embeddings for local development without API keys
+- Provider interface plus deterministic Chinese-aware local embeddings, with optional OpenAI-compatible `/embeddings` support
 - Job Parser, Normalizer, Skill/Requirement Extractors, and content-hash/platform-key deduplication
 - 30-entry Mock JD dataset with structured import and per-job analysis endpoints
 - Configurable hybrid scoring across semantic, skill, education, experience, location, preference, and LLM Judge signals
@@ -63,15 +63,15 @@ docker compose up --build
 Then open:
 
 - Web: http://localhost:3000/dashboard
-- API docs: http://localhost:8000/docs
-- Health: http://localhost:8000/health
+- API docs: http://localhost:8010/docs
+- Health: http://localhost:8010/health
 - Agent Runs: http://localhost:3000/agent-runs
 - Browser Tasks: http://localhost:3000/browser-tasks
 - Mock Platform: http://localhost:3000/mock-platform
 - Product Dashboard: http://localhost:3000/dashboard
 - LLM 设置: http://localhost:3000/settings
 
-If port 8000 is already in use, start the API on another host port while keeping the container port unchanged:
+The default API host port is 8010 to avoid conflicts with common local services. If another port is needed, start the API on another host port while keeping the container port unchanged:
 
 ```powershell
 $env:API_PORT = "8001"
@@ -103,6 +103,8 @@ npm run dev
 CareerPilot does not upload recruitment-site cookies, passwords, authentication tokens, or raw page HTML. BOSS compatibility only captures structured fields from the user's currently visible page through the browser extension; it does not run a background crawler or call undocumented APIs. Applications require a user-approved BrowserTask in the user's own session. Any browser integration pauses for CAPTCHA, login, risk-control, platform-limit, DOM-change, or unknown-page conditions and requests user action. No bypass, evasion, or unattended bulk submission is part of this project.
 
 LLM API keys can be entered from `/settings`. They are encrypted at rest by the API service and only a four-character hint is returned to the web app. The connection test makes one minimal generation request without saving or changing the configuration. Set `LLM_ENCRYPTION_KEY` to a long random secret in any non-development deployment, and never commit provider keys to the repository. The default provider remains the local Mock provider until a user explicitly saves and enables a remote provider.
+
+Semantic embeddings are configured independently from the LLM judge. The default `mock-hash-384-v2` mode is local and requires no key. To use an OpenAI-compatible embedding endpoint, set `EMBEDDING_PROVIDER=openai`, `EMBEDDING_MODEL=text-embedding-3-small`, `EMBEDDING_API_KEY`, and optionally `EMBEDDING_BASE_URL`. Existing resume chunks are automatically re-embedded when their persisted embedding signature changes.
 
 ## Roadmap
 

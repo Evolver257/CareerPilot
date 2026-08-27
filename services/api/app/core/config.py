@@ -16,7 +16,10 @@ class Settings(BaseSettings):
         default=10 * 1024 * 1024, validation_alias="MAX_UPLOAD_SIZE_BYTES"
     )
     embedding_dimensions: int = Field(default=384, validation_alias="EMBEDDING_DIMENSIONS")
-    embedding_model: str = Field(default="mock-hash-384", validation_alias="EMBEDDING_MODEL")
+    embedding_model: str = Field(default="mock-hash-384-v2", validation_alias="EMBEDDING_MODEL")
+    embedding_provider: str = Field(default="auto", validation_alias="EMBEDDING_PROVIDER")
+    embedding_api_key: str = Field(default="", validation_alias="EMBEDDING_API_KEY")
+    embedding_base_url: str = Field(default="", validation_alias="EMBEDDING_BASE_URL")
     llm_provider: str = Field(default="mock", validation_alias="LLM_PROVIDER")
     llm_api_key: str = Field(default="", validation_alias="LLM_API_KEY")
     llm_model: str = Field(default="", validation_alias="LLM_MODEL")

@@ -104,7 +104,12 @@ class RankingRunService:
             await self.session.refresh(run)
         return run
 
-    async def execute(self, run_id: UUID, provider: LLMProvider) -> RankingRun:
+    async def execute(
+        self,
+        run_id: UUID,
+        provider: LLMProvider,
+        embedding_provider: LLMProvider | None = None,
+    ) -> RankingRun:
         run = await self.get(run_id)
         if run.status in {"SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"}:
             return run
@@ -174,7 +179,11 @@ class RankingRunService:
         try:
             payload = JobRankingRequest.model_validate(run.request_payload)
             async with asyncio.timeout(remaining_timeout):
-                result = await RankingService(self.session, provider).rank(
+                result = await RankingService(
+                    self.session,
+                    provider,
+                    embedding_provider=embedding_provider,
+                ).rank(
                     payload,
                     progress=update_progress,
                     candidate_completed=persist_candidate,
@@ -338,7 +347,10 @@ async def execute_ranking_run(run_id: UUID) -> None:
         service = RankingRunService(session)
         try:
             provider = await LLMSettingsService(session).get_runtime_provider()
-            await service.execute(run_id, provider)
+            embedding_provider = await LLMSettingsService(
+                session
+            ).get_runtime_embedding_provider()
+            await service.execute(run_id, provider, embedding_provider)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

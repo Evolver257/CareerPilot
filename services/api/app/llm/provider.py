@@ -22,6 +22,8 @@ DEFAULT_PROVIDER_BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "anthropic": "https://api.anthropic.com",
 }
+DEFAULT_EMBEDDING_MODEL = "mock-hash-384-v2"
+MOCK_EMBEDDING_VERSION = "mock-hash-384-v2"
 DEFAULT_STRUCTURED_MAX_TOKENS = 8192
 DEFAULT_STRUCTURED_RETRY_MAX_TOKENS = 12288
 
@@ -54,9 +56,15 @@ class MockLLMProvider:
     """Deterministic local provider for development and tests without API keys."""
 
     provider_name = "mock"
+    model = DEFAULT_EMBEDDING_MODEL
+    embedding_provider_name = "mock"
+    embedding_model = DEFAULT_EMBEDDING_MODEL
+    embedding_version = MOCK_EMBEDDING_VERSION
+    embedding_signature = MOCK_EMBEDDING_VERSION
 
     def __init__(self, dimensions: int = 384) -> None:
         self.dimensions = dimensions
+        self.embedding_signature = f"{MOCK_EMBEDDING_VERSION}:{dimensions}"
         self.last_usage: UsageRecord | None = None
 
     async def generate(
@@ -90,12 +98,13 @@ class MockLLMProvider:
 
     def _hash_embedding(self, text: str) -> list[float]:
         values = [0.0] * self.dimensions
-        tokens: Sequence[str] = re.findall(r"[\w+#.-]+", text.lower())
+        tokens: Sequence[str] = _embedding_features(text)
         for token in tokens:
             digest = hashlib.sha256(token.encode("utf-8")).digest()
             index = int.from_bytes(digest[:4], "big") % self.dimensions
-            sign = 1.0 if digest[4] % 2 == 0 else -1.0
-            values[index] += sign
+            # Non-negative feature hashing avoids unrelated terms cancelling
+            # each other out, which made the previous cosine score collapse to 0.
+            values[index] += 1.0 + digest[4] / 255.0 * 0.25
 
         norm = math.sqrt(sum(value * value for value in values))
         if norm == 0:
@@ -115,6 +124,7 @@ class RemoteLLMProvider:
         model: str | None = None,
         base_url: str | None = None,
         dimensions: int = 384,
+        embedding_model: str | None = None,
         structured_max_tokens: int = DEFAULT_STRUCTURED_MAX_TOKENS,
         structured_retry_max_tokens: int = DEFAULT_STRUCTURED_RETRY_MAX_TOKENS,
         transport: httpx.AsyncBaseTransport | None = None,
@@ -123,6 +133,13 @@ class RemoteLLMProvider:
         self.model = model or DEFAULT_PROVIDER_MODELS[self.provider_name]
         self.base_url = (base_url or DEFAULT_PROVIDER_BASE_URLS[self.provider_name]).rstrip("/")
         self.dimensions = dimensions
+        self.embedding_model = embedding_model or DEFAULT_EMBEDDING_MODEL
+        self.embedding_provider_name = self.provider_name
+        self.embedding_version = (
+            f"{self.embedding_provider_name}:{self.embedding_model}:{self.dimensions}:v1"
+            if not self.embedding_model.startswith("mock-")
+            else MOCK_EMBEDDING_VERSION
+        )
         self.structured_max_tokens = max(1, structured_max_tokens)
         self.structured_retry_max_tokens = max(
             self.structured_max_tokens, structured_retry_max_tokens
@@ -130,6 +147,12 @@ class RemoteLLMProvider:
         self._transport = transport
         self.last_usage: UsageRecord | None = None
         self._embedding_fallback = MockLLMProvider(dimensions=dimensions)
+
+    @property
+    def embedding_signature(self) -> str:
+        if self.provider_name == "openai" and not self.embedding_model.startswith("mock-"):
+            return self.embedding_version
+        return self._embedding_fallback.embedding_signature
 
     async def generate(
         self,
@@ -193,12 +216,56 @@ class RemoteLLMProvider:
         )
 
     async def embed(self, text: str, *, model: str | None = None) -> list[float]:
-        # Resume vectors are persisted at EMBEDDING_DIMENSIONS (384) and the
-        # remote providers do not share one compatible embedding contract.
-        # Keep retrieval deterministic and local while using the configured
-        # provider for generation and judging.
+        if self.provider_name == "openai" and not self.embedding_model.startswith("mock-"):
+            return await self._embed_openai(text)
+
+        # Anthropic-compatible endpoints do not expose the OpenAI embeddings
+        # contract. Keep a deterministic local fallback for those providers.
         self.last_usage = None
         return await self._embedding_fallback.embed(text, model=model)
+
+    async def _embed_openai(self, text: str) -> list[float]:
+        base_url = self.base_url
+        if not base_url.endswith("/v1"):
+            base_url = f"{base_url}/v1"
+        payload: dict[str, object] = {
+            "model": self.embedding_model,
+            "input": text,
+        }
+        # text-embedding-3-* supports dimension shortening. Keeping the
+        # persisted dimension configurable lets existing pgvector schemas stay
+        # usable while users opt into a real embedding model.
+        if self.embedding_model.startswith("text-embedding-3-"):
+            payload["dimensions"] = self.dimensions
+        data = await self._post_json(
+            f"{base_url}/embeddings",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            payload=payload,
+        )
+        items = data.get("data") or []
+        if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+            raise LLMProviderError("openai returned an invalid embedding payload")
+        raw_embedding = items[0].get("embedding")
+        if not isinstance(raw_embedding, list) or not all(
+            isinstance(value, int | float) for value in raw_embedding
+        ):
+            raise LLMProviderError("openai returned an invalid embedding vector")
+        embedding = [float(value) for value in raw_embedding]
+        if len(embedding) != self.dimensions:
+            raise LLMProviderError(
+                "openai embedding dimension mismatch: "
+                f"expected {self.dimensions}, got {len(embedding)}"
+            )
+        usage = data.get("usage") or {}
+        self.last_usage = UsageRecord(
+            prompt_tokens=int(usage.get("prompt_tokens", usage.get("total_tokens", 0)) or 0),
+            completion_tokens=0,
+            source="openai_embedding",
+        )
+        return embedding
 
     async def _generate_payload(
         self,
@@ -326,6 +393,44 @@ class AnthropicProvider(RemoteLLMProvider):
             for item in content
             if isinstance(item, dict) and item.get("type") == "text"
         ).strip()
+
+
+_CANONICAL_EMBEDDING_TERMS = {
+    "人工智能": "ai",
+    "大模型": "llm",
+    "大型语言模型": "llm",
+    "检索增强生成": "rag",
+    "后端开发": "backend",
+    "服务端开发": "backend",
+    "前端开发": "frontend",
+    "机器学习": "machine-learning",
+    "深度学习": "deep-learning",
+    "数据库": "database",
+    "实习": "internship",
+}
+
+
+def _embedding_features(text: str) -> list[str]:
+    """Create stable mixed-language features for the local fallback vector.
+
+    The previous regex treated a whole uninterrupted Chinese sentence as one
+    token. Character n-grams preserve partial phrase overlap and are still
+    deterministic, cheap, and dependency-free.
+    """
+
+    normalized = re.sub(r"\s+", "", text.casefold())
+    features: list[str] = re.findall(r"[a-z0-9][a-z0-9+#._/-]*", normalized)
+    for token in re.findall(r"[\u3400-\u9fff]+", normalized):
+        if len(token) == 1:
+            features.append(token)
+            continue
+        features.extend(f"zh2:{token[index:index + 2]}" for index in range(len(token) - 1))
+        if len(token) >= 3:
+            features.extend(f"zh3:{token[index:index + 3]}" for index in range(len(token) - 2))
+    for phrase, canonical in _CANONICAL_EMBEDDING_TERMS.items():
+        if phrase in normalized:
+            features.append(f"canonical:{canonical}")
+    return features
 
 
 def _parse_json_object(value: str) -> dict:

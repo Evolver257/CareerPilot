@@ -190,13 +190,18 @@ class AgentRuntime:
         session: AsyncSession,
         provider: LLMProvider,
         settings: Settings | None = None,
+        embedding_provider: LLMProvider | None = None,
     ) -> None:
         self.session = session
         self.provider = provider
+        self.embedding_provider = embedding_provider or provider
         self.settings = settings or get_settings()
         self.repository = AgentRepository(session)
         self.registry: ToolRegistry = AgentToolService(
-            session, provider, self.settings
+            session,
+            provider,
+            self.settings,
+            embedding_provider=self.embedding_provider,
         ).registry()
         self.executor = AgentExecutor(self.registry)
         self.planner = AgentPlanner()

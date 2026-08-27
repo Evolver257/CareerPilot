@@ -37,6 +37,8 @@ class JobImportResult:
 
 
 class JobService:
+    CURRENT_ANALYSIS_VERSION = "JOB_EXTRACTION_V3"
+
     def __init__(self, session: AsyncSession) -> None:
         self.repository = JobRepository(session)
         self.session = session
@@ -271,7 +273,7 @@ class JobService:
     @staticmethod
     def _normalized_data(analysis: JobAnalysis) -> dict[str, object]:
         return {
-            "analysis_version": "JOB_EXTRACTION_V2",
+            "analysis_version": JobService.CURRENT_ANALYSIS_VERSION,
             "structured_job": analysis.structured_job.model_dump(),
             "requirements": analysis.requirements.model_dump(),
             "skills": [skill.name for skill in analysis.skills],

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from dataclasses import dataclass
 
 from app.schemas.job_intelligence import (
@@ -47,6 +48,12 @@ class JobParser:
             "资格要求",
             "任职资格",
             "任职条件",
+            "招聘要求",
+            "招聘条件",
+            "岗位资格",
+            "职位资格",
+            "我们对你的要求",
+            "你需要具备",
         },
         "preferred": {
             "preferred qualifications",
@@ -70,6 +77,10 @@ class JobParser:
             "你将参与的工作",
             "你将负责的工作",
             "主要工作",
+            "你需要参与",
+            "预期需求",
+            "工作任务",
+            "工作内容与职责",
         },
         "summary": {
             "summary",
@@ -78,8 +89,25 @@ class JobParser:
             "岗位简介",
             "职位描述",
             "岗位描述",
+            "岗位定位",
+            "岗位简介与职责",
+            "实习职位特点",
         },
-        "skills": {"skills", "technical skills", "技能要求", "技术栈"},
+        "skills": {"skills", "technical skills", "技能要求", "技术栈", "核心技能"},
+        "benefits": {
+            "benefits",
+            "what we offer",
+            "你将获得",
+            "我们为你提供",
+            "福利待遇",
+            "岗位福利",
+            "实习收获",
+            "公司福利",
+            "岗位的重要性",
+            "岗位价值",
+            "为什么加入我们",
+            "加入我们",
+        },
     }
 
     def parse(self, raw_jd: str) -> ParsedJob:
@@ -99,7 +127,27 @@ class JobParser:
 
     @staticmethod
     def _normalize(raw_jd: str) -> str:
-        lines = [re.sub(r"[ \t]+", " ", line).strip() for line in raw_jd.splitlines()]
+        # BOSS pages occasionally expose Kangxi radical glyphs (for example
+        # "⼤" and "⽤") instead of normal Chinese characters. NFKC maps
+        # those glyphs back to searchable text while leaving the original
+        # Chinese punctuation unchanged.
+        # Apply compatibility normalization only to the Kangxi-radical block.
+        # A full NFKC pass would also turn Chinese full-width punctuation into
+        # ASCII punctuation, which makes the persisted JD needlessly differ
+        # from what the user saw on the source page.
+        normalized = "".join(
+            unicodedata.normalize("NFKC", char)
+            if 0x2E80 <= ord(char) <= 0x2FFF
+            else char
+            for char in (raw_jd or "")
+        )
+        normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = re.sub(r"[\u200b-\u200d\ufeff]", "", normalized)
+        lines = [re.sub(r"[ \t\u00a0]+", " ", line).strip() for line in normalized.splitlines()]
+        lines = [
+            re.sub(r"(?:智联招聘|牛客网)\s*$", "", line).strip()
+            for line in lines
+        ]
         return "\n".join(line for line in lines if line)
 
     def _heading_type(self, line: str) -> str | None:
@@ -107,14 +155,59 @@ class JobParser:
         # as "## 你将参与的工作". Strip the Markdown marker first so the
         # semantic heading can still be matched against the aliases below.
         cleaned = re.sub(r"^\s{0,3}#{1,6}\s*", "", line)
-        cleaned = cleaned.strip(" #:：-—【】[]（）()")
-        normalized = cleaned.casefold()
+        cleaned = cleaned.strip()
+        numbered_major_heading = bool(
+            re.match(r"^[一二三四五六七八九十百]+\s*[、．.]\s*", cleaned)
+        )
+        # Long BOSS detail panels commonly number major sections as
+        # "一、岗位职责" / "二、岗位要求". Normalize the section marker before
+        # matching aliases, while leaving numbered qualification items intact.
+        cleaned = re.sub(
+            r"^(?:[一二三四五六七八九十百]+|\d{1,2})\s*[、．.]\s*",
+            "",
+            cleaned,
+        )
+        cleaned = re.sub(r"^[（(]\s*[一二三四五六七八九十百]+\s*[）)]\s*", "", cleaned)
+        cleaned = re.sub(r"^[\s\-—_=~*•·]+|[\s\-—_=~*•·]+$", "", cleaned)
+        cleaned = cleaned.strip(" #:：;；【】[]（）()")
+        normalized = re.sub(r"\s+", " ", cleaned.casefold())
         for section, aliases in self.section_aliases.items():
-            if normalized in aliases:
-                return section
+            for alias in aliases:
+                normalized_alias = re.sub(r"\s+", " ", alias.casefold())
+                if normalized == normalized_alias:
+                    return section
+                # Some BOSS headings contain a qualifier, for example
+                # "核心加分项 | AI-Native 开发者". Only accept a prefix when
+                # a visible separator follows it so normal prose is not
+                # mistaken for a heading.
+                remainder = normalized[len(normalized_alias) :]
+                if normalized.startswith(normalized_alias) and remainder.startswith(
+                    (" ", ":", "：", "|", "｜", "-", "—", "/", "[", "【", "(", "（")
+                ):
+                    return section
+        # Unknown Chinese-numbered top-level sections such as "四、岗位的
+        # 重要性" must end the preceding requirements section; otherwise
+        # their marketing text is incorrectly classified as qualifications.
+        if numbered_major_heading:
+            return "body"
         return None
 
     def _split_heading(self, line: str) -> tuple[str | None, str]:
+        bracket = re.match(
+            r"^\s*[【\[（(]\s*([^】\]）)]{1,40})\s*[】\]）)]\s*(.*)$",
+            line,
+        )
+        if bracket:
+            heading = self._heading_type(bracket.group(1))
+            if heading:
+                return heading, bracket.group(2).lstrip(" ：:").strip()
+
+        decorated = re.match(r"^\s*[-—_=~]{2,}\s*(.+?)\s*[-—_=~]{2,}\s*(.*)$", line)
+        if decorated:
+            heading = self._heading_type(decorated.group(1))
+            if heading:
+                return heading, decorated.group(2).strip()
+
         heading = self._heading_type(line)
         if heading:
             return heading, ""
@@ -181,6 +274,55 @@ class SkillExtractor:
         "Figma",
         "Product Management",
         "自动化测试",
+        "C",
+        "C++",
+        "C#",
+        "Spring",
+        "OpenCV",
+        "NumPy",
+        "PaddlePaddle",
+        "ONNX Runtime",
+        "vLLM",
+        "Llama.cpp",
+        "AOSP",
+        "Android",
+        "ROS",
+        "ROS2",
+        "Electron",
+        "MCP",
+        "Prompt",
+        "Function Calling",
+        "Tool Use",
+        "Cursor",
+        "Claude Code",
+        "Codex",
+        "OpenClaw",
+        "AutoGen",
+        "Isaac Gym",
+        "Isaac Lab",
+        "MuJoCo",
+        "Genesis",
+        "PPO",
+        "Actor-Critic",
+        "Behavior Cloning",
+        "Whole Body Control",
+        "Motion Tracking",
+        "Motion Retargeting",
+        "Sim2Real",
+        "SMPL",
+        "DeepMimic",
+        "Jacobian",
+        "Locomotion",
+        "IK",
+        "QP",
+        "GMR",
+        "OmniH2O",
+        "HOVER",
+        "BeyondMimic",
+        "Humanoid-Gym",
+        "GR00T",
+        "ProtoMotions",
+        "Unitree",
     )
     skill_aliases = {
         "Spring Boot": ("SpringBoot", "Spring Boot"),
@@ -190,15 +332,33 @@ class SkillExtractor:
         "scikit-learn": ("scikit-learn", "sklearn"),
         "LangChain": ("LangChain", "Langchain"),
         "LlamaIndex": ("LlamaIndex", "Llama Index"),
+        "C++": ("C++", "C／C++", "C/C++"),
+        "C": ("C", "C语言", "C 语言"),
+        "OpenCV": ("OpenCV", "opencv"),
+        "NumPy": ("NumPy", "Numpy"),
+        "ONNX Runtime": ("ONNX Runtime", "ONNXRuntime"),
+        "Llama.cpp": ("Llama.cpp", "llama.cpp"),
+        "ROS2": ("ROS2", "ROS 2"),
+        "MCP": ("MCP", "MCP协议", "MCP 协议"),
+        "LLM": ("LLM", "大语言模型", "大模型"),
+        "Agent": ("Agent", "智能体", "多智能体"),
+        "RAG": ("RAG", "向量检索"),
+        "Prompt": ("Prompt", "提示词", "提示工程"),
+        "Function Calling": ("Function Calling", "函数调用"),
+        "Tool Use": ("Tool Use", "工具调用"),
+        "Spring": ("Spring",),
     }
 
     def extract(self, parsed: ParsedJob) -> list[JobSkillDraft]:
-        required_text = "\n".join(
+        preferred_text = "\n".join(parsed.sections.get("preferred", []))
+        explicit_required_text = "\n".join(
             line
-            for section in ("body", "requirements", "skills")
+            for section in ("requirements", "skills", "responsibilities")
             for line in parsed.sections.get(section, [])
         )
-        preferred_text = "\n".join(parsed.sections.get("preferred", []))
+        # Once a dedicated requirement section exists, do not classify skills
+        # mentioned only in the marketing introduction as required.
+        required_text = explicit_required_text or "\n".join(parsed.sections.get("body", []))
         drafts: list[JobSkillDraft] = []
         for skill in self.known_skills:
             pattern = self._pattern(skill)
@@ -209,10 +369,19 @@ class SkillExtractor:
             skill_type = "preferred" if in_preferred and not in_required else "required"
             importance = 0.7 if skill_type == "required" else 0.4
             drafts.append(JobSkillDraft(skill, skill_type, importance))
-        return drafts
+        matched_names = {draft.name for draft in drafts}
+        # Avoid noisy duplicate tags such as C + C++ and Spring + Spring Boot
+        # when the longer technology name already explains the occurrence.
+        suppressed = {
+            "C" if "C++" in matched_names else "",
+            "Spring" if "Spring Boot" in matched_names else "",
+        }
+        return [draft for draft in drafts if draft.name not in suppressed]
 
     @staticmethod
     def _bounded_pattern(value: str) -> str:
+        if value == "C":
+            return r"(?<![A-Za-z0-9+#])C(?![A-Za-z0-9+#])"
         if re.fullmatch(r"[A-Za-z0-9+.# -]+", value):
             return rf"(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])"
         return re.escape(value)
@@ -225,31 +394,53 @@ class SkillExtractor:
 
 class RequirementExtractor:
     education_pattern = re.compile(
-        r"[^\n]*(?:bachelor|master|phd|degree|本科|硕士|博士|学士)[^\n]*",
+        r"[^\n]*(?:bachelor|master|phd|degree|本科|硕士|博士|研究生|学士|大专|专科|中专|高中|学历不限|学历不作要求|education)[^\n]*",
         flags=re.IGNORECASE,
     )
     experience_pattern = re.compile(
-        r"[^\n]*(?:\d+\+?\s*(?:years?|年)|经验)[^\n]*",
+        r"[^\n]*(?:\d+\s*(?:\+|至|-|~)?\s*(?:years?|年)|经验不限|无经验|无需经验|工作经验|项目经验|相关经验|经验要求|经验|experience)[^\n]*",
+        flags=re.IGNORECASE,
+    )
+
+    responsibility_prefix = re.compile(
+        r"^(?:负责|参与|协助|开发|设计|构建|搭建|维护|完成|推动|跟进|探索|研究|实现|支持|分析|优化|制定|对接|开展|承担|沉淀|整理|收集|执行|进行|帮助|配合|协同|撰写|"
+        r"build|develop|design|implement|maintain|support|own|drive|work on)",
+        flags=re.IGNORECASE,
+    )
+    qualification_prefix = re.compile(
+        r"^(?:本科|硕士|博士|研究生|大专|专科|学历|经验|熟悉|掌握|了解|具备|有|能够|能|可以|会|精通|熟练|接受|愿意|热爱|对|正在就读|在读|应届|每周|可连续|可长期|英语|专业|工作认真|学习|逻辑|沟通|自驱|实习生)",
         flags=re.IGNORECASE,
     )
 
     def extract(self, parsed: ParsedJob) -> JobRequirements:
+        body_lines = parsed.sections.get("body", [])
+        requirement_lines = parsed.sections.get("requirements", [])
+        responsibilities = self._items(parsed.sections.get("responsibilities", []))
+        description_lines = body_lines + parsed.sections.get("summary", [])
+        responsibility_inference_lines = (
+            description_lines if not responsibilities else body_lines
+        )
+        inferred_responsibilities = self._infer_items(
+            responsibility_inference_lines, self.responsibility_prefix, allow_numbered=True
+        )
+        inferred_qualifications = self._infer_items(description_lines, self.qualification_prefix)
         all_lines = self._unique_lines(
-            parsed.sections.get("requirements", []) + parsed.sections.get("body", [])
+            requirement_lines + inferred_qualifications + description_lines
         )
         education = self._first_match(self.education_pattern, all_lines)
         experience = self._first_match(self.experience_pattern, all_lines)
-        responsibilities = self._bullets(parsed.sections.get("responsibilities", []))
-        if not responsibilities:
-            responsibilities = self._bullets(parsed.sections.get("body", []), plain=False)
-        qualifications = self._bullets(parsed.sections.get("requirements", []))
-        preferred = self._bullets(parsed.sections.get("preferred", []))
+        responsibilities = self._unique_lines(responsibilities + inferred_responsibilities)
+        qualifications = self._items(requirement_lines)
+        qualifications = self._unique_lines(qualifications + inferred_qualifications)
+        preferred = self._items(parsed.sections.get("preferred", []))
+        benefits = self._items(parsed.sections.get("benefits", []))
         return JobRequirements(
             education=education,
             experience=experience,
             responsibilities=responsibilities[:12],
             qualifications=qualifications[:16],
             preferred_qualifications=preferred[:12],
+            benefits=benefits[:12],
         )
 
     @staticmethod
@@ -259,28 +450,61 @@ class RequirementExtractor:
     @staticmethod
     def _first_match(pattern: re.Pattern[str], lines: list[str]) -> str:
         for line in lines:
-            if pattern.search(line):
-                return re.sub(
-                    r"^\s*(?:[-•*·]|\(?\d{1,2}[.)、）])\s*",
-                    "",
-                    line,
-                ).strip()
+            clean = RequirementExtractor._clean_item(line)
+            if pattern.search(clean) and not RequirementExtractor._label_only(clean):
+                return clean
         return ""
 
     @staticmethod
-    def _bullets(lines: list[str], *, plain: bool = True) -> list[str]:
+    def _items(lines: list[str]) -> list[str]:
         items: list[str] = []
-        bullet_pattern = re.compile(
-            r"^\s*(?:[-•*·]|\(?\d{1,2}[.)、）]|[一二三四五六七八九十]+[、.])\s*"
-        )
         for line in lines:
-            is_bullet = bool(bullet_pattern.match(line))
-            if not plain and not is_bullet:
-                continue
-            clean = bullet_pattern.sub("", line).strip()
-            if len(clean) > 4:
-                items.append(clean)
+            for part in RequirementExtractor._split_items(line):
+                clean = RequirementExtractor._clean_item(part)
+                if len(clean) > 4 and not RequirementExtractor._label_only(clean):
+                    items.append(clean)
         return list(dict.fromkeys(items))
+
+    @staticmethod
+    def _split_items(line: str) -> list[str]:
+        # Detail panels sometimes flatten "1、... 2、..." into one text node.
+        parts = re.split(
+            r"(?<![A-Za-z0-9])(?=\s*(?:\d{1,2}\s*[.)、，,）]|[一二三四五六七八九十]+\s*[、.]))",
+            line,
+        )
+        return [part.strip() for part in parts if part.strip()]
+
+    @staticmethod
+    def _clean_item(line: str) -> str:
+        return re.sub(
+            r"^\s*(?:[-•*·]|\(?\d{1,2}[.)、，,）]|[一二三四五六七八九十]+[、.])\s*",
+            "",
+            line,
+        ).strip(" -—")
+
+    @staticmethod
+    def _label_only(line: str) -> bool:
+        return bool(re.fullmatch(r"[^。；;，,]{2,24}[：:]", line.strip()))
+
+    @classmethod
+    def _infer_items(
+        cls,
+        lines: list[str],
+        prefix: re.Pattern[str],
+        *,
+        allow_numbered: bool = False,
+    ) -> list[str]:
+        candidates: list[str] = []
+        for line in lines:
+            clean = cls._clean_item(line)
+            if len(clean) <= 4 or cls._label_only(clean):
+                continue
+            numbered = bool(
+                re.match(r"^\s*(?:\d{1,2}\s*[.)、，,）]|[一二三四五六七八九十]+\s*[、.])", line)
+            )
+            if prefix.search(clean) or (allow_numbered and numbered):
+                candidates.append(clean)
+        return list(dict.fromkeys(candidates))
 
 
 class JobNormalizer:
@@ -299,6 +523,8 @@ class JobNormalizer:
         requirements = self.requirement_extractor.extract(parsed)
         skills = self.skill_extractor.extract(parsed)
         title = title_hint or self._title(parsed)
+        summary = self._summary(parsed, title=title)
+        benefits = requirements.benefits
         profile = StructuredJob(
             title=title,
             role_category=self._role_category(title, parsed.raw_text),
@@ -311,8 +537,9 @@ class JobNormalizer:
             education_requirement=requirements.education,
             experience_requirement=requirements.experience,
             responsibilities=requirements.responsibilities,
+            benefits=benefits,
             keywords=self._keywords(title, skills),
-            summary=self._summary(parsed),
+            summary=summary,
         )
         return JobAnalysis(
             structured_job=profile,
@@ -324,13 +551,51 @@ class JobNormalizer:
     @staticmethod
     def _title(parsed: ParsedJob) -> str:
         for line in parsed.raw_text.splitlines():
-            if line.casefold() not in JobParser.section_aliases and len(line) <= 160:
+            if (
+                len(line) <= 160
+                and not JobNormalizer._metadata_line(line)
+                and JobParser()._heading_type(line) is None
+            ):
                 return line.lstrip("# ")
         return "Untitled Job"
 
     @staticmethod
+    def _metadata_line(line: str) -> bool:
+        return bool(
+            re.match(
+                r"^(?:company|location|salary|公司|地点|薪资|城市|经验|学历|岗位|职位|类型)[：:]",
+                line.strip(),
+                flags=re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
     def _role_category(title: str, text: str) -> str:
         haystack = f"{title} {text}".casefold()
+        title_text = title.casefold()
+        if "full-stack" in title_text or "full stack" in title_text or "全栈" in title_text:
+            return "Full-stack Engineering"
+        if any(keyword in title_text for keyword in ("backend", "后端", "platform", "api")):
+            return "Backend Engineering"
+        if any(keyword in title_text for keyword in ("frontend", "前端")):
+            return "Frontend Engineering"
+        if any(keyword in title_text for keyword in ("product", "产品")):
+            return "Product"
+        if any(keyword in title_text for keyword in ("design", "设计", "ux", "ui")):
+            return "Design"
+        if any(
+            keyword in title_text
+            for keyword in (
+                "algorithm",
+                "算法",
+                "machine learning",
+                "机器学习",
+                "大模型",
+                "agent",
+                "ai",
+            )
+        ):
+            return "Machine Learning"
         categories = (
             (("backend", "后端", "api"), "Backend Engineering"),
             (("frontend", "前端", "react", "vue"), "Frontend Engineering"),
@@ -371,10 +636,19 @@ class JobNormalizer:
             return "Contract"
         if "part-time" in haystack or "兼职" in haystack:
             return "Part-time"
+        if "full-time" in haystack or "全职" in haystack:
+            return "Full-time"
         return "Full-time"
 
     @staticmethod
     def _location(text: str) -> str:
+        labeled = re.search(
+            r"(?:location|地点|工作地点|工作地|城市)\s*[:：]\s*([^\n]+)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if labeled:
+            return labeled.group(1).strip()
         for location in (
             "Remote",
             "Shanghai",
@@ -383,6 +657,23 @@ class JobNormalizer:
             "Hangzhou",
             "Guangzhou",
             "New York",
+            "武汉",
+            "成都",
+            "南京",
+            "西安",
+            "苏州",
+            "重庆",
+            "天津",
+            "合肥",
+            "长沙",
+            "厦门",
+            "北京",
+            "上海",
+            "深圳",
+            "杭州",
+            "广州",
+            "远程",
+            "线上",
         ):
             if location.casefold() in text.casefold() or location in text:
                 return location
@@ -390,34 +681,58 @@ class JobNormalizer:
 
     @staticmethod
     def _salary(text: str) -> JobSalary:
-        match = re.search(
-            r"(?:薪资|salary)?[^\n\d$¥￥]*[$¥￥]?\s*(\d{1,3})\s*[kK]?\s*[-–~至]\s*[$¥￥]?\s*(\d{1,3})\s*[kK]?",
-            text,
+        range_pattern = (
+            r"(?P<currency>[$¥￥])?\s*"
+            r"(?P<minimum>\d{1,3}(?:\.\d+)?)\s*(?P<minimum_unit>[kK千萬万])?\s*"
+            r"[-–~至到]\s*"
+            r"(?P<maximum>\d{1,3}(?:\.\d+)?)\s*(?P<maximum_unit>[kK千萬万])?"
         )
+        labeled = re.search(
+            rf"(?:薪资|salary|月薪|日薪|时薪|compensation)\s*[:：]?[^\n\d$¥￥]{{0,10}}{range_pattern}",
+            text,
+            flags=re.IGNORECASE,
+        )
+        generic = re.search(
+            rf"{range_pattern}\s*(?:元(?:/月|/天|/小时)?|块|/月|/天|/小时|薪|USD|CNY)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        match = labeled or generic
         if not match:
             return JobSalary()
-        minimum, maximum = (int(value) for value in match.groups())
+
+        def to_int(value: str) -> int:
+            return int(round(float(value)))
+
+        minimum = to_int(match.group("minimum"))
+        maximum = to_int(match.group("maximum"))
         return JobSalary(
-            minimum=minimum, maximum=maximum, currency="USD" if "$" in match.group(0) else "CNY"
+            minimum=minimum,
+            maximum=maximum,
+            currency="USD" if "$" in match.group(0) or "USD" in match.group(0).upper() else "CNY",
         )
 
     @staticmethod
-    def _summary(parsed: ParsedJob) -> str:
+    def _summary(parsed: ParsedJob, *, title: str = "") -> str:
         summary_lines = parsed.sections.get("summary", [])
         if summary_lines:
-            return " ".join(JobNormalizer._summary_lines(summary_lines)[:3])
-        return " ".join(JobNormalizer._summary_lines(parsed.sections.get("body", []))[:2])
+            candidates = JobNormalizer._summary_lines(summary_lines)
+        else:
+            candidates = JobNormalizer._summary_lines(parsed.sections.get("body", []))
+        return " ".join(line for line in candidates if line != title)[:600]
 
     @staticmethod
     def _summary_lines(lines: list[str]) -> list[str]:
         metadata = re.compile(
-            r"^(?:company|location|salary|公司|地点|薪资|城市|经验|学历)[：:]",
+            r"^(?:company|location|salary|公司|地点|薪资|城市|经验|学历|工作地点|工作地|岗位|职位|类型)[：:]",
             re.IGNORECASE,
         )
         return [
             re.sub(r"^\s*[-•*·]\s*", "", line).strip()
             for line in lines
-            if len(line.strip()) > 4 and not metadata.match(line.strip())
+            if len(line.strip()) > 4
+            and not metadata.match(line.strip())
+            and not re.fullmatch(r"[-—_=~]{2,}", line.strip())
         ]
 
     @staticmethod

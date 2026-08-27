@@ -39,6 +39,7 @@ export type JobRequirements = {
   responsibilities: string[];
   qualifications: string[];
   preferred_qualifications: string[];
+  benefits: string[];
 };
 
 export type StructuredJob = {
@@ -53,6 +54,7 @@ export type StructuredJob = {
   education_requirement: string;
   experience_requirement: string;
   responsibilities: string[];
+  benefits: string[];
   keywords: string[];
   summary: string;
 };

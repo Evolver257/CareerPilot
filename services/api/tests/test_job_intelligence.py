@@ -99,6 +99,137 @@ def test_job_normalizer_supports_single_digit_k_salary_range() -> None:
     assert analysis.structured_job.salary.maximum == 5
 
 
+def test_job_normalizer_handles_boss_decorated_sections_and_compatibility_glyphs() -> None:
+    raw_jd = """后端开发实习生
+Company: 小黑盒
+Location: 北京·朝阳区·望京
+Salary: 300-400元/天
+---你需要参与---
+1.参与后台系统的设计、开发与维护；
+2.参与游戏数据的调研、分析、评估、功能开发以及上线。
+---我们对你的要求---
+1.本科及以上计算机相关专业在校生，毕业前满足6个⽉+全职实习；
+2.熟悉Go或Python，了解分布式系统开发。
+---我们为你提供---
+1.加入优秀的互联网研发团队，给足挑战与空间；
+2.新生培训计划+一对一导师制。
+"""
+
+    analysis = JobNormalizer().analyze(raw_jd)
+
+    assert analysis.requirements.responsibilities == [
+        "参与后台系统的设计、开发与维护；",
+        "参与游戏数据的调研、分析、评估、功能开发以及上线。",
+    ]
+    assert len(analysis.requirements.qualifications) == 2
+    assert analysis.requirements.benefits == [
+        "加入优秀的互联网研发团队，给足挑战与空间；",
+        "新生培训计划+一对一导师制。",
+    ]
+    assert "本科" in analysis.requirements.education
+    assert analysis.structured_job.location == "北京·朝阳区·望京"
+    assert "月" in analysis.requirements.education
+
+
+def test_job_normalizer_extracts_numbered_boss_requirement_sections() -> None:
+    raw_jd = """机器人控制算法实习生
+岗位职责:
+参与人形机器人控制算法调研、仿真训练及真机验证。
+一、岗位职责
+（一）全身运动控制与动作跟踪研发支持
+1. 协助开展 Whole Body Control、动作跟踪及运动控制算法的实现与验证；
+2. 参与机器人状态、参考动作与控制指令的设计。
+二、岗位要求
+1. 本科及以上学历，机器人、自动化、控制科学与工程等相关专业在校学生；
+2. 熟练掌握 Python，具备良好的代码阅读、调试和工程实现能力；
+3. 具备机器人学基础，了解运动学、动力学、坐标变换等基本概念；
+4. 了解强化学习或模仿学习基本原理，熟悉 PPO、Actor-Critic 至少一种方法；
+5. 熟悉 PyTorch，能够完成模型搭建、训练、调试及实验分析。
+三、加分项
+1. 使用过 Isaac Gym、Isaac Lab、MuJoCo 等仿真平台；
+2. 有 Sim2Real 或机器人真机部署经验。
+四、岗位的重要性
+1. 参与前沿人形机器人技术研发，获得导师指导。
+五、为什么加入我们
+1. 团队提供完整的算法训练与真机实验机会。
+"""
+
+    analysis = JobNormalizer().analyze(raw_jd)
+
+    assert len(analysis.requirements.qualifications) == 5
+    assert "本科" in analysis.requirements.education
+    assert "熟练掌握 Python" in analysis.requirements.qualifications[1]
+    assert len(analysis.requirements.preferred_qualifications) == 2
+    assert all(
+        "岗位的重要性" not in item and "为什么加入我们" not in item
+        for item in analysis.requirements.preferred_qualifications
+    )
+    assert len(analysis.requirements.benefits) == 2
+    assert {"Python", "PyTorch"}.issubset(
+        set(analysis.structured_job.required_skills)
+    )
+
+
+def test_job_normalizer_keeps_plain_boss_lines_and_ignores_label_only_experience() -> None:
+    raw_jd = """具身算法实习生
+岗位职责：
+研发机器人操作算法，提升机器人在复杂场景下的操作能力；
+探索端到端操作框架，结合大语言模型实现感知、决策、执行闭环。
+任职要求：
+硕士或博士在读，机器人学、人工智能、计算机等相关领域；
+操作算法经验：
+熟悉机器人抓取、装配等操作任务，有灵巧手或双臂协同项目经验者优先；
+熟练使用PyTorch/TensorFlow，具备机器人仿真经验者加分；
+"""
+
+    analysis = JobNormalizer().analyze(raw_jd)
+
+    assert len(analysis.requirements.responsibilities) == 2
+    assert len(analysis.requirements.qualifications) == 3
+    assert analysis.requirements.experience != "操作算法经验："
+    assert "项目经验" in analysis.requirements.experience
+    assert {"PyTorch", "TensorFlow"}.issubset(
+        set(analysis.structured_job.required_skills)
+    )
+
+
+def test_job_normalizer_infers_unheaded_requirements_and_benefits() -> None:
+    raw_jd = """AI 全栈工程师实习生
+我们是公司 Agent 开发团队，正在寻找对 AI 和软件开发充满好奇心的在校同学。
+你可能适合我们，如果你：
+正在就读计算机、软件工程、信息技术等相关专业；
+有一定的编程基础，了解前端或后端任意一个方向；
+对 AI 工具（如 Cursor、Claude Code、Codex）有使用经验或强烈兴趣。
+你将获得：
+参与真实客户项目的完整开发经历；
+来自团队的一对一指导与反馈。
+"""
+
+    analysis = JobNormalizer().analyze(raw_jd)
+
+    assert any("正在就读" in item for item in analysis.requirements.qualifications)
+    assert any("编程基础" in item for item in analysis.requirements.qualifications)
+    assert analysis.requirements.benefits == [
+        "参与真实客户项目的完整开发经历；",
+        "来自团队的一对一指导与反馈。",
+    ]
+    assert analysis.structured_job.role_category == "Full-stack Engineering"
+
+
+def test_job_normalizer_extracts_skills_seen_in_imported_boss_jds() -> None:
+    analysis = JobNormalizer().analyze(
+        "算法实习生\n"
+        "岗位职责\n参与 AI 算法实现和部署。\n"
+        "岗位要求\n熟悉 C/C++、OpenCV、NumPy、PyTorch、ONNX Runtime、ROS2、MCP。"
+    )
+
+    skills = set(analysis.structured_job.required_skills)
+    assert {"C++", "OpenCV", "NumPy", "PyTorch", "ONNX Runtime", "ROS2", "MCP"}.issubset(
+        skills
+    )
+    assert "C" not in skills
+
+
 async def test_import_and_analyze_job_endpoints(client: AsyncClient) -> None:
     raw_jd = """AI Platform Engineer
 

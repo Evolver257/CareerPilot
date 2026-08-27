@@ -164,16 +164,24 @@ class ResumeService:
 
     async def _persist_chunks(self, resume: Resume, drafts: list[ResumeChunkDraft]) -> Resume:
         chunks: list[ResumeChunk] = []
+        embedding_signature = getattr(
+            self.embedding_provider, "embedding_signature", self.settings.embedding_model
+        )
         for draft in drafts:
             embedding = await self.embedding_provider.embed(
                 draft.content, model=self.settings.embedding_model
             )
+            metadata = {
+                **draft.metadata,
+                "embedding_signature": embedding_signature,
+                "embedding_dimensions": len(embedding),
+            }
             chunks.append(
                 ResumeChunk(
                     resume_id=resume.id,
                     chunk_type=draft.chunk_type,
                     content=draft.content,
-                    chunk_metadata=draft.metadata,
+                    chunk_metadata=metadata,
                     embedding=embedding,
                 )
             )

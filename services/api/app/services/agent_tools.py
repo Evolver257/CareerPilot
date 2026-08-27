@@ -86,9 +86,11 @@ class AgentToolService:
         session: AsyncSession,
         provider: LLMProvider,
         settings: Settings | None = None,
+        embedding_provider: LLMProvider | None = None,
     ) -> None:
         self.session = session
         self.provider = provider
+        self.embedding_provider = embedding_provider or provider
         self.settings = settings or get_settings()
         self.campaign_repository = CampaignRepository(session)
         self.matching_repository = MatchingRepository(session)
@@ -227,7 +229,12 @@ class AgentToolService:
 
     async def score_job(self, raw_input: BaseModel) -> ScoreJobToolOutput:
         payload = ScoreJobToolInput.model_validate(raw_input)
-        score = await MatchingService(self.session, self.provider, self.settings).score(
+        score = await MatchingService(
+            self.session,
+            self.provider,
+            self.settings,
+            embedding_provider=self.embedding_provider,
+        ).score(
             job_id=payload.job_id,
             resume_id=payload.resume_id,
         )
@@ -242,7 +249,12 @@ class AgentToolService:
         payload = RankJobsToolInput.model_validate(raw_input)
         if not payload.job_ids:
             return RankJobsToolOutput(count=0, candidates=[])
-        result = await RankingService(self.session, self.provider, self.settings).rank(
+        result = await RankingService(
+            self.session,
+            self.provider,
+            self.settings,
+            embedding_provider=self.embedding_provider,
+        ).rank(
             JobRankingRequest(
                 resume_id=payload.resume_id,
                 job_ids=payload.job_ids,
@@ -286,7 +298,11 @@ class AgentToolService:
         )
         campaign, ranking_run = await service.start(campaign.id)
         if ranking_run is not None:
-            await RankingRunService(self.session).execute(ranking_run.id, self.provider)
+            await RankingRunService(self.session).execute(
+                ranking_run.id,
+                self.provider,
+                self.embedding_provider,
+            )
             campaign = await service.get_campaign(campaign.id)
         score_ids = {
             item.job_id: item.application_metadata.get("ranking_score_id")

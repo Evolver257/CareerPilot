@@ -3,7 +3,7 @@ import json
 import httpx
 from pydantic import BaseModel
 
-from app.llm.provider import AnthropicProvider, OpenAIProvider
+from app.llm.provider import AnthropicProvider, MockLLMProvider, OpenAIProvider
 from app.schemas.llm import LLMConnectionTestRead
 from app.services.llm_settings import LLMSettingsService
 
@@ -116,6 +116,44 @@ async def test_openai_provider_uses_chat_completions_format() -> None:
     assert json.loads(requests[0].content)["messages"][0]["content"] == "say hello"
     assert provider.last_usage is not None
     assert provider.last_usage.total_tokens == 5
+
+
+async def test_openai_provider_can_use_embeddings_endpoint() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"data": [{"embedding": [0.1, 0.2, 0.3]}], "usage": {"prompt_tokens": 4}},
+        )
+
+    provider = OpenAIProvider(
+        api_key="sk-test-openai-key",
+        model="gpt-test",
+        embedding_model="text-embedding-3-small",
+        dimensions=3,
+        base_url="https://proxy.example/v1",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert await provider.embed("RAG 后端开发") == [0.1, 0.2, 0.3]
+    assert requests[0].url.path == "/v1/embeddings"
+    body = json.loads(requests[0].content)
+    assert body == {
+        "model": "text-embedding-3-small",
+        "input": "RAG 后端开发",
+        "dimensions": 3,
+    }
+
+
+async def test_local_embedding_preserves_chinese_phrase_overlap() -> None:
+    provider = MockLLMProvider(dimensions=384)
+    first = await provider.embed("检索增强生成与后端服务开发")
+    second = await provider.embed("RAG 后端开发")
+    cosine = sum(left * right for left, right in zip(first, second, strict=True))
+
+    assert cosine > 0.1
 
 
 async def test_anthropic_provider_uses_messages_format_and_structured_output() -> None:

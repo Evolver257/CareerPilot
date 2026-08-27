@@ -16,13 +16,20 @@ class ResumeChunkDraft:
 class ResumeSemanticChunker:
     """Section-aware chunker that keeps resume evidence small and traceable."""
 
-    def __init__(self, *, chunk_size: int = 1200, overlap: int = 150) -> None:
+    def __init__(self, *, chunk_size: int = 600, overlap: int = 80) -> None:
         self.chunk_size = chunk_size
         self.overlap = overlap
         self.extractor = HeuristicResumeExtractor()
 
     def chunk(self, raw_text: str, profile: ResumeProfile) -> list[ResumeChunkDraft]:
         sections = self._profile_sections(profile)
+        # Preserve an experience section even when its entries cannot be
+        # structured (for example, a PDF column layout without date ranges).
+        # Dropping it makes the most important JD evidence unavailable to RAG.
+        if not profile.experience:
+            for section in self.extractor.split_sections(raw_text):
+                if section.key == "experience" and section.lines:
+                    sections.append(("experience", "\n".join(section.lines)))
         if not sections:
             sections = [("summary", raw_text)]
 
