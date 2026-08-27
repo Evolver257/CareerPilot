@@ -16,6 +16,7 @@ from app.schemas.campaigns import (
     CampaignJobRead,
     CampaignListResponse,
     CampaignRead,
+    CampaignRejectRequest,
     CampaignUpdate,
     CuratedCampaignCreate,
 )
@@ -237,6 +238,20 @@ async def approve_campaign_jobs(
 ) -> CampaignDetailRead:
     try:
         return _campaign_detail(await service.approve(campaign_id, payload))
+    except CampaignNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (CampaignCandidateError, InvalidStateTransitionError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/{campaign_id}/reject", response_model=CampaignDetailRead)
+async def reject_campaign_jobs(
+    campaign_id: UUID,
+    payload: CampaignRejectRequest,
+    service: CampaignService = Depends(get_campaign_service),
+) -> CampaignDetailRead:
+    try:
+        return _campaign_detail(await service.reject(campaign_id, payload))
     except CampaignNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except (CampaignCandidateError, InvalidStateTransitionError) as exc:

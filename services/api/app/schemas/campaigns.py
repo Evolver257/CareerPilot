@@ -113,6 +113,10 @@ class CampaignApproveRequest(BaseModel):
     job_ids: list[UUID] = Field(min_length=1, max_length=100)
 
 
+class CampaignRejectRequest(BaseModel):
+    job_ids: list[UUID] = Field(min_length=1, max_length=100)
+
+
 ApplicationAction = Literal[
     "execute",
     "submit",

@@ -8,6 +8,7 @@ import {
   approveCampaignJobs,
   campaignAction,
   getCampaign,
+  rejectCampaignJobs,
   type CampaignDetail,
 } from "../../../lib/api";
 
@@ -30,6 +31,7 @@ const statusLabels: Record<string, string> = {
   DOM_CHANGED: "页面变化",
   RISK_CONTROL: "风控暂停",
   UNKNOWN_STATE: "未知页面",
+  REJECTED: "已剔除",
 };
 
 const rankingStageLabels: Record<string, string> = {
@@ -106,6 +108,21 @@ export default function CampaignDetailPage() {
       setSelected(new Set());
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "批量批准失败。");
+    } finally {
+      setActionLoading(null);
+    }
+  }
+
+  async function rejectSelected() {
+    if (!campaign || selected.size === 0) return;
+    if (!window.confirm(`确定剔除选中的 ${selected.size} 个职位吗？剔除后不会进入投递队列。`)) return;
+    setActionLoading("reject");
+    setError(null);
+    try {
+      setCampaign(await rejectCampaignJobs(campaign.id, [...selected]));
+      setSelected(new Set());
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "剔除职位失败。");
     } finally {
       setActionLoading(null);
     }
@@ -191,10 +208,15 @@ export default function CampaignDetailPage() {
 
       <section className="panel overflow-hidden p-0">
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 px-6 py-5">
-          <div><p className="eyebrow">候选职位</p><h2 className="mt-2 text-xl font-semibold">智能排名与人工确认</h2></div>
-          <button className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={selected.size === 0 || actionLoading !== null || !canApprove} onClick={() => void approveSelected()} type="button">
-            {actionLoading === "approve" ? "正在批准并排队…" : `批准并加入队列 (${selected.size})`}
-          </button>
+          <div><p className="eyebrow">候选职位</p><h2 className="mt-2 text-xl font-semibold">智能排名与人工确认</h2><p className="mt-2 text-sm text-slate-500">勾选后可批准入队，也可以剔除不想投递的职位。</p></div>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-2.5 text-sm font-medium text-rose-700 disabled:cursor-not-allowed disabled:opacity-50" disabled={selected.size === 0 || actionLoading !== null || !canApprove} onClick={() => void rejectSelected()} type="button">
+                {actionLoading === "reject" ? "正在剔除…" : `剔除所选 (${selected.size})`}
+              </button>
+              <button className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={selected.size === 0 || actionLoading !== null || !canApprove} onClick={() => void approveSelected()} type="button">
+                {actionLoading === "approve" ? "正在批准并排队…" : `批准并加入队列 (${selected.size})`}
+              </button>
+            </div>
         </div>
         {campaign.candidate_jobs.length === 0 ? (
           <div className="px-6 py-12 text-center text-slate-500">{campaign.status === "DRAFT" ? "启动后将在这里展示排名结果。" : campaign.status === "RANKING" ? "正在处理候选职位，首个达到阈值的结果会自动出现在这里。" : "当前筛选条件下没有达到阈值的职位。"}</div>
@@ -212,7 +234,7 @@ export default function CampaignDetailPage() {
                       <td className="px-5 py-4 font-semibold">#{item.rank}</td>
                       <td className="px-5 py-4"><Link className="font-semibold text-indigo-700" href={`/jobs/${item.job_id}`}>{item.job.title}</Link><p className="mt-1 text-xs text-slate-500">{item.job.location ?? "地点未注明"} · {item.job.platform}</p></td>
                       <td className="px-5 py-4 text-lg font-semibold">{item.score.toFixed(1)}</td>
-                      <td className="px-5 py-4"><span className={`rounded-full px-3 py-1 text-xs font-medium ${waiting ? "bg-amber-50 text-amber-700" : "bg-indigo-50 text-indigo-700"}`}>{statusLabels[item.status] ?? item.status}</span></td>
+                      <td className="px-5 py-4"><span className={`rounded-full px-3 py-1 text-xs font-medium ${waiting ? "bg-amber-50 text-amber-700" : item.status === "REJECTED" ? "bg-slate-100 text-slate-500" : "bg-indigo-50 text-indigo-700"}`}>{statusLabels[item.status] ?? item.status}</span></td>
                       <td className="px-5 py-4">
                         <details><summary className="cursor-pointer text-xs font-medium text-slate-600">{history.length} 个状态事件</summary><ol className="mt-3 space-y-2 text-xs text-slate-500">{history.map((event, index) => <li key={`${event.at}-${index}`}><span className="font-medium text-slate-700">{event.to}</span> · {event.event}</li>)}</ol></details>
                       </td>

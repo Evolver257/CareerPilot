@@ -22,12 +22,12 @@ export function Navigation() {
 
   return (
     <aside className="border-b border-slate-200 bg-white px-5 py-5 lg:min-h-screen lg:w-64 lg:border-b-0 lg:border-r lg:px-6 lg:py-8">
-      <div className="flex items-start justify-between gap-3">
-        <Link className="flex items-center gap-3" href="/dashboard">
+      <div className="flex items-start justify-between gap-3 lg:flex-col">
+        <Link className="flex min-w-0 items-center gap-3" href="/dashboard">
           <span className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-600 font-bold text-white">C</span>
-          <span><span className="block font-semibold">CareerPilot</span><span className="text-xs text-slate-400">AI job search</span></span>
+          <span className="min-w-0"><span className="block truncate font-semibold">CareerPilot</span><span className="text-xs text-slate-400">AI job search</span></span>
         </Link>
-        <ThemeToggle />
+        <ThemeToggle className="lg:w-full lg:justify-center" />
       </div>
       <nav className="mt-8 flex gap-2 overflow-x-auto lg:block lg:space-y-2">
         {links.map((link) => {

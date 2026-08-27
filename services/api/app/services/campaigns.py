@@ -23,6 +23,7 @@ from app.schemas.campaigns import (
     ApplicationAction,
     CampaignApproveRequest,
     CampaignCreate,
+    CampaignRejectRequest,
     CampaignUpdate,
     CuratedCampaignCreate,
 )
@@ -330,6 +331,37 @@ class CampaignService:
             campaign_job.status = CampaignJobStatus.QUEUED.value
         if campaign.status == CampaignStatus.WAITING_APPROVAL.value:
             self.campaign_state.transition(campaign, CampaignStatus.RUNNING)
+        return await self.repository.commit_campaign(campaign)
+
+    async def reject(
+        self,
+        campaign_id: UUID,
+        payload: CampaignRejectRequest,
+    ) -> Campaign:
+        campaign = await self.get_campaign(campaign_id)
+        if campaign.status not in {
+            CampaignStatus.WAITING_APPROVAL.value,
+            CampaignStatus.RUNNING.value,
+        }:
+            raise InvalidStateTransitionError(
+                f"Campaign cannot reject jobs from {campaign.status}"
+            )
+        candidates = {item.job_id: item for item in campaign.campaign_jobs}
+        applications = {item.job_id: item for item in campaign.applications}
+        requested = list(dict.fromkeys(payload.job_ids))
+        missing = [job_id for job_id in requested if job_id not in candidates]
+        if missing:
+            raise CampaignCandidateError("One or more jobs do not belong to this campaign")
+        for job_id in requested:
+            campaign_job = candidates[job_id]
+            application = applications.get(job_id)
+            if application is None:
+                raise CampaignCandidateError("Candidate application is missing")
+            if campaign_job.status != CampaignJobStatus.WAITING_APPROVAL.value:
+                raise CampaignCandidateError(f"Job {job_id} is not waiting for approval")
+            self.application_state.cancel(application)
+            application.failure_reason = "用户从投递计划中剔除"
+            campaign_job.status = CampaignJobStatus.REJECTED.value
         return await self.repository.commit_campaign(campaign)
 
     async def pause(self, campaign_id: UUID) -> Campaign:

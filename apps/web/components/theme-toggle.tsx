@@ -20,7 +20,7 @@ function applyTheme(theme: Theme) {
   document.documentElement.classList.toggle("dark", theme === "dark");
 }
 
-export function ThemeToggle() {
+export function ThemeToggle({ className = "" }: { className?: string }) {
   const [theme, setTheme] = useState<Theme>("light");
 
   useEffect(() => {
@@ -41,7 +41,7 @@ export function ThemeToggle() {
   return (
     <button
       aria-label={isDark ? "切换到日间模式" : "切换到夜间模式"}
-      className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700"
+      className={`inline-flex max-w-full shrink-0 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700 ${className}`}
       onClick={toggleTheme}
       title={isDark ? "切换到日间模式" : "切换到夜间模式"}
       type="button"

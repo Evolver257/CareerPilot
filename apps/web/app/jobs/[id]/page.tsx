@@ -7,9 +7,61 @@ import { useEffect, useState } from "react";
 import {
   analyzeJob,
   getJob,
+  getJobs,
   type Job,
   type JobAnalysis,
 } from "../../../lib/api";
+
+type JobNeighbors = {
+  previous: Job | null;
+  next: Job | null;
+};
+
+function getRawText(job: Job, key: string): string | null {
+  const value = job.raw_data[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function getCompanyName(job: Job): string {
+  return getRawText(job, "company_name")
+    ?? (job.company_id ? "已关联公司" : "未注明公司");
+}
+
+function getSalaryText(job: Job, analysis?: JobAnalysis | null): string {
+  const capturedSalary = getRawText(job, "salary_text");
+  if (capturedSalary && !/[\uE000-\uF8FF]/.test(capturedSalary)) return capturedSalary;
+
+  const minimum = job.salary_min ?? analysis?.structured_job.salary.minimum ?? null;
+  const maximum = job.salary_max ?? analysis?.structured_job.salary.maximum ?? null;
+  if (minimum !== null && maximum !== null) return `${minimum} - ${maximum}`;
+  if (minimum !== null) return `${minimum}+`;
+  if (maximum !== null) return `最高 ${maximum}`;
+  return "薪资面议";
+}
+
+function JobSwitcher({ neighbors }: { neighbors: JobNeighbors }) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+      <span className="text-sm text-slate-500">职位浏览</span>
+      <div className="flex gap-2">
+        {neighbors.previous ? (
+          <Link className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-indigo-300 hover:text-indigo-700" href={`/jobs/${neighbors.previous.id}`}>
+            ← 上一职位
+          </Link>
+        ) : (
+          <button className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-400" disabled type="button">← 上一职位</button>
+        )}
+        {neighbors.next ? (
+          <Link className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-indigo-300 hover:text-indigo-700" href={`/jobs/${neighbors.next.id}`}>
+            下一职位 →
+          </Link>
+        ) : (
+          <button className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-400" disabled type="button">下一职位 →</button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function RequirementList({ items, empty }: { items: string[]; empty: string }) {
   return (
@@ -74,6 +126,7 @@ export default function JobDetailPage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [neighbors, setNeighbors] = useState<JobNeighbors>({ previous: null, next: null });
 
   useEffect(() => {
     if (!params.id) return;
@@ -109,6 +162,24 @@ export default function JobDetailPage() {
     return () => { cancelled = true; };
   }, [params.id]);
 
+  useEffect(() => {
+    if (!params.id) return;
+    let cancelled = false;
+    getJobs({ page: 1, page_size: 100 })
+      .then((response) => {
+        if (cancelled) return;
+        const index = response.items.findIndex((item) => item.id === params.id);
+        setNeighbors({
+          previous: index > 0 ? response.items[index - 1] : null,
+          next: index >= 0 && index < response.items.length - 1 ? response.items[index + 1] : null,
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setNeighbors({ previous: null, next: null });
+      });
+    return () => { cancelled = true; };
+  }, [params.id]);
+
   async function handleAnalyze() {
     if (!params.id) return;
     setAnalyzing(true);
@@ -127,6 +198,7 @@ export default function JobDetailPage() {
   return (
     <div className="mx-auto max-w-4xl space-y-6">
       <Link className="text-sm font-medium text-indigo-700 hover:text-indigo-900" href="/jobs">← 返回职位列表</Link>
+      <JobSwitcher neighbors={neighbors} />
       {error && <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-800">{error}</div>}
       {analysisError && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-800">职位已加载，但自动解析暂时失败：{analysisError}</div>}
       {!job && !error && <div className="panel text-slate-500">加载中…</div>}
@@ -137,6 +209,16 @@ export default function JobDetailPage() {
               <div>
                 <p className="eyebrow">{job.platform}</p>
                 <h1 className="mt-3 text-3xl font-semibold">{job.title}</h1>
+                <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                    <p className="text-xs font-semibold text-emerald-700">薪资</p>
+                    <p className="mt-2 text-xl font-semibold text-emerald-900">{getSalaryText(job, analysis)}</p>
+                  </div>
+                  <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4">
+                    <p className="text-xs font-semibold text-indigo-700">公司</p>
+                    <p className="mt-2 text-xl font-semibold text-indigo-950">{getCompanyName(job)}</p>
+                  </div>
+                </div>
                 <div className="mt-4 flex flex-wrap gap-2 text-sm">
                   <span className="rounded-full bg-slate-100 px-3 py-1.5 text-slate-700">地点 · {job.location ?? "未注明"}</span>
                   <span className="rounded-full bg-slate-100 px-3 py-1.5 text-slate-700">类型 · {job.job_type ?? "未注明"}</span>

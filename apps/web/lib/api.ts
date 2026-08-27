@@ -852,6 +852,14 @@ export function approveCampaignJobs(id: string, jobIds: string[]): Promise<Campa
   });
 }
 
+export function rejectCampaignJobs(id: string, jobIds: string[]): Promise<CampaignDetail> {
+  return apiFetch<CampaignDetail>(`/api/campaigns/${encodeURIComponent(id)}/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ job_ids: jobIds }),
+  });
+}
+
 export function getApplications(): Promise<ApplicationListResponse> {
   return apiFetch<ApplicationListResponse>("/api/applications");
 }

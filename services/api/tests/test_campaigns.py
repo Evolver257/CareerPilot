@@ -186,6 +186,44 @@ async def test_campaign_start_creates_cancelable_persisted_ranking_run(
     assert cancelled.json()["ranking_run"]["status"] == "CANCELLED"
 
 
+async def test_campaign_can_reject_waiting_jobs_without_queuing_them(
+    client: AsyncClient,
+) -> None:
+    resume_id = await _upload_campaign_resume(client)
+    job_ids = await _import_campaign_jobs(client)
+    created = await client.post(
+        "/api/campaigns/curated",
+        json={
+            "name": "Selective campaign",
+            "resume_id": resume_id,
+            "job_ids": job_ids[:3],
+        },
+    )
+    assert created.status_code == 201
+    campaign_id = created.json()["id"]
+
+    rejected = await client.post(
+        f"/api/campaigns/{campaign_id}/reject",
+        json={"job_ids": [job_ids[1]]},
+    )
+
+    assert rejected.status_code == 200
+    campaign = rejected.json()
+    rejected_job = next(item for item in campaign["candidate_jobs"] if item["job_id"] == job_ids[1])
+    assert rejected_job["status"] == "REJECTED"
+    assert rejected_job["application"]["status"] == "CANCELLED"
+    assert rejected_job["application"]["failure_reason"] == "用户从投递计划中剔除"
+    assert campaign["waiting_approval_count"] == 2
+    assert campaign["queued_count"] == 0
+
+    persisted = await client.get(f"/api/campaigns/{campaign_id}")
+    assert persisted.status_code == 200
+    persisted_rejected = next(
+        item for item in persisted.json()["candidate_jobs"] if item["job_id"] == job_ids[1]
+    )
+    assert persisted_rejected["status"] == "REJECTED"
+
+
 async def test_campaign_requires_resume_and_rejects_invalid_transition(
     client: AsyncClient,
 ) -> None:
