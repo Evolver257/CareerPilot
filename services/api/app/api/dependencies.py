@@ -8,7 +8,9 @@ from app.services.agent_runtime import AgentRuntime
 from app.services.browser_tasks import BrowserTaskService
 from app.services.campaigns import CampaignService
 from app.services.dashboard import DashboardService
+from app.services.job_knowledge_rag import JobKnowledgeRAG
 from app.services.jobs import JobService
+from app.services.knowledge_indexing import KnowledgeIndexService
 from app.services.llm_settings import LLMSettingsService
 from app.services.market_insights import MarketInsightService
 from app.services.matching import MatchingService
@@ -32,6 +34,15 @@ async def get_embedding_provider(
     session: AsyncSession = Depends(get_db),
 ) -> LLMProvider:
     return await LLMSettingsService(session).get_runtime_embedding_provider()
+
+
+async def get_optional_embedding_provider(
+    session: AsyncSession = Depends(get_db),
+) -> LLMProvider | None:
+    try:
+        return await LLMSettingsService(session).get_runtime_embedding_provider()
+    except Exception:
+        return None
 
 
 def get_llm_settings_service(
@@ -103,3 +114,17 @@ def get_market_insight_service(
     session: AsyncSession = Depends(get_db),
 ) -> MarketInsightService:
     return MarketInsightService(session)
+
+
+def get_knowledge_index_service(
+    session: AsyncSession = Depends(get_db),
+    provider: LLMProvider = Depends(get_embedding_provider),
+) -> KnowledgeIndexService:
+    return KnowledgeIndexService(session, provider)
+
+
+def get_job_knowledge_rag(
+    session: AsyncSession = Depends(get_db),
+    provider: LLMProvider | None = Depends(get_optional_embedding_provider),
+) -> JobKnowledgeRAG:
+    return JobKnowledgeRAG(session, provider)

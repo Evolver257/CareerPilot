@@ -15,12 +15,18 @@ from app.api import (
     dashboard,
     health,
     jobs,
+    knowledge,
     llm,
     market_insights,
     platforms,
     resumes,
 )
 from app.core.config import get_settings
+from app.services.knowledge_indexing import (
+    recover_interrupted_knowledge_indexes,
+    schedule_knowledge_index,
+    shutdown_knowledge_index_tasks,
+)
 from app.services.market_insights import (
     recover_interrupted_market_insights,
     schedule_market_insight,
@@ -41,11 +47,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     recovered_report_ids = await recover_interrupted_market_insights()
     for report_id in recovered_report_ids:
         schedule_market_insight(report_id)
+    recovered_knowledge_run_ids = await recover_interrupted_knowledge_indexes()
+    for run_id in recovered_knowledge_run_ids:
+        schedule_knowledge_index(run_id)
     try:
         yield
     finally:
         await shutdown_ranking_tasks()
         await shutdown_market_insight_tasks()
+        await shutdown_knowledge_index_tasks()
 
 
 settings = get_settings()
@@ -118,6 +128,7 @@ app.add_middleware(
 )
 app.include_router(health.router)
 app.include_router(jobs.router)
+app.include_router(knowledge.router)
 app.include_router(resumes.router)
 app.include_router(campaigns.router)
 app.include_router(campaigns.applications_router)

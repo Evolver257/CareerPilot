@@ -216,6 +216,18 @@ class Job(Base):
     applications: Mapped[list[Application]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
+    versions: Mapped[list[JobVersion]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
+    knowledge_documents: Mapped[list[JobKnowledgeDocument]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
+    knowledge_chunks: Mapped[list[JobKnowledgeChunk]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
+    skill_facts: Mapped[list[JobSkillFact]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
 
 
 class JobSkill(Base):
@@ -332,6 +344,220 @@ class MarketInsightReport(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped[User] = relationship(back_populates="market_insight_reports")
+
+
+class JobVersion(Base):
+    __tablename__ = "job_versions"
+    __table_args__ = (
+        UniqueConstraint("job_id", "version_number", name="uq_job_versions_job_version"),
+        UniqueConstraint("job_id", "content_hash", name="uq_job_versions_job_content_hash"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    job_id: Mapped[UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    version_number: Mapped[int] = mapped_column(Integer)
+    raw_title: Mapped[str] = mapped_column(String(300), default="")
+    raw_description: Mapped[str] = mapped_column(Text, default="")
+    raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    content_hash: Mapped[str] = mapped_column(String(128))
+    source_platform: Mapped[str] = mapped_column(String(100), default="")
+    source_url: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    parser_version: Mapped[str] = mapped_column(String(80), default="")
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    job: Mapped[Job] = relationship(back_populates="versions")
+    knowledge_document: Mapped[JobKnowledgeDocument | None] = relationship(
+        back_populates="job_version", uselist=False, cascade="all, delete-orphan"
+    )
+
+
+class JobKnowledgeDocument(Base):
+    __tablename__ = "job_knowledge_documents"
+    __table_args__ = (
+        UniqueConstraint("job_version_id", name="uq_job_knowledge_documents_version"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    job_id: Mapped[UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    job_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("job_versions.id", ondelete="CASCADE"), index=True
+    )
+    role_family: Mapped[str] = mapped_column(String(200), default="")
+    normalized_title: Mapped[str] = mapped_column(String(300), default="")
+    normalized_city: Mapped[str] = mapped_column(String(300), default="")
+    normalized_education: Mapped[str] = mapped_column(String(500), default="")
+    normalized_experience: Mapped[str] = mapped_column(String(500), default="")
+    salary_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    salary_max: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    salary_unit: Mapped[str] = mapped_column(String(40), default="")
+    employment_type: Mapped[str] = mapped_column(String(100), default="")
+    current_embedding_signature: Mapped[str] = mapped_column(String(300), default="")
+    knowledge_version: Mapped[str] = mapped_column(String(80), default="JOB_KNOWLEDGE_V1")
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    job: Mapped[Job] = relationship(back_populates="knowledge_documents")
+    job_version: Mapped[JobVersion] = relationship(back_populates="knowledge_document")
+    chunks: Mapped[list[JobKnowledgeChunk]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
+
+
+class JobKnowledgeChunk(Base):
+    __tablename__ = "job_knowledge_chunks"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_id",
+            "section_type",
+            "content_hash",
+            name="uq_job_knowledge_chunks_document_section_hash",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    document_id: Mapped[UUID] = mapped_column(
+        ForeignKey("job_knowledge_documents.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    section_type: Mapped[str] = mapped_column(String(60), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(128), index=True)
+    token_count: Mapped[int] = mapped_column(Integer, default=0)
+    embedding: Mapped[list[float] | None] = mapped_column(EmbeddingType(384), nullable=True)
+    embedding_provider: Mapped[str] = mapped_column(String(80), default="")
+    embedding_model: Mapped[str] = mapped_column(String(200), default="")
+    embedding_dimensions: Mapped[int] = mapped_column(Integer, default=384)
+    embedding_signature: Mapped[str] = mapped_column(String(300), default="", index=True)
+    chunk_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    document: Mapped[JobKnowledgeDocument] = relationship(back_populates="chunks")
+    job: Mapped[Job] = relationship(back_populates="knowledge_chunks")
+
+
+class SkillTaxonomy(Base):
+    __tablename__ = "skill_taxonomy"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    canonical_name: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    category: Mapped[str] = mapped_column(String(100), default="other", index=True)
+    parent_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("skill_taxonomy.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    description: Mapped[str] = mapped_column(Text, default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    parent: Mapped[SkillTaxonomy | None] = relationship(
+        remote_side="SkillTaxonomy.id", back_populates="children"
+    )
+    children: Mapped[list[SkillTaxonomy]] = relationship(back_populates="parent")
+    aliases: Mapped[list[SkillAlias]] = relationship(
+        back_populates="skill", cascade="all, delete-orphan"
+    )
+    job_facts: Mapped[list[JobSkillFact]] = relationship(back_populates="skill")
+
+
+class SkillAlias(Base):
+    __tablename__ = "skill_aliases"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    skill_id: Mapped[UUID] = mapped_column(
+        ForeignKey("skill_taxonomy.id", ondelete="CASCADE"), index=True
+    )
+    alias: Mapped[str] = mapped_column(String(160))
+    normalized_alias: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    skill: Mapped[SkillTaxonomy] = relationship(back_populates="aliases")
+
+
+class JobSkillFact(Base):
+    __tablename__ = "job_skill_facts"
+    __table_args__ = (
+        UniqueConstraint("job_id", "skill_id", name="uq_job_skill_facts_job_skill"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    job_id: Mapped[UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    skill_id: Mapped[UUID] = mapped_column(
+        ForeignKey("skill_taxonomy.id", ondelete="CASCADE"), index=True
+    )
+    requirement_type: Mapped[str] = mapped_column(String(30), index=True)
+    evidence: Mapped[str] = mapped_column(Text, default="")
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    parser_version: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    job: Mapped[Job] = relationship(back_populates="skill_facts")
+    skill: Mapped[SkillTaxonomy] = relationship(back_populates="job_facts")
+
+
+class KnowledgeIndexRun(Base):
+    __tablename__ = "knowledge_index_runs"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    mode: Mapped[str] = mapped_column(String(30), default="incremental", index=True)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
+    stage: Mapped[str] = mapped_column(String(50), default="queued")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    total_jobs: Mapped[int] = mapped_column(Integer, default=0)
+    processed_jobs: Mapped[int] = mapped_column(Integer, default=0)
+    succeeded_jobs: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_jobs: Mapped[int] = mapped_column(Integer, default=0)
+    failed_jobs: Mapped[int] = mapped_column(Integer, default=0)
+    current_job_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    request_payload: Mapped[dict[str, Any]] = mapped_column("request", JSON, default=dict)
+    result_payload: Mapped[dict[str, Any]] = mapped_column("result", JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    current_job: Mapped[Job | None] = relationship(foreign_keys=[current_job_id])
+    items: Mapped[list[KnowledgeIndexRunItem]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
+
+
+class KnowledgeIndexRunItem(Base):
+    __tablename__ = "knowledge_index_run_items"
+    __table_args__ = (
+        UniqueConstraint("run_id", "job_id", name="uq_knowledge_index_items_run_job"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("knowledge_index_runs.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    reused_embedding_count: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    run: Mapped[KnowledgeIndexRun] = relationship(back_populates="items")
+    job: Mapped[Job] = relationship()
 
 
 class Campaign(Base):

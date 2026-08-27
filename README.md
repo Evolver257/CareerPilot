@@ -34,6 +34,8 @@ Phase 0 (repository audit) through Phase 10 (Productization) are implemented:
 - Recoverable CareerBoard BrowserTask flow with adapter failure recognition and DOM-change regression tests
 - Product Dashboard with statistics, Application Funnel, Agent Trace quality, LLM token usage, and explicit cost status
 - LLM 设置入口，支持 OpenAI Chat Completions 与 Anthropic Messages 格式；用户 key 服务端加密持久化、脱敏展示与不落库连接测试
+- Versioned Job Knowledge Base with semantic JD sections, skill taxonomy/facts, content-hash embedding reuse, incremental/backfill indexing, durable per-job progress, retry, and restart recovery
+- JobKnowledgeRAG with SQL statistics, PostgreSQL full-text/SQLite fallback, pgvector retrieval, RRF fusion, diversity reranking, citations, cache, and optional Resume RAG evidence
 - Bounded terminal Agent Retry that creates a new auditable Run linked by `retry_of`
 - Productization architecture diagram, real local-page Demo GIF, screenshots, technical highlights, and interview talking points
 - Redis and a worker placeholder in Docker Compose
@@ -118,5 +120,7 @@ Semantic embeddings are configured independently from the LLM judge. The default
 8. ~~Browser Agent and Mock Platform~~
 9. ~~Platform Adapter Prototype + BOSS visible-page compatibility~~
 10. ~~Productization~~
+11. Job Knowledge Base (Phase 2 foundation complete; hybrid retrieval and Career Advisor Agent follow)
+12. Job Knowledge RAG (Phase 3 complete; Career Advisor Agent and frontend follow)
 
 See [docs/phase-0-audit.md](docs/phase-0-audit.md), [docs/architecture.md](docs/architecture.md), [docs/development.md](docs/development.md), [docs/boss-zhipin-adapter.md](docs/boss-zhipin-adapter.md), and [docs/phase-10-productization.md](docs/phase-10-productization.md) for implementation notes.
