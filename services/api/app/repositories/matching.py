@@ -68,17 +68,21 @@ class MatchingRepository:
         resume_id: UUID,
         query_embedding: list[float],
         limit: int,
+        chunk_types: tuple[str, ...] | None = None,
     ) -> list[tuple[ResumeChunk, float]]:
         bind = self.session.get_bind()
         if bind.dialect.name == "postgresql":
             distance = cast(ResumeChunk.embedding.op("<=>")(query_embedding), Float)
+            conditions = [
+                ResumeChunk.resume_id == resume_id,
+                ResumeChunk.embedding.is_not(None),
+            ]
+            if chunk_types:
+                conditions.append(ResumeChunk.chunk_type.in_(chunk_types))
             rows = (
                 await self.session.execute(
                     select(ResumeChunk, distance.label("distance"))
-                    .where(
-                        ResumeChunk.resume_id == resume_id,
-                        ResumeChunk.embedding.is_not(None),
-                    )
+                    .where(*conditions)
                     .order_by(distance)
                     .limit(limit)
                 )
@@ -88,13 +92,10 @@ class MatchingRepository:
                 for chunk, raw_distance in rows
             ]
 
-        chunks = list(
-            (
-                await self.session.scalars(
-                    select(ResumeChunk).where(ResumeChunk.resume_id == resume_id)
-                )
-            ).all()
-        )
+        conditions = [ResumeChunk.resume_id == resume_id]
+        if chunk_types:
+            conditions.append(ResumeChunk.chunk_type.in_(chunk_types))
+        chunks = list((await self.session.scalars(select(ResumeChunk).where(*conditions))).all())
         ranked = [
             (chunk, self._cosine_similarity(query_embedding, chunk.embedding or []))
             for chunk in chunks

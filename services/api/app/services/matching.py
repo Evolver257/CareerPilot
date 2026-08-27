@@ -374,12 +374,14 @@ class MatchingService:
         session: AsyncSession,
         provider: LLMProvider,
         settings: Settings | None = None,
+        embedding_provider: LLMProvider | None = None,
     ) -> None:
         self.session = session
         self.provider = provider
         self.settings = settings or get_settings()
         self.repository = MatchingRepository(session)
-        self.rag = ResumeRAG(self.repository, provider, self.settings)
+        self.embedding_provider = embedding_provider or provider
+        self.rag = ResumeRAG(self.repository, self.embedding_provider, self.settings)
         self.rules = RulesFilter()
         self.skill_coverage = SkillCoverage()
         self.education_matcher = EducationMatcher()
@@ -397,7 +399,12 @@ class MatchingService:
         job = await self.repository.get_job(job_id)
         if job is None:
             raise MatchingJobNotFoundError("Job not found")
-        if not (job.normalized_data or {}).get("structured_job") or not job.skills:
+        if (
+            (job.normalized_data or {}).get("analysis_version")
+            != JobService.CURRENT_ANALYSIS_VERSION
+            or not (job.normalized_data or {}).get("structured_job")
+            or not job.skills
+        ):
             job = await JobService(self.session).analyze_job(job_id)
             if job is None:
                 raise MatchingJobNotFoundError("Job not found")
@@ -418,6 +425,7 @@ class MatchingService:
             job=job,
             resume=resume,
             provider=self.provider,
+            embedding_provider=self.embedding_provider,
             score_version=self.settings.matching_score_version,
             weights=weights,
         )

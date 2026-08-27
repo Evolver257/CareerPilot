@@ -214,6 +214,42 @@ class LLMSettingsService:
             )
         return MockLLMProvider(dimensions=self.settings.embedding_dimensions)
 
+    async def get_runtime_embedding_provider(self) -> LLMProvider:
+        """Resolve the vector provider independently from the judge provider."""
+
+        provider = self.settings.embedding_provider.strip().lower()
+        if provider in {"", "auto"}:
+            return await self.get_runtime_provider()
+        if provider == "mock":
+            return MockLLMProvider(dimensions=self.settings.embedding_dimensions)
+        if provider not in {"openai", "anthropic"}:
+            raise LLMProviderConfigurationError(
+                f"Unsupported embedding provider: {self.settings.embedding_provider}"
+            )
+
+        api_key = self.settings.embedding_api_key.strip()
+        if api_key:
+            return self._build_remote_provider_from_values(
+                provider,
+                api_key,
+                self.settings.llm_model,
+                self.settings.embedding_base_url,
+            )
+
+        user = await self._find_default_user()
+        if user is not None:
+            credential = await self.session.scalar(
+                select(LLMProviderCredential).where(
+                    LLMProviderCredential.user_id == user.id,
+                    LLMProviderCredential.provider == provider,
+                )
+            )
+            if credential is not None:
+                return self._build_remote_provider(credential)
+        raise LLMProviderNotConfiguredError(
+            f"{provider} embedding API key is not configured"
+        )
+
     async def _run_connection_test(
         self, provider: ProviderName, model: str, remote_provider: LLMProvider
     ) -> LLMConnectionTestRead:
@@ -245,6 +281,7 @@ class LLMSettingsService:
             "model": model or DEFAULT_PROVIDER_MODELS[provider],
             "base_url": base_url or DEFAULT_PROVIDER_BASE_URLS[provider],
             "dimensions": self.settings.embedding_dimensions,
+            "embedding_model": self.settings.embedding_model,
             "structured_max_tokens": self.settings.llm_structured_max_tokens,
             "structured_retry_max_tokens": self.settings.llm_structured_retry_max_tokens,
         }
