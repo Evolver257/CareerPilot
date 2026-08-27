@@ -7,6 +7,7 @@ from app.repositories.dashboard import DashboardRepository
 from app.services.agent_runtime import AgentRuntime
 from app.services.browser_tasks import BrowserTaskService
 from app.services.campaigns import CampaignService
+from app.services.career_advisor import CareerAdvisorService
 from app.services.dashboard import DashboardService
 from app.services.job_knowledge_rag import JobKnowledgeRAG
 from app.services.jobs import JobService
@@ -97,6 +98,14 @@ def get_agent_runtime(
     embedding_provider: LLMProvider = Depends(get_embedding_provider),
 ) -> AgentRuntime:
     return AgentRuntime(session, provider, embedding_provider=embedding_provider)
+
+
+def get_career_advisor_service(
+    session: AsyncSession = Depends(get_db),
+    provider: LLMProvider = Depends(get_llm_provider),
+    embedding_provider: LLMProvider | None = Depends(get_optional_embedding_provider),
+) -> CareerAdvisorService:
+    return CareerAdvisorService(session, provider, embedding_provider=embedding_provider)
 
 
 def get_browser_task_service(

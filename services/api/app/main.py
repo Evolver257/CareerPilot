@@ -12,6 +12,7 @@ from app.api import (
     agents,
     browser_tasks,
     campaigns,
+    career_advisor,
     dashboard,
     health,
     jobs,
@@ -22,6 +23,7 @@ from app.api import (
     resumes,
 )
 from app.core.config import get_settings
+from app.services.career_advisor import shutdown_career_advisor_tasks
 from app.services.knowledge_indexing import (
     recover_interrupted_knowledge_indexes,
     schedule_knowledge_index,
@@ -56,6 +58,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await shutdown_ranking_tasks()
         await shutdown_market_insight_tasks()
         await shutdown_knowledge_index_tasks()
+        await shutdown_career_advisor_tasks()
 
 
 settings = get_settings()
@@ -138,3 +141,4 @@ app.include_router(dashboard.router)
 app.include_router(platforms.router)
 app.include_router(llm.router)
 app.include_router(market_insights.router)
+app.include_router(career_advisor.router)

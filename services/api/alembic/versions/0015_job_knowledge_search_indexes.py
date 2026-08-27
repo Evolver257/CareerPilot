@@ -9,7 +9,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0015_job_knowledge_search_indexes"
+revision: str = "0015_knowledge_fts"
 down_revision: str | None = "0014_job_knowledge_base"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

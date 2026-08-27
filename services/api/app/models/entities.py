@@ -60,6 +60,9 @@ class User(Base):
     market_insight_reports: Mapped[list[MarketInsightReport]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    career_advisor_sessions: Mapped[list[CareerAdvisorSession]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class UserPreference(Base):
@@ -778,3 +781,88 @@ class AgentEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     run: Mapped[AgentRun] = relationship(back_populates="events")
+
+
+class CareerAdvisorSession(Base):
+    __tablename__ = "career_advisor_sessions"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    resume_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("resumes.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    title: Mapped[str] = mapped_column(String(200), default="新职业咨询")
+    agent_type: Mapped[str] = mapped_column(String(50), default="career_advisor")
+    context_filters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    summary_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    user: Mapped[User] = relationship(back_populates="career_advisor_sessions")
+    messages: Mapped[list[CareerAdvisorMessage]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
+
+
+class CareerAdvisorMessage(Base):
+    __tablename__ = "career_advisor_messages"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    session_id: Mapped[UUID] = mapped_column(
+        ForeignKey("career_advisor_sessions.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(20), index=True)
+    content: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(30), default="COMPLETED", index=True)
+    intent: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    model_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    token_usage: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    tool_trace: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    answer_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    session: Mapped[CareerAdvisorSession] = relationship(back_populates="messages")
+    citations: Mapped[list[CareerAdvisorCitation]] = relationship(
+        back_populates="message", cascade="all, delete-orphan"
+    )
+
+
+class CareerAdvisorCitation(Base):
+    __tablename__ = "career_advisor_citations"
+    __table_args__ = (
+        UniqueConstraint(
+            "message_id",
+            "citation_index",
+            name="uq_career_advisor_citations_message_index",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("career_advisor_messages.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    chunk_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("job_knowledge_chunks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    citation_index: Mapped[int] = mapped_column(Integer)
+    evidence: Mapped[str] = mapped_column(Text, default="")
+    citation_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    message: Mapped[CareerAdvisorMessage] = relationship(back_populates="citations")
