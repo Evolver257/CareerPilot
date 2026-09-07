@@ -30,18 +30,25 @@ services:
   api:
     build:
       context: ./services/api
-    environment:
+      args: &semantic-build-args
+        INSTALL_SEMANTIC: ${INSTALL_SEMANTIC:-true}
+    environment: &api-environment
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-careerpilot}:${POSTGRES_PASSWORD:-careerpilot}@postgres:5432/${POSTGRES_DB:-careerpilot}
+      INDEPENDENT_WORKER: "true"
       REDIS_URL: redis://redis:6379/0
       CORS_ORIGINS: http://localhost:3000
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-auto}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-sentence_transformers}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-mock-hash-384-v2}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
+      SEMANTIC_MODEL: ${SEMANTIC_MODEL:-Qwen/Qwen3-Embedding-0.6B}
+      SEMANTIC_CACHE_DIR: /models
+      OMP_NUM_THREADS: ${OMP_NUM_THREADS:-4}
       LLM_STRUCTURED_MAX_TOKENS: ${LLM_STRUCTURED_MAX_TOKENS:-8192}
       LLM_STRUCTURED_RETRY_MAX_TOKENS: ${LLM_STRUCTURED_RETRY_MAX_TOKENS:-12288}
       LLM_ENCRYPTION_KEY: ${LLM_ENCRYPTION_KEY:-development-only-change-me}
@@ -62,23 +69,44 @@ services:
       FINAL_RANKING_TOP_K: ${FINAL_RANKING_TOP_K:-10}
       RANKING_VERSION: ${RANKING_VERSION:-RANKING_V1}
       RANKING_TIMEOUT_SECONDS: ${RANKING_TIMEOUT_SECONDS:-1800}
+      AUTO_DELIVERY_MAX_JOB_AGE_DAYS: ${AUTO_DELIVERY_MAX_JOB_AGE_DAYS:-3}
+      RAG_EVIDENCE_MIN_RELEVANCE: ${RAG_EVIDENCE_MIN_RELEVANCE:-0.42}
     ports:
       - "${API_PORT:-8010}:8000"
+    volumes:
+      - ./outputs/model-cache:/models
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+      start_period: 10s
 
   worker:
     build:
-      context: ./services/worker
+      context: ./services/api
+      args:
+        <<: *semantic-build-args
+    cpus: ${WORKER_CPUS:-2.0}
     environment:
-      REDIS_URL: redis://redis:6379/0
+      <<: *api-environment
+      OMP_NUM_THREADS: ${WORKER_OMP_NUM_THREADS:-2}
+      OPENBLAS_NUM_THREADS: ${WORKER_OPENBLAS_NUM_THREADS:-2}
+      MKL_NUM_THREADS: ${WORKER_MKL_NUM_THREADS:-2}
+      TOKENIZERS_PARALLELISM: "false"
+    command: ["python", "-m", "app.worker"]
+    volumes:
+      - ./outputs/model-cache:/models
     depends_on:
-      redis:
+      api:
         condition: service_healthy
+    restart: unless-stopped
 
   web:
     build:

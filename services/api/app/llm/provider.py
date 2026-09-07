@@ -4,13 +4,20 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Protocol, TypeVar
 
 import httpx
 from pydantic import BaseModel
 
 from app.llm.usage import UsageRecord, estimate_tokens
+from app.schemas.tool_protocol import NativeToolResponse, ToolDefinition
+from app.services.tool_protocol import (
+    parse_anthropic_tool_calls,
+    parse_openai_tool_calls,
+    to_anthropic_tools,
+    to_openai_tools,
+)
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
@@ -22,8 +29,9 @@ DEFAULT_PROVIDER_BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "anthropic": "https://api.anthropic.com",
 }
-DEFAULT_EMBEDDING_MODEL = "mock-hash-384-v2"
-MOCK_EMBEDDING_VERSION = "mock-hash-384-v2"
+DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+MOCK_EMBEDDING_MODEL = "mock-hash-1024-v3"
+MOCK_EMBEDDING_VERSION = MOCK_EMBEDDING_MODEL
 DEFAULT_STRUCTURED_MAX_TOKENS = 8192
 DEFAULT_STRUCTURED_RETRY_MAX_TOKENS = 12288
 
@@ -43,7 +51,17 @@ class LLMProvider(Protocol):
         *,
         model: str | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> str: ...
+
+    def stream(
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> AsyncIterator[str]: ...
 
     async def generate_structured(
         self,
@@ -52,22 +70,62 @@ class LLMProvider(Protocol):
         *,
         model: str | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> SchemaT: ...
 
+    async def decide_with_tools(
+        self,
+        prompt: str,
+        tools: list[ToolDefinition],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        tool_choice: str = "auto",
+    ) -> NativeToolResponse: ...
+
     async def embed(self, text: str, *, model: str | None = None) -> list[float]: ...
+
+    async def embed_many(
+        self, texts: list[str], *, model: str | None = None
+    ) -> list[list[float]]: ...
+
+
+async def embed_texts(
+    provider: LLMProvider,
+    texts: list[str],
+    *,
+    model: str | None = None,
+) -> list[list[float]]:
+    """Embed a batch when supported while keeping third-party providers compatible."""
+
+    if not texts:
+        return []
+    batch_method = getattr(provider, "embed_many", None)
+    if callable(batch_method):
+        vectors = list(await batch_method(texts, model=model))
+    else:
+        vectors = [await provider.embed(text, model=model) for text in texts]
+    if len(vectors) != len(texts):
+        raise LLMProviderError(
+            f"embedding batch size mismatch: expected {len(texts)}, got {len(vectors)}"
+        )
+    return [list(vector) for vector in vectors]
 
 
 class MockLLMProvider:
     """Deterministic local provider for development and tests without API keys."""
 
     provider_name = "mock"
-    model = DEFAULT_EMBEDDING_MODEL
+    model = MOCK_EMBEDDING_MODEL
     embedding_provider_name = "mock"
-    embedding_model = DEFAULT_EMBEDDING_MODEL
+    embedding_model = MOCK_EMBEDDING_MODEL
     embedding_version = MOCK_EMBEDDING_VERSION
     embedding_signature = MOCK_EMBEDDING_VERSION
+    supports_streaming = False
+    supports_native_tools = False
+    supports_agentic_rag_planning = False
 
-    def __init__(self, dimensions: int = 384) -> None:
+    def __init__(self, dimensions: int = 1024) -> None:
         self.dimensions = dimensions
         self.embedding_signature = f"{MOCK_EMBEDDING_VERSION}:{dimensions}"
         self.last_usage: UsageRecord | None = None
@@ -78,6 +136,7 @@ class MockLLMProvider:
         *,
         model: str | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> str:
         self.last_usage = UsageRecord(
             prompt_tokens=estimate_tokens(prompt),
@@ -86,6 +145,21 @@ class MockLLMProvider:
         )
         return prompt
 
+    async def stream(
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> AsyncIterator[str]:
+        yield await self.generate(
+            prompt,
+            model=model,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
+
     async def generate_structured(
         self,
         prompt: str,
@@ -93,6 +167,7 @@ class MockLLMProvider:
         *,
         model: str | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> SchemaT:
         result = schema.model_validate({})
         self.last_usage = UsageRecord(
@@ -102,9 +177,36 @@ class MockLLMProvider:
         )
         return result
 
+    async def decide_with_tools(
+        self,
+        prompt: str,
+        tools: list[ToolDefinition],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        tool_choice: str = "auto",
+    ) -> NativeToolResponse:
+        del tools, max_tokens, tool_choice
+        self.last_usage = UsageRecord(
+            prompt_tokens=estimate_tokens(prompt),
+            completion_tokens=0,
+            source="mock_native_tools",
+        )
+        return NativeToolResponse(
+            text="",
+            provider=self.provider_name,
+            model=model or self.model,
+            stop_reason="stop",
+        )
+
     async def embed(self, text: str, *, model: str | None = None) -> list[float]:
         self.last_usage = None
         return self._hash_embedding(text)
+
+    async def embed_many(self, texts: list[str], *, model: str | None = None) -> list[list[float]]:
+        del model
+        self.last_usage = None
+        return [self._hash_embedding(text) for text in texts]
 
     def _hash_embedding(self, text: str) -> list[float]:
         values = [0.0] * self.dimensions
@@ -126,6 +228,9 @@ class RemoteLLMProvider:
     """Shared HTTP and structured-output behavior for remote providers."""
 
     provider_name = "remote"
+    supports_streaming = True
+    supports_native_tools = False
+    supports_agentic_rag_planning = True
 
     def __init__(
         self,
@@ -133,7 +238,7 @@ class RemoteLLMProvider:
         api_key: str,
         model: str | None = None,
         base_url: str | None = None,
-        dimensions: int = 384,
+        dimensions: int = 1024,
         embedding_model: str | None = None,
         structured_max_tokens: int = DEFAULT_STRUCTURED_MAX_TOKENS,
         structured_retry_max_tokens: int = DEFAULT_STRUCTURED_RETRY_MAX_TOKENS,
@@ -144,7 +249,11 @@ class RemoteLLMProvider:
         self.base_url = (base_url or DEFAULT_PROVIDER_BASE_URLS[self.provider_name]).rstrip("/")
         self.dimensions = dimensions
         self.embedding_model = embedding_model or DEFAULT_EMBEDDING_MODEL
-        self.embedding_provider_name = self.provider_name
+        self.embedding_provider_name = (
+            self.provider_name
+            if self.provider_name == "openai" and not self.embedding_model.startswith("mock-")
+            else "mock"
+        )
         self.embedding_version = (
             f"{self.embedding_provider_name}:{self.embedding_model}:{self.dimensions}:v1"
             if not self.embedding_model.startswith("mock-")
@@ -170,8 +279,14 @@ class RemoteLLMProvider:
         *,
         model: str | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> str:
-        data = await self._generate_payload(prompt, model=model, max_tokens=max_tokens)
+        data = await self._generate_payload(
+            prompt,
+            model=model,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
         self._record_usage(data)
         text = self._extract_text(data)
         if not text:
@@ -196,6 +311,7 @@ class RemoteLLMProvider:
         *,
         model: str | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> SchemaT:
         schema_prompt = (
             f"{prompt}\n\nReturn JSON only. Do not wrap it in Markdown fences. "
@@ -214,6 +330,7 @@ class RemoteLLMProvider:
                     schema_prompt,
                     model=model,
                     max_tokens=token_limit,
+                    reasoning_effort=reasoning_effort,
                 )
                 parsed = _parse_json_object(raw)
                 return schema.model_validate(parsed)
@@ -234,21 +351,26 @@ class RemoteLLMProvider:
         )
 
     async def embed(self, text: str, *, model: str | None = None) -> list[float]:
+        return (await self.embed_many([text], model=model))[0]
+
+    async def embed_many(self, texts: list[str], *, model: str | None = None) -> list[list[float]]:
+        if not texts:
+            return []
         if self.provider_name == "openai" and not self.embedding_model.startswith("mock-"):
-            return await self._embed_openai(text)
+            return await self._embed_openai_many(texts)
 
         # Anthropic-compatible endpoints do not expose the OpenAI embeddings
         # contract. Keep a deterministic local fallback for those providers.
         self.last_usage = None
-        return await self._embedding_fallback.embed(text, model=model)
+        return await self._embedding_fallback.embed_many(texts, model=model)
 
-    async def _embed_openai(self, text: str) -> list[float]:
+    async def _embed_openai_many(self, texts: list[str]) -> list[list[float]]:
         base_url = self.base_url
         if not base_url.endswith("/v1"):
             base_url = f"{base_url}/v1"
         payload: dict[str, object] = {
             "model": self.embedding_model,
-            "input": text,
+            "input": texts,
         }
         # text-embedding-3-* supports dimension shortening. Keeping the
         # persisted dimension configurable lets existing pgvector schemas stay
@@ -264,26 +386,35 @@ class RemoteLLMProvider:
             payload=payload,
         )
         items = data.get("data") or []
-        if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+        if not isinstance(items, list) or len(items) != len(texts):
             raise LLMProviderError("openai returned an invalid embedding payload")
-        raw_embedding = items[0].get("embedding")
-        if not isinstance(raw_embedding, list) or not all(
-            isinstance(value, int | float) for value in raw_embedding
-        ):
-            raise LLMProviderError("openai returned an invalid embedding vector")
-        embedding = [float(value) for value in raw_embedding]
-        if len(embedding) != self.dimensions:
-            raise LLMProviderError(
-                "openai embedding dimension mismatch: "
-                f"expected {self.dimensions}, got {len(embedding)}"
-            )
+        ordered_items = sorted(
+            items,
+            key=lambda item: int(item.get("index", 0)) if isinstance(item, dict) else -1,
+        )
+        embeddings: list[list[float]] = []
+        for item in ordered_items:
+            if not isinstance(item, dict):
+                raise LLMProviderError("openai returned an invalid embedding payload")
+            raw_embedding = item.get("embedding")
+            if not isinstance(raw_embedding, list) or not all(
+                isinstance(value, int | float) for value in raw_embedding
+            ):
+                raise LLMProviderError("openai returned an invalid embedding vector")
+            embedding = [float(value) for value in raw_embedding]
+            if len(embedding) != self.dimensions:
+                raise LLMProviderError(
+                    "openai embedding dimension mismatch: "
+                    f"expected {self.dimensions}, got {len(embedding)}"
+                )
+            embeddings.append(embedding)
         usage = data.get("usage") or {}
         self.last_usage = UsageRecord(
             prompt_tokens=int(usage.get("prompt_tokens", usage.get("total_tokens", 0)) or 0),
             completion_tokens=0,
             source="openai_embedding",
         )
-        return embedding
+        return embeddings
 
     async def _generate_payload(
         self,
@@ -291,6 +422,7 @@ class RemoteLLMProvider:
         *,
         model: str | None,
         max_tokens: int | None,
+        reasoning_effort: str | None,
     ) -> dict:
         raise NotImplementedError
 
@@ -329,9 +461,77 @@ class RemoteLLMProvider:
             raise LLMProviderError(f"{self.provider_name} returned an invalid payload")
         return result
 
+    async def _stream_json_events(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        payload: dict,
+    ) -> AsyncIterator[dict]:
+        try:
+            client_kwargs: dict = {"timeout": 90.0}
+            if self._transport is not None:
+                client_kwargs["transport"] = self._transport
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                async with client.stream(
+                    "POST",
+                    url,
+                    headers=headers,
+                    json=payload,
+                ) as response:
+                    if not response.is_success:
+                        await response.aread()
+                        raise LLMProviderError(
+                            f"{self.provider_name} request failed with HTTP {response.status_code}"
+                        )
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        raw = line[5:].strip()
+                        if not raw or raw == "[DONE]":
+                            continue
+                        try:
+                            event = json.loads(raw)
+                        except ValueError as exc:
+                            raise LLMProviderError(
+                                f"{self.provider_name} returned invalid stream JSON"
+                            ) from exc
+                        if isinstance(event, dict):
+                            yield event
+        except LLMProviderError:
+            raise
+        except httpx.HTTPError as exc:
+            raise LLMProviderError(f"{self.provider_name} streaming request failed") from exc
+
 
 class OpenAIProvider(RemoteLLMProvider):
     provider_name = "openai"
+    supports_native_tools = True
+
+    def _chat_request(
+        self,
+        prompt: str,
+        *,
+        model: str | None,
+        max_tokens: int | None,
+    ) -> tuple[str, dict[str, str], dict[str, object]]:
+        base_url = self.base_url
+        if not base_url.endswith("/v1"):
+            base_url = f"{base_url}/v1"
+        payload: dict[str, object] = {
+            "model": model or self.model,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        return (
+            f"{base_url}/chat/completions",
+            {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            payload,
+        )
 
     async def _generate_payload(
         self,
@@ -339,23 +539,86 @@ class OpenAIProvider(RemoteLLMProvider):
         *,
         model: str | None,
         max_tokens: int | None,
+        reasoning_effort: str | None,
     ) -> dict:
-        base_url = self.base_url
-        if not base_url.endswith("/v1"):
-            base_url = f"{base_url}/v1"
-        payload = {
-            "model": model or self.model,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
-        return await self._post_json(
-            f"{base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
+        url, headers, payload = self._chat_request(
+            prompt,
+            model=model,
+            max_tokens=max_tokens,
+        )
+        return await self._post_json(url, headers=headers, payload=payload)
+
+    async def decide_with_tools(
+        self,
+        prompt: str,
+        tools: list[ToolDefinition],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        tool_choice: str = "auto",
+    ) -> NativeToolResponse:
+        url, headers, payload = self._chat_request(
+            prompt,
+            model=model,
+            max_tokens=max_tokens,
+        )
+        payload["tools"] = to_openai_tools(tools)
+        payload["tool_choice"] = tool_choice
+        payload["parallel_tool_calls"] = False
+        data = await self._post_json(url, headers=headers, payload=payload)
+        self._record_usage(data)
+        choices = data.get("choices") or []
+        choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+        return NativeToolResponse(
+            text=self._extract_text(data),
+            tool_calls=parse_openai_tool_calls(message),
+            stop_reason=str(choice.get("finish_reason") or "") or None,
+            provider=self.provider_name,
+            model=model or self.model,
+            metadata={"protocol": "openai_chat_completions_tools"},
+        )
+
+    async def stream(
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> AsyncIterator[str]:
+        url, headers, payload = self._chat_request(
+            prompt,
+            model=model,
+            max_tokens=max_tokens,
+        )
+        payload["stream"] = True
+        chunks: list[str] = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        async for event in self._stream_json_events(
+            url,
+            headers=headers,
             payload=payload,
+        ):
+            usage = event.get("usage") or {}
+            if isinstance(usage, dict):
+                prompt_tokens = int(usage.get("prompt_tokens", prompt_tokens) or 0)
+                completion_tokens = int(usage.get("completion_tokens", completion_tokens) or 0)
+            choices = event.get("choices") or []
+            if not isinstance(choices, list) or not choices:
+                continue
+            delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+            text = delta.get("content") if isinstance(delta, dict) else None
+            if isinstance(text, str) and text:
+                chunks.append(text)
+                yield text
+        if not chunks:
+            raise LLMProviderError("openai returned an empty stream", retryable=True)
+        self.last_usage = UsageRecord(
+            prompt_tokens=prompt_tokens or estimate_tokens(prompt),
+            completion_tokens=completion_tokens or estimate_tokens("".join(chunks)),
+            source="openai_stream",
         )
 
     @staticmethod
@@ -378,6 +641,35 @@ class OpenAIProvider(RemoteLLMProvider):
 
 class AnthropicProvider(RemoteLLMProvider):
     provider_name = "anthropic"
+    supports_native_tools = True
+
+    def _messages_request(
+        self,
+        prompt: str,
+        *,
+        model: str | None,
+        max_tokens: int | None,
+        reasoning_effort: str | None,
+    ) -> tuple[str, dict[str, str], dict[str, object]]:
+        endpoint = self.base_url if self.base_url.endswith("/v1") else f"{self.base_url}/v1"
+        payload: dict[str, object] = {
+            "model": model or self.model,
+            "max_tokens": max_tokens or 2048,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if reasoning_effort and "api.deepseek.com" in self.base_url.casefold():
+            payload["reasoning"] = {"effort": reasoning_effort}
+            if reasoning_effort == "none":
+                payload["thinking"] = {"type": "disabled"}
+        return (
+            f"{endpoint}/messages",
+            {
+                "x-api-key": self.api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            payload,
+        )
 
     async def _generate_payload(
         self,
@@ -385,20 +677,90 @@ class AnthropicProvider(RemoteLLMProvider):
         *,
         model: str | None,
         max_tokens: int | None,
+        reasoning_effort: str | None,
     ) -> dict:
-        endpoint = self.base_url if self.base_url.endswith("/v1") else f"{self.base_url}/v1"
-        return await self._post_json(
-            f"{endpoint}/messages",
-            headers={
-                "x-api-key": self.api_key,
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-            },
-            payload={
-                "model": model or self.model,
-                "max_tokens": max_tokens or 2048,
-                "messages": [{"role": "user", "content": prompt}],
-            },
+        url, headers, payload = self._messages_request(
+            prompt,
+            model=model,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
+        return await self._post_json(url, headers=headers, payload=payload)
+
+    async def decide_with_tools(
+        self,
+        prompt: str,
+        tools: list[ToolDefinition],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        tool_choice: str = "auto",
+    ) -> NativeToolResponse:
+        url, headers, payload = self._messages_request(
+            prompt,
+            model=model,
+            max_tokens=max_tokens,
+            reasoning_effort="none",
+        )
+        payload["tools"] = to_anthropic_tools(tools)
+        if tool_choice != "auto":
+            payload["tool_choice"] = {"type": "any" if tool_choice == "required" else tool_choice}
+        data = await self._post_json(url, headers=headers, payload=payload)
+        self._record_usage(data)
+        return NativeToolResponse(
+            text=self._extract_text(data),
+            tool_calls=parse_anthropic_tool_calls(data),
+            stop_reason=str(data.get("stop_reason") or "") or None,
+            provider=self.provider_name,
+            model=model or self.model,
+            metadata={"protocol": "anthropic_messages_tools"},
+        )
+
+    async def stream(
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> AsyncIterator[str]:
+        url, headers, payload = self._messages_request(
+            prompt,
+            model=model,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
+        payload["stream"] = True
+        chunks: list[str] = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        async for event in self._stream_json_events(
+            url,
+            headers=headers,
+            payload=payload,
+        ):
+            event_type = str(event.get("type", ""))
+            if event_type == "message_start":
+                message = event.get("message") or {}
+                usage = message.get("usage") if isinstance(message, dict) else None
+                if isinstance(usage, dict):
+                    prompt_tokens = int(usage.get("input_tokens", 0) or 0)
+            elif event_type == "message_delta":
+                usage = event.get("usage") or {}
+                if isinstance(usage, dict):
+                    completion_tokens = int(usage.get("output_tokens", 0) or 0)
+            elif event_type == "content_block_delta":
+                delta = event.get("delta") or {}
+                text = delta.get("text") if isinstance(delta, dict) else None
+                if isinstance(text, str) and text:
+                    chunks.append(text)
+                    yield text
+        if not chunks:
+            raise LLMProviderError("anthropic returned an empty stream", retryable=True)
+        self.last_usage = UsageRecord(
+            prompt_tokens=prompt_tokens or estimate_tokens(prompt),
+            completion_tokens=completion_tokens or estimate_tokens("".join(chunks)),
+            source="anthropic_stream",
         )
 
     @staticmethod

@@ -29,6 +29,14 @@ class QuickScoreRead(BaseModel):
     missing_skills: list[str] = Field(default_factory=list)
     recommendation: Recommendation
     reasoning_summary: str = ""
+    direction_score: float = Field(default=0, ge=0, le=100)
+    score_confidence: float = Field(default=0, ge=0, le=1)
+    score_status: Literal["SUFFICIENT", "PARTIAL", "INSUFFICIENT_DATA", "FAILED"] = "SUFFICIENT"
+    confidence_factors: dict[str, float] = Field(default_factory=dict)
+    hard_constraint_ledger: list[dict[str, Any]] = Field(default_factory=list)
+    hard_constraint_passed: bool = True
+    component_scores: dict[str, float] = Field(default_factory=dict)
+    requirement_matches: list[dict[str, Any]] = Field(default_factory=list)
     cached: bool = False
 
 
@@ -82,4 +90,10 @@ class JobScoreRead(BaseModel):
     input_fingerprint: str | None = None
     judge_source: str = "llm"
     weights: dict[str, float]
+    direction_score: float = 0
+    score_confidence: float = 0
+    score_status: str = "SUFFICIENT"
+    confidence_factors: dict[str, float] = Field(default_factory=dict)
+    hard_constraint_ledger: list[dict[str, Any]] = Field(default_factory=list)
+    hard_constraint_passed: bool = True
     created_at: datetime

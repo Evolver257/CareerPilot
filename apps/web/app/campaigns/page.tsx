@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { parseCampaignNumbers } from "../../lib/campaign-input";
 
 import { LlmDeepScoreBadge } from "../../components/scoring-mode-badge";
 import {
@@ -36,12 +37,27 @@ export default function CampaignsPage() {
   const [keywords, setKeywords] = useState("Agent, LLM, RAG");
   const [cities, setCities] = useState("");
   const [minScore, setMinScore] = useState(50);
-  const [maxJobs, setMaxJobs] = useState(10);
+  const [maxJobs, setMaxJobs] = useState("10");
   const [scoringMode, setScoringMode] = useState<RankingScoringMode>("fast");
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [maintaining, setMaintaining] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editKeywords, setEditKeywords] = useState("");
+  const [editCities, setEditCities] = useState("");
+  const [editMinScore, setEditMinScore] = useState("50");
+  const [editMaxJobs, setEditMaxJobs] = useState("10");
+  const [editError, setEditError] = useState<string | null>(null);
+  const editPanel = useRef<HTMLElement>(null);
+  const editInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!editingCampaign) return;
+    editPanel.current?.scrollIntoView({ block: "start" });
+    editInput.current?.focus({ preventScroll: true });
+  }, [editingCampaign]);
 
   useEffect(() => {
     Promise.all([getCampaigns(), getResumes()])
@@ -65,8 +81,7 @@ export default function CampaignsPage() {
         resume_id: resumeId,
         keywords: keywords.split(/[,，]/).map((value) => value.trim()).filter(Boolean),
         target_cities: cities.split(/[,，]/).map((value) => value.trim()).filter(Boolean),
-        min_score: minScore,
-        max_jobs: maxJobs,
+        ...parseCampaignNumbers(maxJobs, String(minScore)),
         scoring_mode: scoringMode,
       });
       router.push(`/campaigns/${campaign.id}`);
@@ -82,31 +97,31 @@ export default function CampaignsPage() {
     setCampaigns(response.items);
   }
 
-  async function handleEdit(campaign: Campaign) {
-    const nextName = window.prompt("计划名称", campaign.name);
-    if (nextName === null) return;
-    const currentKeywords = Array.isArray(campaign.filters.keywords) ? campaign.filters.keywords.join(", ") : "";
-    const nextKeywords = window.prompt("关键词（逗号分隔）", currentKeywords);
-    if (nextKeywords === null) return;
-    const nextCities = window.prompt("目标城市（逗号分隔）", campaign.target_cities.join(", "));
-    if (nextCities === null) return;
-    const nextMinScore = window.prompt("最低匹配分数", String(campaign.min_score));
-    if (nextMinScore === null) return;
-    const nextMaxJobs = window.prompt("最大职位数", String(campaign.max_jobs));
-    if (nextMaxJobs === null) return;
+  function beginEdit(campaign: Campaign) {
+    setEditError(null);
+    setEditingCampaign(campaign);
+    setEditName(campaign.name);
+    setEditKeywords(Array.isArray(campaign.filters.keywords) ? campaign.filters.keywords.join(", ") : "");
+    setEditCities(campaign.target_cities.join(", "));
+    setEditMinScore(String(campaign.min_score));
+    setEditMaxJobs(String(campaign.max_jobs));
+  }
+
+  async function handleEdit() {
+    if (!editingCampaign || !editName.trim()) return;
     setMaintaining(true);
-    setError(null);
+    setEditError(null);
     try {
-      await updateCampaign(campaign.id, {
-        name: nextName.trim(),
-        keywords: nextKeywords.split(/[,，]/).map((value) => value.trim()).filter(Boolean),
-        target_cities: nextCities.split(/[,，]/).map((value) => value.trim()).filter(Boolean),
-        min_score: Number(nextMinScore),
-        max_jobs: Number(nextMaxJobs),
+      await updateCampaign(editingCampaign.id, {
+        name: editName.trim(),
+        keywords: editKeywords.split(/[,，]/).map((value) => value.trim()).filter(Boolean),
+        target_cities: editCities.split(/[,，]/).map((value) => value.trim()).filter(Boolean),
+        ...parseCampaignNumbers(editMaxJobs, editMinScore),
       });
       await reloadCampaigns();
+      setEditingCampaign(null);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "投递计划保存失败。");
+      setEditError(reason instanceof Error ? reason.message : "投递计划保存失败。");
     } finally {
       setMaintaining(false);
     }
@@ -134,13 +149,29 @@ export default function CampaignsPage() {
         <p className="mt-3 max-w-3xl text-slate-500">把职位搜索、智能排名、人工确认和投递队列组织为可暂停、可恢复的计划。</p>
       </header>
 
+      {editingCampaign && <section ref={editPanel} aria-labelledby="edit-campaign-title" className="panel scroll-mt-6 border-indigo-200">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div><p className="eyebrow">维护计划</p><h2 className="mt-2 text-xl font-semibold" id="edit-campaign-title">编辑投递计划</h2><p className="mt-2 text-sm text-slate-500">一次核对全部条件，保存后不会改变已经完成的投递记录。</p></div>
+          <button className="text-sm text-slate-500" disabled={maintaining} onClick={() => setEditingCampaign(null)} type="button">关闭</button>
+        </div>
+        <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <label className="text-sm font-medium text-slate-700">计划名称<input ref={editInput} className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" onChange={(event) => setEditName(event.target.value)} value={editName} /></label>
+          <label className="text-sm font-medium text-slate-700">关键词<input className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" onChange={(event) => setEditKeywords(event.target.value)} placeholder="Agent，RAG，Python" value={editKeywords} /></label>
+          <label className="text-sm font-medium text-slate-700">目标城市<input className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" onChange={(event) => setEditCities(event.target.value)} placeholder="北京，上海" value={editCities} /></label>
+          <label className="text-sm font-medium text-slate-700">最低匹配分数<input className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" max={100} min={0} step="any" onChange={(event) => setEditMinScore(event.target.value)} type="number" value={editMinScore} /></label>
+          <label className="text-sm font-medium text-slate-700">最多职位数<input className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" max={200} min={1} step={1} onChange={(event) => setEditMaxJobs(event.target.value)} type="number" value={editMaxJobs} /></label>
+        </div>
+        {editError && <p role="alert" className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-800">{editError}</p>}
+        <div className="mt-5 flex gap-3"><button className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:opacity-50" disabled={maintaining || !editName.trim()} onClick={() => void handleEdit()} type="button">{maintaining ? "保存中…" : "保存修改"}</button><button className="rounded-xl border border-slate-200 px-5 py-2.5 text-sm font-medium text-slate-700" disabled={maintaining} onClick={() => setEditingCampaign(null)} type="button">取消</button></div>
+      </section>}
+
       <section className="panel">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
-            <p className="eyebrow">Create</p>
+            <p className="eyebrow">新建计划</p>
             <h2 className="mt-2 text-xl font-semibold">创建投递计划</h2>
           </div>
-          <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700">创建后由你手动 Start</span>
+          <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700">创建后由你确认并启动</span>
         </div>
         <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           <label className="text-sm font-medium text-slate-700">
@@ -168,7 +199,7 @@ export default function CampaignsPage() {
           </label>
           <label className="text-sm font-medium text-slate-700">
             最大职位数
-            <input className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" max="100" min="1" onChange={(event) => setMaxJobs(Number(event.target.value))} type="number" value={maxJobs} />
+            <input className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" max="200" min="1" step={1} onChange={(event) => setMaxJobs(event.target.value)} type="number" value={maxJobs} />
           </label>
           <fieldset className="md:col-span-2 xl:col-span-3">
             <legend className="text-sm font-medium text-slate-700">匹配评分方式</legend>
@@ -191,7 +222,7 @@ export default function CampaignsPage() {
         </button>
       </section>
 
-      {error && <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-800">{error}</div>}
+      {error && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-800">{error}</div>}
 
       <section>
         <div className="mb-4 flex items-end justify-between gap-4">
@@ -212,7 +243,7 @@ export default function CampaignsPage() {
                 <div><p className="text-xs text-slate-400">待确认</p><p className="mt-1 font-semibold">{campaign.waiting_approval_count}</p></div>
                 <div><p className="text-xs text-slate-400">已排队</p><p className="mt-1 font-semibold">{campaign.queued_count}</p></div>
               </div>
-              <div className="mt-4 flex justify-end gap-3 border-t border-slate-100 pt-4 text-sm"><Link className="font-medium text-indigo-700" href={`/campaigns/${campaign.id}`}>查看详情</Link>{campaign.status === "DRAFT" && <button className="font-medium text-indigo-700" disabled={maintaining} onClick={() => void handleEdit(campaign)} type="button">编辑</button>}<button className="font-medium text-rose-600 disabled:opacity-40" disabled={maintaining} onClick={() => void handleDelete(campaign)} type="button">删除</button></div>
+              <div className="mt-4 flex justify-end gap-3 border-t border-slate-100 pt-4 text-sm"><Link className="font-medium text-indigo-700" href={`/campaigns/${campaign.id}`}>查看详情</Link>{campaign.status === "DRAFT" && <button className="font-medium text-indigo-700" disabled={maintaining} onClick={() => beginEdit(campaign)} type="button">编辑</button>}<button className="font-medium text-rose-600 disabled:opacity-40" disabled={maintaining} onClick={() => void handleDelete(campaign)} type="button">删除</button></div>
             </article>
           ))}
         </div>

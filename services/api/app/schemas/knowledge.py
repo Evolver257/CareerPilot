@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 KnowledgeIndexMode = Literal["incremental", "backfill"]
 KnowledgeIndexStatus = Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"]
 KnowledgeIndexItemStatus = Literal["PENDING", "RUNNING", "SUCCEEDED", "SKIPPED", "FAILED"]
+KnowledgeHealthStatus = Literal["not_built", "partial", "needs_update", "ready"]
 
 
 class KnowledgeIndexRunCreate(BaseModel):
@@ -44,6 +45,34 @@ class KnowledgeIndexRunRead(BaseModel):
 class KnowledgeIndexRunListResponse(BaseModel):
     items: list[KnowledgeIndexRunRead]
     total: int
+
+
+class KnowledgeRunProgressRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    status: str
+    progress: int
+    processed_jobs: int
+    total_jobs: int
+    error: str | None
+
+
+class KnowledgeHealthRead(BaseModel):
+    status: KnowledgeHealthStatus
+    ready: bool
+    jobs_total: int
+    document_count: int
+    indexed_jobs: int
+    compatible_jobs: int
+    needs_update_jobs: int
+    chunk_count: int
+    embedded_chunk_count: int
+    coverage_percent: float
+    embedding_model: str
+    embedding_dimensions: int
+    updated_at: datetime | None
+    latest_run: KnowledgeRunProgressRead | None
 
 
 class KnowledgeIndexRunItemRead(BaseModel):

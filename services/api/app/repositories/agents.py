@@ -4,7 +4,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.entities import AgentEvent, AgentRun, AgentStep
+from app.models.entities import AgentEvent, AgentRun, AgentStep, AgentToolInvocation
 
 
 class AgentRepository:
@@ -37,6 +37,47 @@ class AgentRepository:
 
     def add_event(self, event: AgentEvent) -> None:
         self.session.add(event)
+
+    def add_tool_invocation(self, invocation: AgentToolInvocation) -> None:
+        self.session.add(invocation)
+
+    async def get_tool_invocation(
+        self, run_id: UUID, idempotency_key: str, attempt: int
+    ) -> AgentToolInvocation | None:
+        return await self.session.scalar(
+            select(AgentToolInvocation).where(
+                AgentToolInvocation.run_id == run_id,
+                AgentToolInvocation.idempotency_key == idempotency_key,
+                AgentToolInvocation.attempt == attempt,
+            )
+        )
+
+    async def get_latest_tool_invocation(
+        self, run_id: UUID, idempotency_key: str
+    ) -> AgentToolInvocation | None:
+        return await self.session.scalar(
+            select(AgentToolInvocation)
+            .where(
+                AgentToolInvocation.run_id == run_id,
+                AgentToolInvocation.idempotency_key == idempotency_key,
+            )
+            .order_by(AgentToolInvocation.attempt.desc(), AgentToolInvocation.created_at.desc())
+            .limit(1)
+        )
+
+    async def list_tool_invocations(self, run_id: UUID) -> list[AgentToolInvocation]:
+        return list(
+            (
+                await self.session.scalars(
+                    select(AgentToolInvocation)
+                    .where(AgentToolInvocation.run_id == run_id)
+                    .order_by(
+                        AgentToolInvocation.created_at,
+                        AgentToolInvocation.attempt,
+                    )
+                )
+            ).all()
+        )
 
     async def checkpoint(self, run: AgentRun) -> AgentRun:
         self.session.add(run)

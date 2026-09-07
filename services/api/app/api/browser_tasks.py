@@ -80,6 +80,7 @@ def _campaign_group_read(tasks: list[BrowserTask]) -> BrowserTaskCampaignGroupRe
     campaign = tasks[0].campaign
     statuses = [task.status for task in tasks]
     submitted_count = sum(task.application.status == "SUBMITTED" for task in tasks)
+    manual_count = sum(task.application.status == "MANUAL_REQUIRED" for task in tasks)
     waiting_count = statuses.count(BrowserTaskStatus.WAITING_FOR_USER.value)
     failed_count = statuses.count(BrowserTaskStatus.FAILED.value)
     cancelled_count = statuses.count(BrowserTaskStatus.CANCELLED.value)
@@ -112,6 +113,7 @@ def _campaign_group_read(tasks: list[BrowserTask]) -> BrowserTaskCampaignGroupRe
         platforms=sorted({task.platform for task in tasks}),
         task_count=len(tasks),
         submitted_count=submitted_count,
+        manual_count=manual_count,
         active_count=active_count,
         waiting_count=waiting_count,
         failed_count=failed_count,

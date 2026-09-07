@@ -11,6 +11,7 @@ from app.llm.provider import (
     OpenAIProvider,
 )
 from app.schemas.llm import LLMConnectionTestRead
+from app.schemas.tool_protocol import ToolDefinition
 from app.services.llm_settings import LLMSettingsService
 
 
@@ -124,6 +125,61 @@ async def test_openai_provider_uses_chat_completions_format() -> None:
     assert provider.last_usage.total_tokens == 5
 
 
+async def test_openai_provider_uses_native_function_calling() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_jobs",
+                                        "arguments": '{"query":"RAG"}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 8, "completion_tokens": 3},
+            },
+        )
+
+    provider = OpenAIProvider(
+        api_key="sk-test",
+        model="gpt-test",
+        base_url="https://proxy.example/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    result = await provider.decide_with_tools(
+        "choose",
+        [
+            ToolDefinition(
+                name="search_jobs",
+                description="Search jobs",
+                input_schema={"type": "object"},
+            )
+        ],
+    )
+
+    body = json.loads(requests[0].content)
+    assert body["tool_choice"] == "auto"
+    assert body["parallel_tool_calls"] is False
+    assert body["tools"][0]["function"]["name"] == "search_jobs"
+    assert result.tool_calls[0].arguments == {"query": "RAG"}
+    assert result.stop_reason == "tool_calls"
+
+
 async def test_openai_provider_can_use_embeddings_endpoint() -> None:
     requests: list[httpx.Request] = []
 
@@ -148,9 +204,36 @@ async def test_openai_provider_can_use_embeddings_endpoint() -> None:
     body = json.loads(requests[0].content)
     assert body == {
         "model": "text-embedding-3-small",
-        "input": "RAG 后端开发",
+        "input": ["RAG 后端开发"],
         "dimensions": 3,
     }
+
+
+async def test_openai_provider_batches_embedding_inputs_and_restores_index_order() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["input"] == ["first", "second"]
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"index": 1, "embedding": [0.0, 1.0, 0.0]},
+                    {"index": 0, "embedding": [1.0, 0.0, 0.0]},
+                ]
+            },
+        )
+
+    provider = OpenAIProvider(
+        api_key="sk-test-openai-key",
+        embedding_model="text-embedding-3-small",
+        dimensions=3,
+        base_url="https://proxy.example/v1",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert await provider.embed_many(["first", "second"]) == [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ]
 
 
 async def test_local_embedding_preserves_chinese_phrase_overlap() -> None:
@@ -186,6 +269,166 @@ async def test_anthropic_provider_uses_messages_format_and_structured_output() -
     )
     result = await provider.generate_structured("return data", Score)
     assert result.score == 92
+
+
+async def test_anthropic_provider_uses_native_tool_use_blocks() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu-1",
+                        "name": "search_jobs",
+                        "input": {"query": "Agent"},
+                    }
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 8, "output_tokens": 3},
+            },
+        )
+
+    provider = AnthropicProvider(
+        api_key="sk-ant-test",
+        model="claude-test",
+        base_url="https://proxy.example",
+        transport=httpx.MockTransport(handler),
+    )
+    result = await provider.decide_with_tools(
+        "choose",
+        [
+            ToolDefinition(
+                name="search_jobs",
+                description="Search jobs",
+                input_schema={"type": "object"},
+            )
+        ],
+    )
+
+    body = json.loads(requests[0].content)
+    assert body["tools"][0]["input_schema"] == {"type": "object"}
+    assert "tool_choice" not in body
+    assert result.tool_calls[0].arguments == {"query": "Agent"}
+    assert result.stop_reason == "tool_use"
+
+
+async def test_deepseek_anthropic_structured_call_can_disable_reasoning() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": '{"score": 93}'}],
+                "usage": {"input_tokens": 4, "output_tokens": 3},
+            },
+        )
+
+    class Score(BaseModel):
+        score: int
+
+    provider = AnthropicProvider(
+        api_key="sk-ant-test-key",
+        model="deepseek-v4-flash",
+        base_url="https://api.deepseek.com/anthropic",
+        transport=httpx.MockTransport(handler),
+    )
+    result = await provider.generate_structured(
+        "return data",
+        Score,
+        max_tokens=500,
+        reasoning_effort="none",
+    )
+
+    assert result.score == 93
+    payload = json.loads(requests[0].content)
+    assert payload["reasoning"] == {"effort": "none"}
+    assert payload["thinking"] == {"type": "disabled"}
+
+
+async def test_deepseek_anthropic_stream_yields_text_deltas_and_usage() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        events = [
+            {
+                "type": "message_start",
+                "message": {"usage": {"input_tokens": 11}},
+            },
+            {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "第一段"},
+            },
+            {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "第二段"},
+            },
+            {"type": "message_delta", "usage": {"output_tokens": 7}},
+        ]
+        content = "".join(f"event: {item['type']}\ndata: {json.dumps(item)}\n\n" for item in events)
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=content,
+        )
+
+    provider = AnthropicProvider(
+        api_key="sk-ant-test-key",
+        model="deepseek-v4-flash",
+        base_url="https://api.deepseek.com/anthropic",
+        transport=httpx.MockTransport(handler),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in provider.stream(
+            "stream answer",
+            max_tokens=500,
+            reasoning_effort="none",
+        )
+    ]
+
+    assert chunks == ["第一段", "第二段"]
+    payload = json.loads(requests[0].content)
+    assert payload["stream"] is True
+    assert payload["thinking"] == {"type": "disabled"}
+    assert provider.last_usage is not None
+    assert provider.last_usage.prompt_tokens == 11
+    assert provider.last_usage.completion_tokens == 7
+
+
+async def test_openai_stream_yields_chat_completion_deltas() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        events = [
+            {"choices": [{"delta": {"content": "hello "}}]},
+            {"choices": [{"delta": {"content": "world"}}]},
+        ]
+        content = "".join(f"data: {json.dumps(item)}\n\n" for item in events)
+        content += "data: [DONE]\n\n"
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=content,
+        )
+
+    provider = OpenAIProvider(
+        api_key="sk-test-key",
+        model="gpt-test",
+        base_url="https://example.com/v1",
+        transport=httpx.MockTransport(handler),
+    )
+
+    chunks = [chunk async for chunk in provider.stream("stream answer")]
+
+    assert chunks == ["hello ", "world"]
+    assert provider.last_usage is not None
+    assert provider.last_usage.completion_tokens > 0
 
 
 async def test_anthropic_structured_output_retries_thinking_only_max_tokens_response() -> None:

@@ -1,20 +1,25 @@
 "use client";
+import { developerMode } from "../../lib/workspaces";
 
 import Link from "next/link";
 import { type FormEvent, useEffect, useState } from "react";
 
 import {
   deleteJob,
+  getRecruitmentPlatforms,
   getJobs,
   importJobs,
   updateJob,
   type Job,
   type JobListResponse,
+  type RecruitmentPlatform,
 } from "../../lib/api";
+import { formatJobCollectionTime, isJobFreshForAutoDelivery } from "../../lib/job-freshness";
 
 const DEFAULT_PAGE_SIZE = 20;
 const platformLabels: Record<string, string> = {
   boss: "BOSS 直聘",
+  zhaopin: "智联招聘",
   manual: "手动导入",
   mock: "演示数据",
 };
@@ -69,11 +74,23 @@ function descriptionSummary(title: string, description: string): string {
   return lines.find((line) => (
     line !== title
     && !/^(Company|Location|Salary):/i.test(line)
-    && !/^[#【\[]*(岗位职责|职位描述|任职要求|工作要求)[】\]：:\s#]*$/.test(line)
+    && !/^[#【\[]*(岗位职责|工作职责|职位描述|任职要求|工作要求|职责)[】\]：:\s#]*$/.test(line)
   )) ?? "查看完整职位描述";
 }
 
+function compactRequirement(value: string | null, kind: "education" | "experience"): string | null {
+  const text = value?.trim();
+  if (!text) return null;
+  const patterns = kind === "education"
+    ? [/博士(?:及以上)?/, /硕士(?:及以上)?/, /本科(?:及以上)?/, /大专(?:及以上)?/, /学历不限/, /不限学历/]
+    : [/经验不限/, /不限经验/, /应届(?:生)?/, /在校生?/, /无经验/, /\d+\s*[-至]\s*\d+\s*年/, /\d+\s*年以上/];
+  const matched = patterns.map((pattern) => text.match(pattern)?.[0]).find(Boolean);
+  if (matched) return matched;
+  return text.length > 14 ? `${text.slice(0, 14)}…` : text;
+}
+
 export default function JobsPage() {
+  const [platforms, setPlatforms] = useState<RecruitmentPlatform[]>([]);
   const [draftFilters, setDraftFilters] = useState<JobSearchFilters>(EMPTY_FILTERS);
   const [appliedFilters, setAppliedFilters] = useState<JobSearchFilters>(EMPTY_FILTERS);
   const [jobs, setJobs] = useState<JobListResponse | null>(null);
@@ -85,6 +102,7 @@ export default function JobsPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [jumpPage, setJumpPage] = useState("");
+  const [showMoreFilters, setShowMoreFilters] = useState(false);
   const [editingJob, setEditingJob] = useState<Job | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [editLocation, setEditLocation] = useState("");
@@ -104,6 +122,10 @@ export default function JobsPage() {
     }
     setJobs(response);
   }
+
+  useEffect(() => {
+    getRecruitmentPlatforms().then(setPlatforms).catch(() => setPlatforms([]));
+  }, []);
 
   useEffect(() => {
     setSelectedJobIds(new Set());
@@ -336,20 +358,25 @@ export default function JobsPage() {
           {activeFilterLabels.length > 0 && <button className="text-sm font-medium text-indigo-700" onClick={resetSearch} type="button">清除全部条件</button>}
         </div>
         <form className="mt-6 space-y-5" onSubmit={applySearch}>
-          <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4 [&>*]:min-w-0">
-            <label className="text-sm font-medium text-slate-700 md:col-span-2" htmlFor="job-filter-search">关键词
+          <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_180px] [&>*]:min-w-0">
+            <label className="text-sm font-medium text-slate-700" htmlFor="job-filter-search">关键词
               <input className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal outline-none transition focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" id="job-filter-search" maxLength={100} onChange={(event) => updateDraftFilter("search", event.target.value)} placeholder="职位名称、技能或 JD 内容，例如 RAG、机器人算法" value={draftFilters.search} />
-            </label>
-            <label className="text-sm font-medium text-slate-700" htmlFor="job-filter-company">公司
-              <input className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal outline-none transition focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" id="job-filter-company" maxLength={100} onChange={(event) => updateDraftFilter("company", event.target.value)} placeholder="公司名称" value={draftFilters.company} />
             </label>
             <label className="text-sm font-medium text-slate-700" htmlFor="job-filter-location">城市 / 地区
               <input className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal outline-none transition focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" id="job-filter-location" maxLength={100} onChange={(event) => updateDraftFilter("location", event.target.value)} placeholder="北京、上海、远程" value={draftFilters.location} />
             </label>
             <label className="text-sm font-medium text-slate-700" htmlFor="job-filter-platform">职位来源
               <select className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" id="job-filter-platform" onChange={(event) => updateDraftFilter("platform", event.target.value)} value={draftFilters.platform}>
-                <option value="">全部来源</option><option value="boss">BOSS 直聘</option><option value="manual">手动导入</option><option value="mock">演示数据</option>
+                <option value="">全部来源</option>{platforms.map((platform) => <option key={platform.id} value={platform.id}>{platform.name}</option>)}<option value="manual">手动导入</option><option value="mock">演示数据</option>
               </select>
+            </label>
+          </div>
+          <button aria-controls="job-more-filters" aria-expanded={showMoreFilters} className="text-sm font-medium text-indigo-700" onClick={() => setShowMoreFilters((current) => !current)} type="button">
+            {showMoreFilters ? "收起更多筛选 ↑" : `更多筛选${[draftFilters.company, draftFilters.education, draftFilters.experience, draftFilters.salaryFloor, draftFilters.salaryCeiling].some(Boolean) ? " · 已填写" : " ↓"}`}
+          </button>
+          {showMoreFilters && <div className="grid min-w-0 gap-4 border-t border-slate-100 pt-5 md:grid-cols-2 xl:grid-cols-4" id="job-more-filters">
+            <label className="text-sm font-medium text-slate-700" htmlFor="job-filter-company">公司
+              <input className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" id="job-filter-company" maxLength={100} onChange={(event) => updateDraftFilter("company", event.target.value)} placeholder="公司名称" value={draftFilters.company} />
             </label>
             <label className="text-sm font-medium text-slate-700" htmlFor="job-filter-education">学历要求
               <select className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" id="job-filter-education" onChange={(event) => updateDraftFilter("education", event.target.value)} value={draftFilters.education}>
@@ -357,7 +384,7 @@ export default function JobsPage() {
               </select>
             </label>
             <label className="text-sm font-medium text-slate-700" htmlFor="job-filter-experience">经验要求
-              <input className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal outline-none transition focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" id="job-filter-experience" maxLength={100} onChange={(event) => updateDraftFilter("experience", event.target.value)} placeholder="应届、1-3 年、经验不限" value={draftFilters.experience} />
+              <input className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 font-normal outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" id="job-filter-experience" maxLength={100} onChange={(event) => updateDraftFilter("experience", event.target.value)} placeholder="应届、1-3 年、经验不限" value={draftFilters.experience} />
             </label>
             <div className="grid min-w-0 grid-cols-2 gap-2 [&>*]:min-w-0">
               <label className="text-sm font-medium text-slate-700" htmlFor="job-filter-salary-floor">薪资下限
@@ -367,7 +394,7 @@ export default function JobsPage() {
                 <input className="mt-2 min-w-0 w-full rounded-xl border border-slate-200 px-3 py-3 font-normal outline-none focus:border-indigo-500" id="job-filter-salary-ceiling" min={0} onChange={(event) => updateDraftFilter("salaryCeiling", event.target.value)} placeholder="最高" type="number" value={draftFilters.salaryCeiling} />
               </label>
             </div>
-          </div>
+          </div>}
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
             <p className="text-xs leading-5 text-slate-500">薪资条件按职位解析后的数值区间匹配；未填写的条件不会参与筛选。</p>
             <div className="flex gap-2"><button className="rounded-xl border border-slate-200 px-5 py-2.5 text-sm font-medium text-slate-700 transition hover:border-indigo-300 hover:text-indigo-700" onClick={resetSearch} type="button">重置</button><button className="rounded-xl bg-indigo-600 px-6 py-2.5 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50" disabled={loading} type="submit">{loading ? "查询中…" : "搜索职位"}</button></div>
@@ -379,7 +406,7 @@ export default function JobsPage() {
       <details className="panel group">
         <summary className="flex cursor-pointer list-none items-center justify-between gap-4"><div><p className="eyebrow">Job Intelligence</p><h2 className="mt-2 text-lg font-semibold">导入与解析 JD</h2><p className="mt-1 text-sm text-slate-500">需要手动补充职位时再展开，不干扰日常检索。</p></div><span className="text-sm font-medium text-indigo-700 group-open:hidden">展开 →</span><span className="hidden text-sm font-medium text-indigo-700 group-open:inline">收起 ↑</span></summary>
         <div className="mt-5 border-t border-slate-100 pt-5">
-          <div className="flex justify-end"><button className="rounded-xl border border-indigo-200 px-4 py-2 text-sm font-medium text-indigo-700 transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={importing} onClick={() => void handleMockImport()} type="button">导入演示职位</button></div>
+          {developerMode && <div className="flex justify-end"><button className="rounded-xl border border-indigo-200 px-4 py-2 text-sm font-medium text-indigo-700 transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={importing} onClick={() => void handleMockImport()} type="button">导入演示职位</button></div>}
           <textarea className="mt-4 min-h-28 w-full rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" onChange={(event) => setRawJd(event.target.value)} placeholder="粘贴原始职位描述，系统会提取标题、技能、经验、学历与职责。" value={rawJd} />
           <button className="mt-3 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50" disabled={importing} onClick={() => void handleImport()} type="button">{importing ? "处理中…" : "导入并解析"}</button>
         </div>
@@ -401,52 +428,66 @@ export default function JobsPage() {
       </section>}
 
       <section className="panel overflow-hidden p-0">
-        {jobs && jobs.items.length > 0 && <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-6 py-3 text-sm">
-          <label className="flex cursor-pointer items-center gap-2 text-slate-600">
-            <input checked={jobs.items.every((job) => selectedJobIds.has(job.id))} className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" onChange={toggleCurrentPageSelection} type="checkbox" />
-            <span>全选本页</span>
-          </label>
-          <div className="flex flex-wrap items-center gap-3">
-            {selectedJobIds.size > 0 && <span className="text-slate-500">已选择 {selectedJobIds.size} 个职位</span>}
+        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 bg-slate-50/80 px-5 py-4 sm:px-6">
+          <div>
+            <p className="text-sm font-semibold text-slate-800">职位列表</p>
+            <p className="mt-1 text-xs text-slate-500">共 {jobs?.total ?? 0} 个结果{jobs && jobs.total > 0 ? ` · 当前第 ${jobs.page} / ${totalPages} 页` : ""}</p>
+          </div>
+          {jobs && jobs.items.length > 0 && <div className="flex flex-wrap items-center gap-3 text-sm">
+            <label className="flex cursor-pointer items-center gap-2 text-slate-600">
+              <input checked={jobs.items.every((job) => selectedJobIds.has(job.id))} className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" onChange={toggleCurrentPageSelection} type="checkbox" />
+              <span>全选本页</span>
+            </label>
+            {selectedJobIds.size > 0 && <span className="text-slate-500">已选 {selectedJobIds.size} 个</span>}
             {selectedJobIds.size > 0 && <button className="rounded-lg bg-rose-600 px-3 py-2 font-medium text-white transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50" disabled={bulkDeleting || saving} onClick={() => void handleDeleteSelected()} type="button">{bulkDeleting ? "删除中…" : "批量删除"}</button>}
             {selectedJobIds.size > 0 && <button className="rounded-lg border border-slate-200 px-3 py-2 text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700" disabled={bulkDeleting} onClick={() => setSelectedJobIds(new Set())} type="button">清空选择</button>}
-          </div>
-        </div>}
+          </div>}
+        </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[780px] text-left text-sm">
-            <thead className="border-b border-slate-200 bg-slate-50 text-slate-500">
+          <table className="w-full min-w-[720px] table-fixed text-left text-sm">
+            <thead className="border-b border-slate-200 bg-slate-50 text-xs font-medium tracking-wide text-slate-500">
               <tr>
-                <th className="w-12 px-6 py-4 font-medium"><span className="sr-only">选择</span></th>
-                <th className="px-6 py-4 font-medium">职位</th>
-                <th className="px-6 py-4 font-medium">平台</th>
-                <th className="px-6 py-4 font-medium">地点</th>
-                <th className="px-6 py-4 font-medium">薪资</th>
-                <th className="px-6 py-4 font-medium">状态</th>
-                <th className="px-6 py-4 font-medium">维护</th>
+                <th className="w-12 px-5 py-3.5 sm:px-6"><span className="sr-only">选择</span></th>
+                <th className="w-[38%] px-5 py-3.5 sm:px-6">职位信息</th>
+                <th className="w-[17%] px-5 py-3.5 sm:px-6">薪资与地点</th>
+                <th className="w-[22%] px-5 py-3.5 sm:px-6">来源与时效</th>
+                <th className="w-[16%] px-5 py-3.5 sm:px-6">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading && <tr><td className="px-6 py-10 text-center text-slate-500" colSpan={7}>加载中…</td></tr>}
               {!loading && jobs?.items.length === 0 && <tr><td className="px-6 py-12 text-center text-slate-500" colSpan={7}><p className="font-medium text-slate-700">没有找到符合条件的职位</p><p className="mt-2 text-sm">尝试减少筛选条件，或重置后查看全部职位。</p>{activeFilterLabels.length > 0 && <button className="mt-4 font-medium text-indigo-700" onClick={resetSearch} type="button">清除筛选条件</button>}</td></tr>}
-              {!loading && jobs?.items.map((job) => (
-                <tr key={job.id} className="transition hover:bg-slate-50">
-                  <td className="px-6 py-4 align-top"><input aria-label={`选择职位：${job.title}`} checked={selectedJobIds.has(job.id)} className="mt-1 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" onChange={() => toggleJobSelection(job.id)} type="checkbox" /></td>
-                  <td className="px-6 py-4">
-                    <Link className="font-semibold text-indigo-700 hover:text-indigo-900" href={`/jobs/${job.id}`}>
+              {!loading && jobs?.items.map((job) => {
+                const freshForDelivery = isJobFreshForAutoDelivery(job);
+                const companyName = typeof job.raw_data.company_name === "string" ? job.raw_data.company_name : "公司未提供";
+                const salaryDisplay = typeof job.raw_data.salary_text === "string"
+                  ? job.raw_data.salary_text
+                  : job.salary_min || job.salary_max
+                    ? `${job.salary_min ?? "?"} - ${job.salary_max ?? "?"}`
+                    : "薪资面议";
+                return (
+                <tr key={job.id} className="group transition-colors hover:bg-slate-50">
+                  <td className="px-5 py-5 align-top sm:px-6"><input aria-label={`选择职位：${job.title}`} checked={selectedJobIds.has(job.id)} className="mt-1 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" onChange={() => toggleJobSelection(job.id)} type="checkbox" /></td>
+                  <td className="min-w-0 px-5 py-5 align-top sm:px-6">
+                    <Link className="block truncate font-semibold text-indigo-700 transition-colors hover:text-indigo-900" href={`/jobs/${job.id}`} title={job.title}>
                       {job.title}
                     </Link>
-                    <p className="mt-1 max-w-md truncate text-slate-500">{descriptionSummary(job.title, job.description)}</p>
-                    {typeof job.raw_data.company_name === "string" && <p className="mt-1 text-xs text-slate-400">{job.raw_data.company_name}</p>}
+                    <p className="mt-1 truncate text-sm text-slate-600" title={companyName}>{companyName}</p>
+                    <p className="mt-2 truncate text-xs text-slate-400" title={descriptionSummary(job.title, job.description)}>{descriptionSummary(job.title, job.description)}</p>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {compactRequirement(job.education_requirement, "education") && <span className="max-w-[11rem] truncate rounded-md bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700" title={`学历要求：${job.education_requirement}`}>学历 · {compactRequirement(job.education_requirement, "education")}</span>}
+                      {compactRequirement(job.experience_requirement, "experience") && <span className="max-w-[11rem] truncate rounded-md bg-slate-100 px-2 py-1 text-xs text-slate-600" title={`经验要求：${job.experience_requirement}`}>经验 · {compactRequirement(job.experience_requirement, "experience")}</span>}
+                    </div>
                   </td>
-                  <td className="whitespace-nowrap px-6 py-4 text-slate-600">{platformLabels[job.platform] ?? job.platform}</td>
-                  <td className="px-6 py-4 text-slate-600">{job.location ?? "—"}</td>
-                  <td className="whitespace-nowrap px-6 py-4 text-slate-600">
-                    {typeof job.raw_data.salary_text === "string" ? job.raw_data.salary_text : job.salary_min || job.salary_max ? `${job.salary_min ?? "?"} - ${job.salary_max ?? "?"}` : "—"}
+                  <td className="min-w-0 px-5 py-5 align-top sm:px-6">
+                    <span className="block truncate font-semibold text-slate-800" title={salaryDisplay}>{salaryDisplay}</span>
+                    <span className="mt-2 block truncate text-xs text-slate-500" title={job.location ?? undefined}>{job.location ?? "地点未注明"}</span>
                   </td>
-                  <td className="whitespace-nowrap px-6 py-4"><span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">已采集</span></td>
-                  <td className="whitespace-nowrap px-6 py-4"><div className="flex gap-2"><button className="text-sm font-medium text-indigo-700" disabled={bulkDeleting} onClick={() => beginEdit(job)} type="button">编辑</button><button className="text-sm font-medium text-rose-600" disabled={saving || bulkDeleting} onClick={() => void handleDeleteJob(job)} type="button">删除</button></div></td>
+                  <td className="min-w-0 px-5 py-5 align-top sm:px-6"><span className="inline-flex max-w-full truncate rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600">{platformLabels[job.platform] ?? job.platform}</span><p className={`mt-2 truncate text-xs font-medium ${freshForDelivery ? "text-emerald-700" : "text-amber-700"}`}>{freshForDelivery ? "● 可纳入投递" : "● 需重新采集"}</p><p className="mt-1 truncate text-xs text-slate-400" title={formatJobCollectionTime(job)}>采集于 {formatJobCollectionTime(job)}</p></td>
+                  <td className="min-w-0 px-5 py-5 align-top sm:px-6"><div className="flex flex-wrap items-center gap-x-2 gap-y-1"><Link className="rounded-lg border border-indigo-200 px-2.5 py-1.5 text-xs font-medium text-indigo-700 transition hover:border-indigo-300 hover:bg-indigo-50" href={`/jobs/${job.id}`}>详情</Link><button className="text-xs font-medium text-slate-500 transition hover:text-indigo-700" disabled={bulkDeleting} onClick={() => beginEdit(job)} type="button">编辑</button><button className="text-xs font-medium text-rose-600 transition hover:text-rose-700" disabled={saving || bulkDeleting} onClick={() => void handleDeleteJob(job)} type="button">删除</button></div></td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

@@ -1,0 +1,44 @@
+name: API reliability
+on:
+  push:
+    paths: ['services/api/**', '.github/workflows/api-reliability.yml']
+  pull_request:
+    paths: ['services/api/**', '.github/workflows/api-reliability.yml']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: careerpilot_eval
+          POSTGRES_USER: careerpilot
+          POSTGRES_PASSWORD: careerpilot
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U careerpilot -d careerpilot_eval"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: services/api
+    env:
+      DATABASE_URL: postgresql+asyncpg://careerpilot:careerpilot@localhost:5432/careerpilot_eval
+      WORKER_TEST_DATABASE_URL: postgresql+asyncpg://careerpilot:careerpilot@localhost:5432/careerpilot_eval
+      LLM_PROVIDER: mock
+      INDEPENDENT_WORKER: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install -e '.[dev]'
+      - run: alembic upgrade head
+      - run: python -m pytest -q --junitxml=test-results.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: api-test-results
+          path: services/api/test-results.xml

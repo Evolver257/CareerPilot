@@ -16,6 +16,7 @@ class AgentRunCreate(BaseModel):
     max_steps: int = Field(default=12, ge=1, le=50)
     timeout_seconds: int = Field(default=60, ge=5, le=300)
     max_retries: int = Field(default=2, ge=0, le=5)
+    background: bool = False
 
 
 class AgentRunUpdate(BaseModel):
@@ -85,3 +86,40 @@ class AgentToolRead(BaseModel):
     description: str
     input_schema: dict[str, Any]
     output_schema: dict[str, Any]
+    capabilities: list[str] = Field(default_factory=list)
+    suitable_for: list[str] = Field(default_factory=list)
+    unsuitable_for: list[str] = Field(default_factory=list)
+    risk_level: str = "LOW"
+    cost_level: str = "LOW"
+    latency_level: str = "LOW"
+    requires_confirmation: bool = False
+    preconditions: list[str] = Field(default_factory=list)
+    postconditions: list[str] = Field(default_factory=list)
+    allowed_states: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+
+
+class AgentToolInvocationRead(BaseModel):
+    id: UUID
+    run_id: UUID
+    step_id: UUID | None
+    call_id: str
+    idempotency_key: str
+    parent_call_id: str | None
+    tool_name: str
+    source: str
+    server_id: str | None
+    arguments: dict[str, Any]
+    result: dict[str, Any]
+    status: str
+    attempt: int
+    retryable: bool
+    error_code: str | None
+    error_message: str | None
+    latency_ms: float
+    token_usage: dict[str, Any]
+    cost: float
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime

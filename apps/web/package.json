@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "next": "^15.5.23",
@@ -15,14 +16,18 @@
     "react-dom": "19.1.1"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.10.0",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "22.15.0",
     "@types/react": "19.1.10",
     "@types/react-dom": "19.1.7",
     "autoprefixer": "10.4.21",
     "eslint": "8.57.1",
     "eslint-config-next": "^15.5.23",
+    "jsdom": "^26.1.0",
     "postcss": "8.5.6",
     "tailwindcss": "3.4.17",
-    "typescript": "5.8.3"
+    "typescript": "5.8.3",
+    "vitest": "^3.2.7"
   }
 }

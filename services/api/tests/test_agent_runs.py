@@ -103,6 +103,20 @@ async def test_agent_run_executes_trace_and_resumes_after_approval(
     assert all(candidate["score_id"] for candidate in candidates)
     assert any(event["event_type"] == "USER_ACTION_REQUIRED" for event in run["events"])
 
+    invocations = await client.get(f"/api/agent-runs/{run_id}/tool-invocations")
+    assert invocations.status_code == 200
+    invocation_rows = invocations.json()
+    assert [item["tool_name"] for item in invocation_rows] == [
+        "search_jobs",
+        "analyze_job",
+        "retrieve_resume",
+        "rank_jobs",
+        "create_campaign",
+        "request_approval",
+    ]
+    assert all(item["status"] == "SUCCESS" for item in invocation_rows)
+    assert all(item["call_id"] and item["idempotency_key"] for item in invocation_rows)
+
     event_stream = await client.get(f"/api/agent-runs/{run_id}/events/stream")
     assert event_stream.status_code == 200
     assert event_stream.headers["content-type"].startswith("text/event-stream")
@@ -178,6 +192,33 @@ async def test_agent_run_pause_resume_cancel_and_step_limit(client: AsyncClient)
     assert retried.json()["id"] != limited.json()["id"]
     assert retried.json()["input"]["retry_of"] == limited.json()["id"]
     assert retried.json()["status"] == "FAILED"
+
+
+async def test_agent_run_can_be_enqueued_without_blocking_request(client: AsyncClient) -> None:
+    resume_id = await _upload_agent_resume(client)
+    await _import_agent_jobs(client)
+
+    created = await client.post(
+        "/api/agent-runs",
+        json={
+            "goal": "后台查找最多 3 个 AI Agent 实习岗位",
+            "resume_id": resume_id,
+            "background": True,
+        },
+    )
+    assert created.status_code == 201
+    run = created.json()
+    assert run["status"] == "PENDING"
+    assert run["input"]["background"] is True
+    assert run["steps"] == []
+
+    duplicate = await client.post(f"/api/agent-runs/{run['id']}/start-background")
+    assert duplicate.status_code == 200
+    assert duplicate.json()["status"] == "PENDING"
+
+    cancelled = await client.post(f"/api/agent-runs/{run['id']}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "CANCELLED"
 
 
 def test_agent_planner_extracts_phase_seven_acceptance_goal() -> None:

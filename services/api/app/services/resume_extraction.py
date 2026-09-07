@@ -29,9 +29,14 @@ class HeuristicResumeExtractor:
         "experience": {
             "experience",
             "work experience",
+            "professional experience",
+            "internship experience",
             "employment",
             "工作经历",
+            "工作经验",
             "实习经历",
+            "实习经验",
+            "职业经历",
         },
         "projects": {
             "projects",
@@ -379,8 +384,7 @@ class HeuristicResumeExtractor:
         if raw_line.lstrip().startswith(("-", "•", "*", "·")):
             return False
         return bool(
-            self.date_range_pattern.search(clean)
-            or re.search(r"\s[|｜]\s", clean)
+            self.date_range_pattern.search(clean) or re.search(r"\s[|｜]\s", clean)
         ) and self._looks_like_project_title(clean)
 
     @staticmethod
@@ -408,17 +412,31 @@ class HeuristicResumeExtractor:
         if not section:
             return []
         results: list[ResumeExperience] = []
-        for line in section.lines:
-            clean = self._strip_bullet(line)
-            parts = re.split(r"\s+[-|｜]\s+", clean, maxsplit=1)
+        entries = self._group_lines(section.lines, self._is_experience_start)
+        for entry in entries:
+            heading = entry[0]
+            date_match = self.date_range_pattern.search(heading)
+            heading_without_date = self.date_range_pattern.sub("", heading).strip(" -|｜")
+            parts = re.split(r"\s+[-|｜]\s+", heading_without_date, maxsplit=1)
+            bullets = self._unique_clean(entry[1:])
             results.append(
                 model(
                     company=parts[0][:120],
                     role=parts[1][:120] if len(parts) > 1 else "",
-                    bullets=[clean],
+                    start_date=date_match.group("start") if date_match else None,
+                    end_date=date_match.group("end") if date_match else None,
+                    bullets=bullets,
                 )
             )
         return results
+
+    def _is_experience_start(self, raw_line: str, clean: str) -> bool:
+        if raw_line.lstrip().startswith(("-", "•", "*", "·")):
+            return False
+        return bool(
+            self.date_range_pattern.search(clean)
+            or (len(clean) <= 180 and re.search(r"\s+[-|｜]\s+", clean))
+        )
 
     def _awards(self, section: ResumeSection | None) -> list[ResumeAward]:
         if not section:

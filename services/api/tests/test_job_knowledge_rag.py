@@ -12,9 +12,11 @@ from app.models.base import Base
 from app.models.entities import Job, JobSkill, Resume, ResumeChunk, User
 from app.schemas.knowledge import KnowledgeIndexRunCreate
 from app.schemas.knowledge_search import JobKnowledgeFilters, JobKnowledgeSearchRequest
+from app.services.job_knowledge import normalize_experience_requirement
 from app.services.job_knowledge_rag import (
     JobKnowledgeRAG,
     KnowledgeEmbeddingUnavailableError,
+    _query_terms,
     clear_knowledge_search_cache,
 )
 from app.services.knowledge_indexing import KnowledgeIndexService
@@ -83,6 +85,66 @@ async def _index(session: AsyncSession, *jobs: Job) -> None:
     assert completed.status == "SUCCEEDED"
 
 
+async def test_optional_cross_encoder_scores_and_cache_are_isolated(rag_session, monkeypatch):
+    clear_knowledge_search_cache()
+    await _index(rag_session, _job("岗位职责：开发 RAG 知识库。任职要求：熟悉 Python。"))
+    calls = []
+
+    def predict(self, query, documents):
+        calls.append(query)
+        return [2.0] * len(documents)
+
+    monkeypatch.setattr("app.llm.local_semantic.SemanticReranker.predict", predict)
+    rag = JobKnowledgeRAG(rag_session, MockLLMProvider())
+    request = JobKnowledgeSearchRequest(query="RAG", rerank_mode="none")
+    await rag.search(request)
+    request = request.model_copy(update={"rerank_mode": "cross_encoder"})
+    result = await rag.search(request)
+    assert not result.cache_hit
+    assert result.reranker == "cross_encoder"
+    assert result.citations
+    assert result.citations[0].fusion_score == pytest.approx(88.08, abs=0.01)
+    assert (await rag.search(request)).cache_hit
+    assert len(calls) == 1
+
+
+async def test_query_embeddings_are_batched_and_cached(rag_session):
+    clear_knowledge_search_cache()
+
+    class CountingProvider(MockLLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.batch_calls = 0
+
+        async def embed_many(self, texts, *, model=None):
+            self.batch_calls += 1
+            return await super().embed_many(texts, model=model)
+
+    provider = CountingProvider()
+    rag = JobKnowledgeRAG(rag_session, provider)
+    first = await rag.embed_queries(["AI Agent 技能", "AI Agent 职责", "AI Agent 技能"])
+    second = await rag.embed_queries(["AI Agent 技能", "AI Agent 职责"])
+
+    assert set(first) == {"AI Agent 技能", "AI Agent 职责"}
+    assert set(second) == set(first)
+    assert provider.batch_calls == 1
+
+
+async def test_requested_cross_encoder_failure_is_explicit(rag_session, monkeypatch):
+    from app.services.job_knowledge_rag import KnowledgeRetrievalError
+
+    await _index(rag_session, _job("岗位职责：开发 RAG 检索。任职要求：Python。"))
+
+    def unavailable(*args):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr("app.llm.local_semantic.SemanticReranker.predict", unavailable)
+    with pytest.raises(KnowledgeRetrievalError, match="未静默"):
+        await JobKnowledgeRAG(rag_session, MockLLMProvider()).search(
+            JobKnowledgeSearchRequest(query="RAG", rerank_mode="cross_encoder", force_refresh=True)
+        )
+
+
 @pytest.mark.asyncio
 async def test_hybrid_search_returns_citations_and_sql_statistics(
     rag_session: AsyncSession,
@@ -126,6 +188,73 @@ async def test_hybrid_search_returns_citations_and_sql_statistics(
         )
     )
     assert alias_result.citations[0].job_id == job.id
+
+
+def test_query_terms_keep_domain_concepts_and_drop_prompt_filler() -> None:
+    terms = _query_terms("我想学习 AI Agent，需要掌握哪些技术栈？")
+
+    assert "AI Agent" in terms
+    assert "ai agent" in terms
+    assert "agent" not in terms
+    assert not {"学习", "需要", "哪些", "技术", "术栈"} & set(terms)
+    assert _query_terms("还有其他建议吗？") == []
+
+
+def test_experience_normalization_never_returns_free_form_requirements() -> None:
+    assert normalize_experience_requirement("经验不限") == "应届/经验不限"
+    assert normalize_experience_requirement("具备 1-3 年 Python 开发经验") == "1-3年"
+    assert normalize_experience_requirement("至少 3 年相关经验") == "3-5年"
+    assert normalize_experience_requirement("5年以上大模型研发经验") == "5年以上"
+    assert normalize_experience_requirement("2027年及以后毕业的优秀硕博研究生") == ""
+    assert normalize_experience_requirement("具备大规模分布式系统检索的经验") == ""
+
+
+@pytest.mark.asyncio
+async def test_natural_language_query_excludes_generic_unrelated_jobs(
+    rag_session: AsyncSession,
+) -> None:
+    clear_knowledge_search_cache()
+    relevant = _job(
+        "负责 AI Agent 与 RAG 应用开发，熟悉 Python",
+        title="AI Agent 开发实习生",
+    )
+    unrelated = _job(
+        "负责商家拓展，需要持续学习业务知识并提供运营建议",
+        title="商家 BD 实习生",
+    )
+    unrelated.normalized_data = {
+        "structured_job": {
+            "title": unrelated.title,
+            "role_category": "Sales",
+            "job_type": "实习",
+            "location": "北京",
+            "education_requirement": "本科及以上",
+            "experience_requirement": "经验不限",
+            "required_skills": [],
+            "preferred_skills": [],
+            "responsibilities": ["负责商家拓展和运营"],
+            "benefits": [],
+        },
+        "requirements": {
+            "education": "本科及以上",
+            "experience": "经验不限",
+            "responsibilities": ["负责商家拓展和运营"],
+            "qualifications": ["沟通能力良好"],
+            "preferred_qualifications": [],
+        },
+    }
+    await _index(rag_session, relevant, unrelated)
+
+    result = await JobKnowledgeRAG(rag_session, MockLLMProvider()).search(
+        JobKnowledgeSearchRequest(
+            query="我想学习 AI Agent，需要掌握哪些技术栈？",
+            retrieval_mode="full_text",
+            top_k=10,
+        )
+    )
+
+    assert result.sample_count == 1
+    assert {citation.job_id for citation in result.citations} == {relevant.id}
 
 
 @pytest.mark.asyncio

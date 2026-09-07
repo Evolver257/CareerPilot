@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
 from app.platforms.boss.detectors import ALLOWED_BOSS_HOSTS
@@ -11,6 +12,10 @@ from app.services.jobs import JobImportResult, JobService
 
 class BossVisibleImportError(ValueError):
     """Raised when a visible-page BOSS import is outside the safe boundary."""
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def _approved_url(value: str, *, field: str) -> str:
@@ -28,6 +33,8 @@ async def import_visible_jobs(
     created = 0
     duplicates = 0
     updated = 0
+    indexed_job_ids = []
+    collected_at = _utc_now()
     validated_jobs = [
         (item, _approved_url(str(item.job_url), field="job_url")) for item in payload.jobs
     ]
@@ -52,7 +59,8 @@ async def import_visible_jobs(
             "tags": item.tags,
             "description_source": item.description_source,
             "detail_length": len(item.description),
-            "captured_at": payload.captured_at.isoformat() if payload.captured_at else None,
+            "captured_at": collected_at.isoformat(),
+            "client_captured_at": payload.captured_at.isoformat() if payload.captured_at else None,
         }
         result: JobImportResult = await service.import_jobs(
             JobImportRequest(
@@ -64,7 +72,8 @@ async def import_visible_jobs(
                 location=item.location,
                 source_url=job_url,
                 raw_data=raw_data,
-            )
+            ),
+            auto_index=False,
         )
         job = result.jobs[0]
         previous_source = (job.raw_data or {}).get("description_source")
@@ -85,9 +94,19 @@ async def import_visible_jobs(
                 title=item.title,
                 location=item.location,
                 source_url=job_url,
+                auto_index=False,
             )
             updated += 1
+            indexed_job_ids.append(job.id)
+        elif result.created:
+            indexed_job_ids.append(job.id)
+        job = await service.mark_collected(
+            job.id,
+            collected_at=collected_at,
+            source_page=page_url,
+        )
         imported.append(job)
         created += result.created
         duplicates += result.duplicates
+    await service.enqueue_knowledge_index(indexed_job_ids)
     return imported, created, duplicates, updated

@@ -12,6 +12,7 @@ import {
   rejectCampaignJobs,
   type CampaignDetail,
 } from "../../../lib/api";
+import { formatJobCollectionTime, isJobFreshForAutoDelivery } from "../../../lib/job-freshness";
 
 const statusLabels: Record<string, string> = {
   DRAFT: "草稿",
@@ -26,6 +27,7 @@ const statusLabels: Record<string, string> = {
   QUEUED: "已排队",
   EXECUTING: "执行中",
   SUBMITTED: "已投递",
+  MANUAL_REQUIRED: "需手动投递",
   CAPTCHA_REQUIRED: "需要验证码",
   LOGIN_REQUIRED: "需要登录",
   PLATFORM_LIMIT: "平台限制",
@@ -59,29 +61,43 @@ export default function CampaignDetailPage() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const campaignStatus = campaign?.status;
 
   useEffect(() => {
+    let current = true;
+    setLoading(true);
+    setError(null);
+    setSelected(new Set());
     getCampaign(campaignId)
-      .then(setCampaign)
-      .catch((reason) => setError(reason instanceof Error ? reason.message : "Campaign 加载失败。"))
-      .finally(() => setLoading(false));
+      .then((value) => { if (current) setCampaign(value); })
+      .catch((reason) => { if (current) { setCampaign(null); setError(reason instanceof Error ? reason.message : "计划加载失败。"); } })
+      .finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
   }, [campaignId]);
 
   useEffect(() => {
-    if (campaign?.status !== "RANKING") return;
+    if (!campaignStatus || !["RANKING", "RUNNING", "PAUSED", "WAITING_APPROVAL"].includes(campaignStatus)) return;
+    let current = true;
+    let pending = false;
     const timer = window.setInterval(() => {
+      if (pending) return;
+      pending = true;
       getCampaign(campaignId)
         .then((next) => {
+          if (!current) return;
           setCampaign(next);
           setError(null);
         })
-        .catch((reason) => setError(reason instanceof Error ? reason.message : "排名进度刷新失败。"));
-    }, 1500);
-    return () => window.clearInterval(timer);
-  }, [campaign?.status, campaignId]);
+        .catch((reason) => { if (current) setError(reason instanceof Error ? reason.message : "计划进度刷新失败。"); })
+        .finally(() => { pending = false; });
+    }, campaignStatus === "RANKING" ? 1500 : 4000);
+    return () => { current = false; window.clearInterval(timer); };
+  }, [campaignStatus, campaignId]);
 
   const waitingJobIds = useMemo(
-    () => campaign?.candidate_jobs.filter((item) => item.status === "WAITING_APPROVAL").map((item) => item.job_id) ?? [],
+    () => campaign?.candidate_jobs.filter((item) => (
+      item.status === "WAITING_APPROVAL" && isJobFreshForAutoDelivery(item.job)
+    )).map((item) => item.job_id) ?? [],
     [campaign],
   );
 
@@ -149,6 +165,10 @@ export default function CampaignDetailPage() {
   const canCancel = !["COMPLETED", "CANCELLED"].includes(campaign.status);
   const canApprove = ["WAITING_APPROVAL", "RUNNING"].includes(campaign.status);
   const rankingRun = campaign.ranking_run;
+  const curated = campaign.filters.selection_mode === "user_curated";
+  const submittedCount = campaign.candidate_jobs.filter((item) => item.application?.status === "SUBMITTED").length;
+  const readyCount = campaign.candidate_jobs.filter((item) => item.application?.status === "QUEUED" && ["boss", "zhaopin"].includes(item.job.platform) && isJobFreshForAutoDelivery(item.job)).length;
+  const staleCandidateCount = campaign.candidate_jobs.filter((item) => !isJobFreshForAutoDelivery(item.job)).length;
 
   return (
     <div className="mx-auto max-w-7xl space-y-8">
@@ -157,7 +177,7 @@ export default function CampaignDetailPage() {
           <Link className="text-sm font-medium text-indigo-700" href="/campaigns">← 返回投递计划</Link>
           <p className="eyebrow mt-5">投递计划详情</p>
           <div className="mt-3 flex flex-wrap items-center gap-3"><h1 className="text-3xl font-semibold tracking-tight">{campaign.name}</h1>{campaign.scoring_mode === "llm" && <LlmDeepScoreBadge kind="plan" />}</div>
-          <p className="mt-3 text-slate-500">最低 {campaign.min_score} 分 · 最多 {campaign.max_jobs} 个职位 · {campaign.scoring_mode === "llm" ? "模型深度复核" : "快速评分"} · {campaign.target_cities.join("、") || "不限城市"}</p>
+          <p className="mt-3 text-slate-500">{curated ? `手动选择的 ${campaign.candidate_count} 个岗位 · 未重新排名` : `最低 ${campaign.min_score} 分 · 最多 ${campaign.max_jobs} 个职位 · ${campaign.scoring_mode === "llm" ? "模型深度复核" : "快速评分"}`} · 已投递 {submittedCount} 个</p>
         </div>
         <div className="flex flex-wrap gap-2">
           {campaign.status === "DRAFT" && <button className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white disabled:opacity-50" disabled={actionLoading !== null} onClick={() => void runAction("start")} type="button">{actionLoading === "start" ? "搜索并排名中…" : "启动计划"}</button>}
@@ -169,6 +189,12 @@ export default function CampaignDetailPage() {
       </header>
 
       {error && <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-800">{error}</div>}
+      {campaign.status === "RUNNING" && readyCount > 0 && <section className="panel flex flex-wrap items-center justify-between gap-4 border-indigo-200">
+        <div><h2 className="font-semibold">{readyCount} 个岗位已确认，可以投递</h2><p className="mt-2 text-sm text-slate-500">进入执行页确认后，通过一个标签页逐个投递。当前页面不会自动发送。</p></div>
+        <Link className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-medium text-white" href={`/delivery?campaign=${campaign.id}`}>投递已排队岗位 →</Link>
+      </section>}
+      {submittedCount > 0 && <p className="text-sm text-slate-500">已投递 {submittedCount}/{campaign.candidate_count} 个岗位。计划完成表示其余岗位已处理或取消，不代表全部成功。<Link className="ml-2 text-indigo-700" href={`/delivery?campaign=${campaign.id}`}>查看执行记录 →</Link></p>}
+      {staleCandidateCount > 0 && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-800">{staleCandidateCount} 个候选职位的最近采集时间已超过 3 天，已默认排除在批准和自动投递之外。重新检索到相同岗位后，刷新本页即可恢复选择。</div>}
 
       {rankingRun && ["RANKING", "FAILED"].includes(campaign.status) && (
         <section className="panel">
@@ -228,13 +254,14 @@ export default function CampaignDetailPage() {
               <tbody className="divide-y divide-slate-100">
                 {campaign.candidate_jobs.map((item) => {
                   const waiting = item.status === "WAITING_APPROVAL";
+                  const freshForDelivery = isJobFreshForAutoDelivery(item.job);
                   const history = item.application?.metadata.state_history ?? [];
                   return (
                     <tr className="align-top" key={item.id}>
-                      <td className="px-5 py-4"><input aria-label={`选择 ${item.job.title}`} checked={selected.has(item.job_id)} disabled={!waiting || !canApprove} onChange={() => toggleJob(item.job_id)} type="checkbox" /></td>
+                      <td className="px-5 py-4"><input aria-label={`选择 ${item.job.title}`} checked={selected.has(item.job_id)} disabled={!waiting || !canApprove || !freshForDelivery} onChange={() => toggleJob(item.job_id)} type="checkbox" /></td>
                       <td className="px-5 py-4 font-semibold">#{item.rank}</td>
-                      <td className="px-5 py-4"><Link className="font-semibold text-indigo-700" href={`/jobs/${item.job_id}`}>{item.job.title}</Link><p className="mt-1 text-xs text-slate-500">{item.job.location ?? "地点未注明"} · {item.job.platform}</p></td>
-                      <td className="px-5 py-4 text-lg font-semibold">{item.score.toFixed(1)}</td>
+                      <td className="px-5 py-4"><Link className="font-semibold text-indigo-700" href={`/jobs/${item.job_id}`}>{item.job.title}</Link><p className="mt-1 text-xs text-slate-500">{item.job.location ?? "地点未注明"} · {item.job.platform}</p>{!freshForDelivery && <p className="mt-2 text-xs font-medium text-amber-700">采集已过期 · {formatJobCollectionTime(item.job)}</p>}</td>
+                      <td className="px-5 py-4 font-semibold">{curated ? <span className="text-xs text-slate-500">未评分</span> : item.score.toFixed(1)}</td>
                       <td className="px-5 py-4"><span className={`rounded-full px-3 py-1 text-xs font-medium ${waiting ? "bg-amber-50 text-amber-700" : item.status === "REJECTED" ? "bg-slate-100 text-slate-500" : "bg-indigo-50 text-indigo-700"}`}>{statusLabels[item.status] ?? item.status}</span></td>
                       <td className="px-5 py-4">
                         <details><summary className="cursor-pointer text-xs font-medium text-slate-600">{history.length} 个状态事件</summary><ol className="mt-3 space-y-2 text-xs text-slate-500">{history.map((event, index) => <li key={`${event.at}-${index}`}><span className="font-medium text-slate-700">{event.to}</span> · {event.event}</li>)}</ol></details>

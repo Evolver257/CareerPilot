@@ -18,6 +18,7 @@ from app.services.application_state import ApplicationStateMachine, CampaignStat
 from app.services.llm_settings import LLMSettingsService
 from app.services.matching import MatchingResumeNotFoundError
 from app.services.ranking import RankingService
+from app.services.work_queue import enqueue_work
 
 
 class RankingRunNotFoundError(ValueError):
@@ -65,6 +66,9 @@ class RankingRunService:
             request_payload=resolved_payload.model_dump(mode="json", exclude_none=True),
         )
         self.session.add(run)
+        await self.session.flush()
+        if get_settings().independent_worker:
+            await enqueue_work(self.session, "ranking", run.id)
         await self.session.commit()
         await self.session.refresh(run)
         return run
@@ -347,9 +351,7 @@ async def execute_ranking_run(run_id: UUID) -> None:
         service = RankingRunService(session)
         try:
             provider = await LLMSettingsService(session).get_runtime_provider()
-            embedding_provider = await LLMSettingsService(
-                session
-            ).get_runtime_embedding_provider()
+            embedding_provider = await LLMSettingsService(session).get_runtime_embedding_provider()
             await service.execute(run_id, provider, embedding_provider)
         except asyncio.CancelledError:
             raise
@@ -358,6 +360,8 @@ async def execute_ranking_run(run_id: UUID) -> None:
 
 
 def schedule_ranking_run(run_id: UUID) -> None:
+    if get_settings().independent_worker:
+        return  # Dispatch was committed atomically with RankingRun.create.
     existing = _active_ranking_tasks.get(run_id)
     if existing is not None and not existing.done():
         return
@@ -374,6 +378,9 @@ def stop_ranking_run(run_id: UUID) -> None:
 
 async def recover_interrupted_ranking_runs() -> list[UUID]:
     """Requeue durable runs after restart; completed score rows are reused as cache."""
+
+    if get_settings().independent_worker:
+        return []  # Only the lock-owning worker may recover a running job.
 
     now = datetime.now(UTC)
     async with SessionLocal() as session:

@@ -138,6 +138,31 @@ export function isBossPageUrl(url = window.location.href): boolean {
   }
 }
 
+export function isBossJobSearchUrl(url = window.location.href): boolean {
+  try {
+    const parsed = new URL(url);
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    return BOSS_HOSTS.has(parsed.hostname.toLocaleLowerCase())
+      && pathname === "/web/geek/jobs"
+      && Boolean(parsed.searchParams.get("query")?.trim());
+  } catch {
+    return false;
+  }
+}
+
+export function matchesBossJobSearch(
+  url: string,
+  requirements: string,
+  city: string,
+): boolean {
+  if (!isBossJobSearchUrl(url)) return false;
+  const actual = new URL(url);
+  const expected = new URL(buildBossSearchUrl(requirements, city));
+  if (actual.searchParams.get("query")?.trim() !== expected.searchParams.get("query")?.trim()) return false;
+  const expectedCity = expected.searchParams.get("city");
+  return !expectedCity || actual.searchParams.get("city") === expectedCity;
+}
+
 export function detectBossPageState(): BossPageState {
   if (!isBossPageUrl()) return "UNKNOWN_STATE";
   const title = normalize(document.title).toLocaleLowerCase();
@@ -157,7 +182,7 @@ export function detectBossPageState(): BossPageState {
   if (["操作频繁", "访问频繁", "platform limit"].some((marker) => content.includes(marker))) return "PLATFORM_LIMIT";
   if (["安全验证", "风险验证", "请完成验证", "拖动滑块", "人机校验", "异常访问", "账号存在风险", "风险提示", "risk control verification", "security verification"].some((marker) => content.includes(marker))) return "RISK_CONTROL";
   if (hasJobSurface) return "READY";
-  if (["职位搜索", "职位详情", "立即沟通", "立即投递", "薪资"].some((marker) => pageText.includes(marker))) return "READY";
+  if (["职位搜索", "职位详情", "立即沟通", "立即投递", "立即网申", "薪资"].some((marker) => pageText.includes(marker))) return "READY";
   return "UNKNOWN_STATE";
 }
 
@@ -208,6 +233,7 @@ export function extractVisibleBossJobs(): BossVisibleJob[] {
 export async function extractVisibleBossJobsWithDetails(
   maxJobs = 20,
   onProgress?: (job: BossVisibleJob, collectedCount: number, targetCount: number) => void | Promise<void>,
+  shouldStop?: () => boolean | Promise<boolean>,
 ): Promise<BossVisibleJob[]> {
   const limit = Math.min(Math.max(maxJobs, 1), MAX_BOSS_BATCH_JOBS);
   const maxScrollRounds = Math.max(MIN_SCROLL_ROUNDS, limit * MAX_SCROLL_ROUNDS_PER_JOB);
@@ -215,11 +241,13 @@ export async function extractVisibleBossJobsWithDetails(
   let stagnantScrolls = 0;
 
   for (let round = 0; round < maxScrollRounds && collected.size < limit; round += 1) {
+    if (await shouldStop?.()) break;
     if (detectBossPageState() !== "READY") break;
     const cards = visibleJobCards();
     if (cards.length === 0) break;
 
     for (const card of cards) {
+      if (await shouldStop?.()) break;
       if (collected.size >= limit) break;
       const job = extractCard(card);
       if (!job || collected.has(job.external_job_id)) continue;
@@ -227,6 +255,7 @@ export async function extractVisibleBossJobsWithDetails(
       let enriched = job;
       if (job.description_source !== "detail_panel" && card.isConnected) {
         await paceCardIntoView(card);
+        if (await shouldStop?.()) break;
         if (detectBossPageState() !== "READY") break;
         const clickTarget = card.querySelector<HTMLElement>(".job-card-box") ?? card;
         clickTarget.click();
@@ -241,9 +270,11 @@ export async function extractVisibleBossJobsWithDetails(
       }
       collected.set(enriched.external_job_id, enriched);
       await onProgress?.(enriched, collected.size, limit);
+      if (await shouldStop?.()) break;
       await wait(CARD_PACING_MS);
     }
 
+    if (await shouldStop?.()) break;
     if (collected.size >= limit || detectBossPageState() !== "READY") break;
     const knownJobIds = new Set(collected.keys());
     const scrollTarget = findJobListScrollTarget(cards);

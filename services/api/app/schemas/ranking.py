@@ -29,7 +29,7 @@ class JobRankingRequest(BaseModel):
     top_k_embedding: int | None = Field(default=None, ge=1, le=500)
     top_k_rerank: int | None = Field(default=None, ge=1, le=500)
     top_k_llm: int | None = Field(default=None, ge=1, le=500)
-    final_top_k: int | None = Field(default=None, ge=1, le=100)
+    final_top_k: int | None = Field(default=None, ge=1, le=200)
     scoring_mode: RankingScoringMode = "llm"
 
 

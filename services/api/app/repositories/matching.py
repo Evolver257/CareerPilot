@@ -17,7 +17,9 @@ class MatchingRepository:
     async def get_job(self, job_id: UUID) -> Job | None:
         return await self.session.scalar(
             select(Job)
-            .options(selectinload(Job.skills), selectinload(Job.company))
+            .options(
+                selectinload(Job.skills), selectinload(Job.company), selectinload(Job.requirements)
+            )
             .where(Job.id == job_id)
         )
 
@@ -28,7 +30,11 @@ class MatchingRepository:
             (
                 await self.session.scalars(
                     select(Job)
-                    .options(selectinload(Job.skills), selectinload(Job.company))
+                    .options(
+                        selectinload(Job.skills),
+                        selectinload(Job.company),
+                        selectinload(Job.requirements),
+                    )
                     .where(Job.id.in_(job_ids))
                 )
             ).all()
@@ -70,7 +76,7 @@ class MatchingRepository:
         if input_fingerprint is not None:
             query = query.where(JobScore.input_fingerprint == input_fingerprint)
         return await self.session.scalar(
-            query
+            query.options(selectinload(JobScore.requirement_matches))
             .order_by(JobScore.created_at.desc())
             .limit(1)
         )

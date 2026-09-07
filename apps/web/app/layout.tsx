@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 
 import "./globals.css";
 import { Navigation } from "../components/navigation";
+import { SectionNavigation } from "../components/section-navigation";
 
 export const metadata: Metadata = {
   title: "CareerPilot",
@@ -25,9 +26,9 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
       <body>
-        <div className="min-h-screen lg:flex">
+        <div className="app-shell min-h-screen lg:flex">
           <Navigation />
-          <main className="min-w-0 flex-1 p-5 sm:p-8 lg:p-10">{children}</main>
+          <main className="app-main min-w-0 flex-1 p-5 sm:p-8 lg:p-10"><SectionNavigation />{children}</main>
         </div>
       </body>
     </html>

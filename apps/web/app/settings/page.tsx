@@ -2,8 +2,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+import { MemorySettingsPanel } from "../../components/memory-settings-panel";
+import { MCPSettingsPanel } from "../../components/mcp-settings-panel";
+
 import {
   deleteLLMProvider,
+  getRecruitmentPlatforms,
   getLLMSettings,
   saveLLMProvider,
   setActiveLLMProvider,
@@ -12,6 +16,7 @@ import {
   type ActiveLLMProvider,
   type LLMProviderName,
   type LLMSettings,
+  type RecruitmentPlatform,
 } from "../../lib/api";
 
 const providerDefaults: Record<LLMProviderName, { label: string; model: string; baseUrl: string }> = {
@@ -44,6 +49,7 @@ export default function SettingsPage() {
   const [maintaining, setMaintaining] = useState<ActiveLLMProvider | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [recruitmentPlatforms, setRecruitmentPlatforms] = useState<RecruitmentPlatform[]>([]);
 
   const configuredProvider = useMemo(
     () => settings?.providers.find((item) => item.provider === provider),
@@ -53,6 +59,7 @@ export default function SettingsPage() {
 
   useEffect(() => {
     void loadSettings();
+    getRecruitmentPlatforms().then(setRecruitmentPlatforms).catch(() => setRecruitmentPlatforms([]));
   }, []);
 
   useEffect(() => {
@@ -186,6 +193,9 @@ export default function SettingsPage() {
       {error && <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-800">{error}</div>}
       {notice && <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-800">{notice}</div>}
 
+      <MemorySettingsPanel />
+      <MCPSettingsPanel />
+
       <section className="panel">
         <div>
           <p className="eyebrow">添加 Provider</p>
@@ -228,6 +238,22 @@ export default function SettingsPage() {
             {testingProvider === "form" ? "测试中…" : "测试连接"}
           </button>
           <span className="text-sm text-slate-500">测试不会保存或修改配置；有已保存 key 时可直接测试。</span>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div>
+          <p className="eyebrow">招聘平台</p>
+          <h2 className="mt-2 text-xl font-semibold">已接入的平台</h2>
+          <p className="mt-2 text-sm leading-6 text-slate-500">平台连接使用浏览器当前可见页面；账号、Cookie 和验证码仍由用户在招聘网站完成。</p>
+        </div>
+        <div className="mt-5 grid gap-3 md:grid-cols-2">
+          {recruitmentPlatforms.map((item) => (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4" key={item.id}>
+              <div className="flex items-center justify-between gap-3"><p className="font-medium text-slate-800">{item.name}</p><span className="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-700">{item.enabled ? "已启用" : "未启用"}</span></div>
+              <p className="mt-2 text-xs text-slate-500">{item.browser_session_required ? "需要浏览器可见页面" : "支持服务端搜索"} · {Object.entries(item.capabilities).filter(([, enabled]) => enabled).map(([key]) => key).join("、")}</p>
+            </div>
+          ))}
         </div>
       </section>
 

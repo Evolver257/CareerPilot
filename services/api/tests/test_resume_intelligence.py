@@ -156,7 +156,7 @@ Python, FastAPI, RAG, PostgreSQL, Docker
     resume_id = payload["id"]
     chunks = await client.get(f"/api/resumes/{resume_id}/chunks")
     assert chunks.status_code == 200
-    assert chunks.json()[0]["embedding_dimensions"] == 384
+    assert chunks.json()[0]["embedding_dimensions"] == 1024
 
     parsed = await client.post(f"/api/resumes/{resume_id}/parse")
     assert parsed.status_code == 200

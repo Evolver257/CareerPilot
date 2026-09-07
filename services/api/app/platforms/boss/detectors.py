@@ -73,7 +73,7 @@ class BossZhipinDetector:
         if any(marker in content for marker in ("页面不存在", "dom changed")):
             raise DomChangedError("BOSS page structure changed; user review is required")
 
-        ready_markers = ("职位搜索", "职位详情", "立即沟通", "立即投递", "薪资")
+        ready_markers = ("职位搜索", "职位详情", "立即沟通", "立即投递", "立即网申", "薪资")
         if not any(marker in content for marker in ready_markers):
             raise UnknownStateError("BOSS page state is not recognized safely")
         return BossPageState.READY

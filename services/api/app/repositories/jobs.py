@@ -62,7 +62,7 @@ class JobRepository:
         jobs = list(
             (
                 await self.session.scalars(
-                    query.order_by(Job.created_at.desc())
+                    query.order_by(Job.last_collected_at.desc(), Job.id)
                     .offset((page - 1) * page_size)
                     .limit(page_size)
                 )
@@ -90,7 +90,7 @@ class JobRepository:
             return await self.session.scalar(
                 select(Job)
                 .options(selectinload(Job.skills))
-                .where(Job.content_hash == content_hash)
+                .where(Job.platform == platform, Job.content_hash == content_hash)
             )
         return None
 

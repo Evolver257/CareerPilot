@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -16,13 +17,14 @@ from sqlalchemy import Float, case, cast, distinct, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
-from app.llm.provider import LLMProvider
+from app.llm.provider import LLMProvider, embed_texts
 from app.models.entities import (
     Company,
     Job,
     JobKnowledgeChunk,
     JobKnowledgeDocument,
     JobSkillFact,
+    KnowledgeIndexRun,
     Resume,
     SkillTaxonomy,
 )
@@ -38,7 +40,12 @@ from app.schemas.knowledge_search import (
     KnowledgeSkillDemand,
     ResumeKnowledgeEvidence,
 )
-from app.services.job_knowledge import JOB_KNOWLEDGE_VERSION, canonicalize_skill
+from app.services.job_knowledge import (
+    JOB_KNOWLEDGE_VERSION,
+    SKILL_ALIASES,
+    canonicalize_skill,
+    normalize_experience_requirement,
+)
 from app.services.resume_rag import ResumeRAG
 
 
@@ -67,7 +74,9 @@ class _ChunkHit:
 _SEARCH_CACHE: OrderedDict[str, tuple[float, JobKnowledgeSearchResponse]] = OrderedDict()
 _SEARCH_CACHE_TTL_SECONDS = 60.0
 _SEARCH_CACHE_MAX_SIZE = 128
-_RRF_K = 60.0
+_QUERY_EMBED_CACHE: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()
+_QUERY_EMBED_CACHE_TTL_SECONDS = 300.0
+_QUERY_EMBED_CACHE_MAX_SIZE = 512
 _SECTION_WEIGHTS = {
     "required_skills": 1.0,
     "requirements": 0.98,
@@ -78,6 +87,7 @@ _SECTION_WEIGHTS = {
     "salary_benefits": 0.7,
     "preferred_skills": 0.68,
     "business_domain": 0.65,
+    "source_context": 0.55,
     "other": 0.45,
 }
 _SALARY_UNIT_LABELS = {
@@ -85,10 +95,57 @@ _SALARY_UNIT_LABELS = {
     "cny_month_k": "K/月",
     "cny_year_wan": "万元/年",
 }
+_QUERY_STOP_PHRASES = (
+    "我想了解",
+    "我想学习",
+    "想学习",
+    "需要掌握哪些",
+    "需要掌握",
+    "有哪些",
+    "有什么",
+    "怎么样",
+    "如何",
+    "请问",
+    "相关岗位",
+    "岗位需求",
+    "岗位要求",
+    "任职条件",
+    "技术栈",
+    "学习方向",
+    "学习",
+    "方向",
+    "还有",
+    "其他",
+    "建议",
+    "继续",
+    "吗",
+    "呢",
+)
+_DOMAIN_QUERY_TERMS = (
+    "人工智能",
+    "机器学习",
+    "深度学习",
+    "自然语言处理",
+    "计算机视觉",
+    "大模型",
+    "智能体",
+    "机器人控制",
+    "控制算法",
+    "机器人",
+    "后端开发",
+    "前端开发",
+    "全栈",
+    "数据分析",
+    "数据工程",
+    "产品经理",
+    "网络安全",
+    "算法",
+)
 
 
 def clear_knowledge_search_cache() -> None:
     _SEARCH_CACHE.clear()
+    _QUERY_EMBED_CACHE.clear()
 
 
 def _now() -> datetime:
@@ -115,39 +172,65 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
 
 
 def _tokens(text: str) -> set[str]:
-    normalized = re.sub(r"\s+", "", text.casefold())
+    normalized = re.sub(r"\s+", " ", text.casefold()).strip()
     tokens = {
-        token
-        for token in re.findall(r"[a-z0-9][a-z0-9+#._/-]*", normalized)
-        if len(token) > 1
+        token for token in re.findall(r"[a-z0-9][a-z0-9+#._/-]*", normalized) if len(token) > 1
     }
     for segment in re.findall(r"[\u3400-\u9fff]+", normalized):
-        tokens.update(
-            f"zh2:{segment[index:index + 2]}" for index in range(len(segment) - 1)
-        )
+        tokens.update(f"zh2:{segment[index : index + 2]}" for index in range(len(segment) - 1))
         if len(segment) >= 3:
-            tokens.update(
-                f"zh3:{segment[index:index + 3]}"
-                for index in range(len(segment) - 2)
-            )
+            tokens.update(f"zh3:{segment[index : index + 3]}" for index in range(len(segment) - 2))
     return tokens
 
 
 def _query_terms(query: str) -> list[str]:
     normalized = re.sub(r"\s+", " ", query.casefold()).strip()
-    terms: list[str] = [normalized]
-    terms.extend(re.findall(r"[a-z0-9][a-z0-9+#._/-]*", normalized))
-    for segment in re.findall(r"[\u3400-\u9fff]{2,}", normalized):
-        if segment not in terms:
-            terms.append(segment)
-        terms.extend(segment[index:index + 2] for index in range(len(segment) - 1))
-        if len(segment) >= 3:
-            terms.extend(segment[index:index + 3] for index in range(len(segment) - 2))
-    return list(dict.fromkeys(term for term in terms if len(term.strip()) >= 2))[:32]
+    terms: list[str] = []
+    matched_canonicals: set[str] = set()
+
+    for alias, canonical in sorted(SKILL_ALIASES.items(), key=lambda item: -len(item[0])):
+        canonical_key = canonical.casefold()
+        if canonical_key in matched_canonicals:
+            continue
+        if re.search(r"[a-z0-9]", alias):
+            if re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", normalized):
+                terms.extend((alias, canonical))
+                matched_canonicals.add(canonical_key)
+        elif alias in normalized:
+            terms.extend((alias, canonical))
+            matched_canonicals.add(canonical_key)
+
+    if not terms:
+        terms.extend(
+            token for token in re.findall(r"[a-z0-9][a-z0-9+#._/-]*", normalized) if len(token) > 1
+        )
+    terms.extend(term for term in _DOMAIN_QUERY_TERMS if term in normalized)
+
+    if not terms:
+        for segment in re.findall(r"[\u3400-\u9fff]{2,}", normalized):
+            cleaned = segment
+            for phrase in _QUERY_STOP_PHRASES:
+                cleaned = cleaned.replace(phrase, " ")
+            terms.extend(part for part in cleaned.split() if len(part) >= 2)
+
+    return list(
+        dict.fromkeys(
+            term.strip()
+            for term in terms
+            if len(term.strip()) >= 2 and term.strip() not in _QUERY_STOP_PHRASES
+        )
+    )[:20]
+
+
+def extract_query_terms(query: str) -> list[str]:
+    """Public, stable adapter used by query understanding and retrieval."""
+    return _query_terms(query)
 
 
 def _lexical_score(query: str, job: Job, company_name: str | None, content: str) -> float:
-    query_tokens = _tokens(query)
+    query_terms = _query_terms(query)
+    concepts = " ".join(query_terms) or query
+    query_tokens = _tokens(concepts)
     if not query_tokens:
         return 0.0
     title_tokens = _tokens(job.title)
@@ -157,10 +240,12 @@ def _lexical_score(query: str, job: Job, company_name: str | None, content: str)
     title_overlap = len(query_tokens & title_tokens) / max(1, len(query_tokens))
     company_overlap = len(query_tokens & company_tokens) / max(1, len(query_tokens))
     phrase_bonus = 0.0
-    query_lower = query.casefold()
-    if query_lower in job.title.casefold():
+    title_lower = job.title.casefold()
+    content_lower = content.casefold()
+    phrase_terms = [term.casefold() for term in query_terms]
+    if any(term in title_lower for term in phrase_terms):
         phrase_bonus = 0.35
-    elif query_lower in content.casefold():
+    elif any(term in content_lower for term in phrase_terms):
         phrase_bonus = 0.15
     return _clamp(0.55 * overlap + 0.3 * title_overlap + 0.15 * company_overlap + phrase_bonus)
 
@@ -198,23 +283,7 @@ def _normalize_education(value: str | None) -> str:
 
 
 def _normalize_experience(value: str | None) -> str:
-    text = (value or "").strip().lower()
-    if not text:
-        return "未注明"
-    if any(token in text for token in ("不限", "无经验", "应届", "在校", "实习")):
-        return "应届/经验不限"
-    years = [int(item) for item in re.findall(r"(\d+)\s*年", text)]
-    if years:
-        low = min(years)
-        high = max(years)
-        if high <= 1:
-            return "1年以内"
-        if low <= 3:
-            return "1-3年"
-        if low <= 5:
-            return "3-5年"
-        return "5年以上"
-    return text[:30]
+    return normalize_experience_requirement(value) or "未注明"
 
 
 def _percentile(values: list[float], fraction: float) -> float:
@@ -276,7 +345,126 @@ class JobKnowledgeRAG:
         self.settings = settings or get_settings()
         self.matching_repository = MatchingRepository(session)
 
-    async def search(self, request: JobKnowledgeSearchRequest) -> JobKnowledgeSearchResponse:
+    async def knowledge_update_in_progress(self) -> bool:
+        """Return whether an indexing run is active without touching embeddings."""
+
+        run_id = await self.session.scalar(
+            select(KnowledgeIndexRun.id)
+            .where(KnowledgeIndexRun.status.in_(["PENDING", "RUNNING"]))
+            .limit(1)
+        )
+        return run_id is not None
+
+    @staticmethod
+    def empty_response(
+        request: JobKnowledgeSearchRequest,
+        *,
+        warnings: list[str] | None = None,
+    ) -> JobKnowledgeSearchResponse:
+        response_warnings = list(warnings or [])
+        statistics = JobKnowledgeStatistics(sample_count=0, warnings=response_warnings.copy())
+        return JobKnowledgeSearchResponse(
+            query=request.query.strip(),
+            retrieval_mode="full_text",
+            knowledge_version=JOB_KNOWLEDGE_VERSION,
+            generated_at=_now(),
+            sample_count=0,
+            filters=request.filters,
+            statistics=statistics,
+            warnings=response_warnings,
+        )
+
+    async def embed_queries(self, queries: list[str]) -> dict[str, list[float]]:
+        """Embed unique query texts in one batch and cache the vectors briefly."""
+
+        provider = self.embedding_provider
+        if provider is None:
+            raise KnowledgeEmbeddingUnavailableError(
+                "当前检索模式需要 Embedding Provider，但系统未配置可用 Provider。"
+            )
+        requested_queries = [query for query in queries if query.strip()]
+        normalized_queries: dict[str, str] = {}
+        for query in requested_queries:
+            normalized = re.sub(r"\s+", " ", query.casefold()).strip()
+            normalized_queries.setdefault(normalized, query)
+        unique_queries = list(normalized_queries.values())
+        if not unique_queries:
+            return {}
+        signature = str(getattr(provider, "embedding_signature", "") or "")
+        provider_name = str(getattr(provider, "provider_name", type(provider).__name__))
+        cache_prefix = json.dumps(
+            [
+                provider_name,
+                signature,
+                self.settings.embedding_model,
+                self.settings.embedding_dimensions,
+            ],
+            ensure_ascii=False,
+        )
+        vectors_by_normalized: dict[str, list[float]] = {}
+        missing: list[tuple[str, str]] = []
+        now = time.monotonic()
+        for query in unique_queries:
+            normalized = re.sub(r"\s+", " ", query.casefold()).strip()
+            cache_key = f"{cache_prefix}:{normalized}"
+            cached = _QUERY_EMBED_CACHE.get(cache_key)
+            if cached is not None and now - cached[0] <= _QUERY_EMBED_CACHE_TTL_SECONDS:
+                _QUERY_EMBED_CACHE.move_to_end(cache_key)
+                vectors_by_normalized[normalized] = list(cached[1])
+                continue
+            if cached is not None:
+                _QUERY_EMBED_CACHE.pop(cache_key, None)
+            missing.append((query, cache_key))
+        if missing:
+            texts = [query for query, _ in missing]
+            try:
+                encode = getattr(provider, "encode", None)
+                if provider_name == "sentence_transformers" and callable(encode):
+                    # LocalSemanticProvider uses a query prompt for Qwen. Its
+                    # generic embed_many method intentionally uses document
+                    # mode, so preserve query semantics for this batch.
+                    vectors = await asyncio.to_thread(encode, texts, is_query=True)
+                else:
+                    vectors = await embed_texts(
+                        provider,
+                        texts,
+                        model=self.settings.embedding_model,
+                    )
+            except Exception as exc:
+                raise KnowledgeEmbeddingUnavailableError(
+                    "向量检索失败，请检查 Embedding Provider 配置后重试。"
+                ) from exc
+            if len(vectors) != len(missing):
+                raise KnowledgeRetrievalError(
+                    f"查询向量数量不匹配：期望 {len(missing)}，实际 {len(vectors)}"
+                )
+            for (query, cache_key), vector in zip(missing, vectors, strict=True):
+                normalized_vector = list(vector)
+                if len(normalized_vector) != self.settings.embedding_dimensions:
+                    raise KnowledgeRetrievalError(
+                        "向量维度不兼容："
+                        f"岗位知识库要求 {self.settings.embedding_dimensions} 维，"
+                        f"当前为 {len(normalized_vector)} 维。"
+                    )
+                _QUERY_EMBED_CACHE[cache_key] = (now, normalized_vector)
+                _QUERY_EMBED_CACHE.move_to_end(cache_key)
+                normalized_query = re.sub(r"\s+", " ", query.casefold()).strip()
+                vectors_by_normalized[normalized_query] = normalized_vector
+            while len(_QUERY_EMBED_CACHE) > _QUERY_EMBED_CACHE_MAX_SIZE:
+                _QUERY_EMBED_CACHE.popitem(last=False)
+        return {
+            query: list(vectors_by_normalized[normalized])
+            for query in requested_queries
+            for normalized in [re.sub(r"\s+", " ", query.casefold()).strip()]
+            if normalized in vectors_by_normalized
+        }
+
+    async def search(
+        self,
+        request: JobKnowledgeSearchRequest,
+        *,
+        query_embedding: list[float] | None = None,
+    ) -> JobKnowledgeSearchResponse:
         if (
             request.filters.salary_floor is not None
             and request.filters.salary_ceiling is not None
@@ -284,26 +472,46 @@ class JobKnowledgeRAG:
         ):
             raise KnowledgeRetrievalError("薪资下限不能高于薪资上限")
 
+        indexing_in_progress = await self.knowledge_update_in_progress()
+        if indexing_in_progress:
+            request = request.model_copy(
+                update={
+                    "retrieval_mode": "full_text",
+                    "full_text_top_k": min(request.full_text_top_k, 30),
+                    "include_resume_evidence": False,
+                    "rerank_mode": "local",
+                }
+            )
+
         watermark = await self._knowledge_watermark()
         resume_watermark = await self._resume_watermark(request)
-        embedding_signature = str(
-            getattr(self.embedding_provider, "embedding_signature", "") or ""
-        )
-        cache_key = self._cache_key(
-            request, watermark, resume_watermark, embedding_signature
-        )
+        embedding_signature = str(getattr(self.embedding_provider, "embedding_signature", "") or "")
+        cache_key = self._cache_key(request, watermark, resume_watermark, embedding_signature)
         if not request.force_refresh:
             cached = self._cache_get(cache_key)
             if cached is not None:
                 return cached.model_copy(update={"cache_hit": True})
 
         terms = _query_terms(request.query)
-        job_ids = await self._matching_job_ids(request.filters, request.query, terms)
-        warnings: list[str] = []
+        job_ids = await self._matching_job_ids(
+            request.filters,
+            request.query,
+            terms,
+            request.section_types,
+        )
+        warnings: list[str] = (
+            ["知识库正在增量更新，检索速度可能降低。"]
+            if indexing_in_progress
+            else []
+        )
         hits: dict[UUID, _ChunkHit] = {}
         if request.retrieval_mode in {"hybrid", "full_text"}:
             full_text_hits = await self._full_text_retrieve(
-                request.filters, request.query, terms, request.full_text_top_k
+                request.filters,
+                request.query,
+                terms,
+                request.full_text_top_k,
+                request.section_types,
             )
             self._merge_hits(hits, full_text_hits, "full_text")
         if request.retrieval_mode in {"hybrid", "vector"}:
@@ -311,7 +519,11 @@ class JobKnowledgeRAG:
                 warnings.append("未配置 Embedding Provider，本次仅使用全文召回。")
             else:
                 vector_hits = await self._vector_retrieve(
-                    request.filters, request.query, request.vector_top_k
+                    request.filters,
+                    request.query,
+                    request.vector_top_k,
+                    request.section_types,
+                    query_embedding=query_embedding,
                 )
                 self._merge_hits(hits, vector_hits, "vector")
         if hits:
@@ -320,6 +532,37 @@ class JobKnowledgeRAG:
         warnings = [*statistics.warnings, *warnings]
 
         ranked = self._fuse_and_rerank(hits, request.retrieval_mode, request.query)
+        if request.rerank_mode == "none":
+            ranked.sort(key=lambda hit: hit.fusion_score, reverse=True)
+            for hit in ranked:
+                hit.rerank_score = hit.fusion_score
+        elif request.rerank_mode == "cross_encoder":
+            import asyncio
+
+            from app.core.config import get_settings
+            from app.llm.local_semantic import SemanticReranker
+
+            settings = get_settings()
+            reranker = SemanticReranker(
+                settings.semantic_reranker_model, settings.semantic_cache_dir
+            )
+            pool = ranked[:40]
+            try:
+                scores = await asyncio.to_thread(
+                    reranker.predict,
+                    request.query,
+                    [f"{hit.job.title}\n{hit.chunk.content}" for hit in pool],
+                )
+                for hit, score in zip(pool, scores, strict=True):
+                    hit.rerank_score = 1 / (1 + math.exp(-max(-40, min(40, score))))
+                ranked = [
+                    item
+                    for _, item in sorted(
+                        zip(scores, pool, strict=True), key=lambda pair: pair[0], reverse=True
+                    )
+                ]
+            except Exception as exc:
+                raise KnowledgeRetrievalError("语义重排失败，未静默使用规则结果") from exc
         selected = self._select_diverse(ranked, request.top_k)
         citations = [self._citation(index, hit) for index, hit in enumerate(selected, start=1)]
         resume_evidence: list[ResumeKnowledgeEvidence] = []
@@ -329,6 +572,7 @@ class JobKnowledgeRAG:
         if not citations and not job_ids:
             warnings.append("知识库中没有符合当前查询和筛选条件的已索引岗位。")
         result = JobKnowledgeSearchResponse(
+            reranker=request.rerank_mode,
             query=request.query.strip(),
             retrieval_mode=request.retrieval_mode,
             knowledge_version=JOB_KNOWLEDGE_VERSION,
@@ -346,7 +590,12 @@ class JobKnowledgeRAG:
 
     async def statistics(self, request: JobKnowledgeSearchRequest) -> JobKnowledgeStatistics:
         terms = _query_terms(request.query)
-        job_ids = await self._matching_job_ids(request.filters, request.query, terms)
+        job_ids = await self._matching_job_ids(
+            request.filters,
+            request.query,
+            terms,
+            request.section_types,
+        )
         return await self.statistics_for_jobs(job_ids)
 
     async def statistics_for_jobs(self, job_ids: list[UUID]) -> JobKnowledgeStatistics:
@@ -377,10 +626,7 @@ class JobKnowledgeRAG:
         by_job: dict[UUID, tuple[Any, ...]] = {}
         for row in rows:
             by_job.setdefault(row.job_id, tuple(row))
-        salary_rows = [
-            (str(row[1] or ""), row[2], row[3])
-            for row in by_job.values()
-        ]
+        salary_rows = [(str(row[1] or ""), row[2], row[3]) for row in by_job.values()]
         education = _distribution([_normalize_education(row[4]) for row in by_job.values()])
         experience = _distribution([_normalize_experience(row[5]) for row in by_job.values()])
         skill_rows = list(
@@ -391,15 +637,9 @@ class JobKnowledgeRAG:
                         SkillTaxonomy.canonical_name,
                         SkillTaxonomy.category,
                         func.count(distinct(JobSkillFact.job_id)),
-                        func.sum(
-                            case((JobSkillFact.requirement_type == "required", 1), else_=0)
-                        ),
-                        func.sum(
-                            case((JobSkillFact.requirement_type == "preferred", 1), else_=0)
-                        ),
-                        func.sum(
-                            case((JobSkillFact.requirement_type == "inferred", 1), else_=0)
-                        ),
+                        func.sum(case((JobSkillFact.requirement_type == "required", 1), else_=0)),
+                        func.sum(case((JobSkillFact.requirement_type == "preferred", 1), else_=0)),
+                        func.sum(case((JobSkillFact.requirement_type == "inferred", 1), else_=0)),
                     )
                     .join(JobSkillFact, JobSkillFact.skill_id == SkillTaxonomy.id)
                     .where(JobSkillFact.job_id.in_(list(by_job)))
@@ -461,6 +701,7 @@ class JobKnowledgeRAG:
         filters: JobKnowledgeFilters,
         query: str,
         terms: list[str],
+        section_types: list[str] | None = None,
     ) -> list[UUID]:
         statement = (
             select(distinct(Job.id))
@@ -468,17 +709,26 @@ class JobKnowledgeRAG:
             .join(JobKnowledgeDocument, JobKnowledgeChunk.document_id == JobKnowledgeDocument.id)
             .join(Job, JobKnowledgeChunk.job_id == Job.id)
             .outerjoin(Company, Job.company_id == Company.id)
-            .where(*self._base_conditions(filters))
+            .where(*self._base_conditions(filters, section_types))
         )
         query_condition = self._query_condition(query, terms)
         if query_condition is not None:
             statement = statement.where(query_condition)
         return list((await self.session.scalars(statement)).all())
 
-    def _base_conditions(self, filters: JobKnowledgeFilters) -> list[Any]:
+    def _base_conditions(
+        self,
+        filters: JobKnowledgeFilters,
+        section_types: list[str] | None = None,
+    ) -> list[Any]:
         conditions: list[Any] = [
             JobKnowledgeDocument.active.is_(True),
             JobKnowledgeDocument.knowledge_version == JOB_KNOWLEDGE_VERSION,
+            Job.lifecycle_status != "expired",
+            or_(
+                Job.data_quality_score.is_(None),
+                Job.data_quality_score >= self.settings.rag_min_quality_score,
+            ),
         ]
         if filters.cities:
             conditions.append(
@@ -490,11 +740,17 @@ class JobKnowledgeRAG:
                 )
             )
         if filters.education:
-            conditions.append(JobKnowledgeDocument.normalized_education.ilike(f"%{filters.education}%"))
+            conditions.append(
+                JobKnowledgeDocument.normalized_education.ilike(f"%{filters.education}%")
+            )
         if filters.experience:
-            conditions.append(JobKnowledgeDocument.normalized_experience.ilike(f"%{filters.experience}%"))
+            conditions.append(
+                JobKnowledgeDocument.normalized_experience.ilike(f"%{filters.experience}%")
+            )
         if filters.job_types:
-            conditions.append(JobKnowledgeDocument.employment_type.in_(_filter_job_types(filters.job_types)))
+            conditions.append(
+                JobKnowledgeDocument.employment_type.in_(_filter_job_types(filters.job_types))
+            )
         if filters.platform:
             conditions.append(Job.platform == filters.platform)
         if filters.salary_floor is not None:
@@ -511,10 +767,14 @@ class JobKnowledgeRAG:
             conditions.append(Job.publish_time >= filters.published_after)
         if filters.published_before is not None:
             conditions.append(Job.publish_time <= filters.published_before)
+        if filters.job_ids:
+            conditions.append(Job.id.in_(filters.job_ids))
+        if section_types:
+            conditions.append(JobKnowledgeChunk.section_type.in_(section_types))
         return conditions
 
     def _query_condition(self, query: str, terms: list[str]) -> Any | None:
-        if not query.strip():
+        if not query.strip() or not terms:
             return None
         lexical = []
         expanded_terms = list(terms)
@@ -537,9 +797,7 @@ class JobKnowledgeRAG:
         tsvector = func.to_tsvector("simple", JobKnowledgeChunk.content)
         job_tsvector = func.to_tsvector(
             "simple",
-            func.coalesce(Job.title, "")
-            + " "
-            + func.coalesce(Job.description, ""),
+            func.coalesce(Job.title, "") + " " + func.coalesce(Job.description, ""),
         )
         tsquery = func.plainto_tsquery("simple", query)
         return or_(tsvector.op("@@")(tsquery), job_tsvector.op("@@")(tsquery), *lexical)
@@ -550,6 +808,7 @@ class JobKnowledgeRAG:
         query: str,
         terms: list[str],
         limit: int,
+        section_types: list[str] | None = None,
     ) -> list[_ChunkHit]:
         query_condition = self._query_condition(query, terms)
         if query_condition is None:
@@ -560,20 +819,16 @@ class JobKnowledgeRAG:
             .join(JobKnowledgeDocument, JobKnowledgeChunk.document_id == JobKnowledgeDocument.id)
             .join(Job, JobKnowledgeChunk.job_id == Job.id)
             .outerjoin(Company, Job.company_id == Company.id)
-            .where(*self._base_conditions(filters), query_condition)
+            .where(*self._base_conditions(filters, section_types), query_condition)
         )
         if _dialect_name(self.session) == "postgresql":
             tsvector = func.to_tsvector("simple", JobKnowledgeChunk.content)
             job_tsvector = func.to_tsvector(
                 "simple",
-                func.coalesce(Job.title, "")
-                + " "
-                + func.coalesce(Job.description, ""),
+                func.coalesce(Job.title, "") + " " + func.coalesce(Job.description, ""),
             )
             tsquery = func.plainto_tsquery("simple", query)
-            rank = func.ts_rank_cd(tsvector, tsquery) + func.ts_rank_cd(
-                job_tsvector, tsquery
-            )
+            rank = func.ts_rank_cd(tsvector, tsquery) + func.ts_rank_cd(job_tsvector, tsquery)
             statement = statement.add_columns(rank.label("search_rank")).order_by(rank.desc())
         else:
             statement = statement.order_by(
@@ -604,27 +859,36 @@ class JobKnowledgeRAG:
         filters: JobKnowledgeFilters,
         query: str,
         limit: int,
+        section_types: list[str] | None = None,
+        query_embedding: list[float] | None = None,
     ) -> list[_ChunkHit]:
         provider = self.embedding_provider
         if provider is None:
             raise KnowledgeEmbeddingUnavailableError(
                 "当前检索模式需要 Embedding Provider，但系统未配置可用 Provider。"
             )
-        try:
-            query_embedding = list(await provider.embed(query, model=self.settings.embedding_model))
-        except Exception as exc:
-            raise KnowledgeEmbeddingUnavailableError(
-                "向量检索失败，请检查 Embedding Provider 配置后重试。"
-            ) from exc
-        if len(query_embedding) != 384:
+        if query_embedding is None:
+            try:
+                query_embedding = (await self.embed_queries([query])).get(query)
+            except Exception as exc:
+                if isinstance(exc, KnowledgeEmbeddingUnavailableError):
+                    raise
+                raise KnowledgeEmbeddingUnavailableError(
+                    "向量检索失败，请检查 Embedding Provider 配置后重试。"
+                ) from exc
+        if query_embedding is None:
+            raise KnowledgeEmbeddingUnavailableError("未生成查询向量")
+        if len(query_embedding) != self.settings.embedding_dimensions:
             raise KnowledgeRetrievalError(
-                f"向量维度不兼容：岗位知识库要求 384 维，当前为 {len(query_embedding)} 维。"
+                "向量维度不兼容："
+                f"岗位知识库要求 {self.settings.embedding_dimensions} 维，"
+                f"当前为 {len(query_embedding)} 维。"
             )
         signature = str(getattr(provider, "embedding_signature", "") or "")
         conditions = [
-            *self._base_conditions(filters),
+            *self._base_conditions(filters, section_types),
             JobKnowledgeChunk.embedding.is_not(None),
-            JobKnowledgeChunk.embedding_dimensions == 384,
+            JobKnowledgeChunk.embedding_dimensions == self.settings.embedding_dimensions,
         ]
         if signature:
             conditions.append(JobKnowledgeChunk.embedding_signature == signature)
@@ -706,10 +970,17 @@ class JobKnowledgeRAG:
         max_rrf = max(max_rrf, 1e-9)
         for hit in hits.values():
             rrf = 0.0
+            weight_total = max(
+                1e-9, self.settings.rag_sparse_weight + self.settings.rag_dense_weight
+            )
             if hit.full_rank is not None:
-                rrf += 0.55 / (_RRF_K + hit.full_rank)
+                rrf += (self.settings.rag_sparse_weight / weight_total) / (
+                    self.settings.rag_rrf_k + hit.full_rank
+                )
             if hit.vector_rank is not None:
-                rrf += 0.45 / (_RRF_K + hit.vector_rank)
+                rrf += (self.settings.rag_dense_weight / weight_total) / (
+                    self.settings.rag_rrf_k + hit.vector_rank
+                )
             hit.fusion_score = rrf
             max_rrf = max(max_rrf, rrf)
         for hit in hits.values():
@@ -751,6 +1022,18 @@ class JobKnowledgeRAG:
 
     @staticmethod
     def _citation(index: int, hit: _ChunkHit) -> JobKnowledgeCitation:
+        metadata = hit.chunk.chunk_metadata or {}
+        parent_id = metadata.get("parent_id") or hit.chunk.document_id
+        try:
+            parent_uuid = UUID(str(parent_id)) if parent_id else None
+        except ValueError:
+            parent_uuid = hit.chunk.document_id
+        page_value = metadata.get("page")
+        page = (
+            int(page_value)
+            if isinstance(page_value, int | str) and str(page_value).isdigit()
+            else None
+        )
         return JobKnowledgeCitation(
             citation_index=index,
             job_id=hit.job.id,
@@ -760,6 +1043,12 @@ class JobKnowledgeRAG:
             location=hit.job.location,
             platform=hit.job.platform,
             source_url=hit.job.source_url,
+            document_id=hit.chunk.document_id,
+            parent_id=parent_uuid,
+            filename=str(metadata.get("filename") or f"{hit.job.platform}-{hit.job.title}"),
+            section=str(metadata.get("section") or hit.chunk.section_type),
+            page=page,
+            document_type=str(metadata.get("document_type") or "job_description"),
             section_type=hit.chunk.section_type,
             evidence=hit.chunk.content,
             retrieval_sources=sorted(hit.sources),
@@ -860,6 +1149,10 @@ class JobKnowledgeRAG:
             "query": re.sub(r"\s+", " ", request.query.casefold()).strip(),
             "filters": request.filters.model_dump(mode="json"),
             "retrieval_mode": request.retrieval_mode,
+            "rerank_mode": request.rerank_mode,
+            "reranker_model": get_settings().semantic_reranker_model
+            if request.rerank_mode == "cross_encoder"
+            else None,
             "top_k": request.top_k,
             "full_text_top_k": request.full_text_top_k,
             "vector_top_k": request.vector_top_k,

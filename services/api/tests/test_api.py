@@ -32,6 +32,11 @@ async def test_job_create_list_get_and_duplicate_protection(client: AsyncClient)
     fetched = await client.get(f"/api/jobs/{job_id}")
     assert fetched.status_code == 200
     assert fetched.json()["title"] == "AI Agent Intern"
+    pipeline = await client.get(f"/api/jobs/{job_id}/pipeline")
+    assert pipeline.status_code == 200
+    assert pipeline.json()["status"] == "ready"
+    assert pipeline.json()["raw_snapshot_count"] == 1
+    assert pipeline.json()["canonical"]["salary"]["status"] == "unknown"
 
     duplicate = await client.post("/api/jobs", json=job_payload)
     assert duplicate.status_code == 409

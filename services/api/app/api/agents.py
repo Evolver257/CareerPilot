@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import get_agent_runtime
-from app.models.entities import AgentEvent, AgentRun, AgentStep
+from app.models.entities import AgentEvent, AgentRun, AgentStep, AgentToolInvocation
 from app.models.states import AgentRunStatus
 from app.schemas.agents import (
     AgentEventRead,
@@ -17,6 +17,7 @@ from app.schemas.agents import (
     AgentRunResumeRequest,
     AgentRunUpdate,
     AgentStepRead,
+    AgentToolInvocationRead,
     AgentToolRead,
 )
 from app.services.agent_runtime import AgentRunActionError, AgentRunNotFoundError, AgentRuntime
@@ -70,14 +71,38 @@ def _run_read(run: AgentRun) -> AgentRunRead:
         updated_at=run.updated_at,
         started_at=run.started_at,
         finished_at=run.finished_at,
-        steps=[
-            _step_read(item)
-            for item in sorted(run.steps, key=lambda value: value.sequence)
-        ],
+        steps=[_step_read(item) for item in sorted(run.steps, key=lambda value: value.sequence)],
         events=[
-            _event_read(item)
-            for item in sorted(run.events, key=lambda value: value.created_at)
+            _event_read(item) for item in sorted(run.events, key=lambda value: value.created_at)
         ],
+    )
+
+
+def _tool_invocation_read(item: AgentToolInvocation) -> AgentToolInvocationRead:
+    return AgentToolInvocationRead(
+        id=item.id,
+        run_id=item.run_id,
+        step_id=item.step_id,
+        call_id=item.call_id,
+        idempotency_key=item.idempotency_key,
+        parent_call_id=item.parent_call_id,
+        tool_name=item.tool_name,
+        source=item.source,
+        server_id=item.server_id,
+        arguments=item.arguments,
+        result=item.result,
+        status=item.status,
+        attempt=item.attempt,
+        retryable=item.retryable,
+        error_code=item.error_code,
+        error_message=item.error_message,
+        latency_ms=item.latency_ms,
+        token_usage=item.token_usage,
+        cost=item.cost,
+        started_at=item.started_at,
+        completed_at=item.completed_at,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
     )
 
 
@@ -110,6 +135,11 @@ async def list_agent_tools(
             description=tool.description,
             input_schema=tool.input_schema.model_json_schema(),
             output_schema=tool.output_schema.model_json_schema(),
+            **{
+                key: value
+                for key, value in tool.get_manifest().as_dict().items()
+                if key not in {"name", "description", "input_schema"}
+            },
         )
         for tool in runtime.registry.catalog()
     ]
@@ -124,6 +154,21 @@ async def get_agent_run(
         return _run_read(await runtime.get_run(run_id))
     except AgentRunNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.get("/{run_id}/tool-invocations", response_model=list[AgentToolInvocationRead])
+async def list_agent_tool_invocations(
+    run_id: UUID,
+    runtime: AgentRuntime = Depends(get_agent_runtime),
+) -> list[AgentToolInvocationRead]:
+    try:
+        await runtime.get_run(run_id)
+    except AgentRunNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return [
+        _tool_invocation_read(item)
+        for item in await runtime.repository.list_tool_invocations(run_id)
+    ]
 
 
 @router.patch("/{run_id}", response_model=AgentRunRead)
@@ -168,6 +213,14 @@ async def start_agent_run(
     runtime: AgentRuntime = Depends(get_agent_runtime),
 ) -> AgentRunRead:
     return await _run_action(run_id, runtime.start, runtime)
+
+
+@router.post("/{run_id}/start-background", response_model=AgentRunRead)
+async def start_agent_run_background(
+    run_id: UUID,
+    runtime: AgentRuntime = Depends(get_agent_runtime),
+) -> AgentRunRead:
+    return await _run_action(run_id, runtime.enqueue_background, runtime)
 
 
 @router.post("/{run_id}/pause", response_model=AgentRunRead)

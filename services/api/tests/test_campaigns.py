@@ -1,6 +1,115 @@
 from httpx import AsyncClient
 
 
+async def test_curated_selection_is_reused_without_approving_or_reordering(client: AsyncClient):
+    resume_id = await _upload_campaign_resume(client)
+    job_ids = await _import_campaign_jobs(client)
+    payload = {"name": "Selected jobs", "resume_id": resume_id, "job_ids": job_ids[:2]}
+    first = await client.post("/api/campaigns/curated", json=payload)
+    repeated = await client.post(
+        "/api/campaigns/curated", json={**payload, "job_ids": job_ids[1::-1]}
+    )
+    assert first.status_code == repeated.status_code == 201
+    assert repeated.json()["id"] == first.json()["id"]
+    assert repeated.json()["reused_existing"] is True
+    assert repeated.json()["status"] == "WAITING_APPROVAL"
+    assert (await client.get("/api/applications")).json()["total"] == 2
+    different = await client.post(
+        "/api/campaigns/curated", json={**payload, "job_ids": job_ids[1:3]}
+    )
+    assert different.json()["id"] != first.json()["id"]
+    await client.post(f"/api/campaigns/{first.json()['id']}/cancel")
+    new = await client.post("/api/campaigns/curated", json=payload)
+    assert new.json()["id"] != first.json()["id"]
+
+
+async def test_plan_completes_only_after_every_application_is_terminal(client: AsyncClient):
+    resume_id = await _upload_campaign_resume(client)
+    job_ids = (await _import_campaign_jobs(client))[:2]
+    plan = (
+        await client.post(
+            "/api/campaigns/curated",
+            json={
+                "name": "Completion",
+                "resume_id": resume_id,
+                "job_ids": job_ids,
+            },
+        )
+    ).json()
+    cid = plan["id"]
+    await client.post(f"/api/campaigns/{cid}/approve", json={"job_ids": job_ids})
+    first, second = [item["application"]["id"] for item in plan["candidate_jobs"]]
+    for action in ["execute", "captcha_required"]:
+        response = await client.post(
+            f"/api/applications/{first}/transition", json={"action": action}
+        )
+        assert response.status_code == 200, response.text
+    await client.post(f"/api/applications/{second}/transition", json={"action": "cancel"})
+    assert (await client.get(f"/api/campaigns/{cid}")).json()["status"] == "RUNNING"
+    for action in ["retry", "submit"]:
+        response = await client.post(
+            f"/api/applications/{first}/transition", json={"action": action}
+        )
+        assert response.status_code == 200, response.text
+    completed = (await client.get(f"/api/campaigns/{cid}")).json()
+    assert completed["status"] == "COMPLETED"
+    assert completed["finished_at"] is not None
+    assert {item["application"]["status"] for item in completed["candidate_jobs"]} == {
+        "SUBMITTED",
+        "CANCELLED",
+    }
+
+
+async def test_all_rejected_plan_is_cancelled_and_applications_are_paginated(client: AsyncClient):
+    resume_id = await _upload_campaign_resume(client)
+    job_ids = (await _import_campaign_jobs(client))[:3]
+    plan = (
+        await client.post(
+            "/api/campaigns/curated",
+            json={
+                "name": "Reject all",
+                "resume_id": resume_id,
+                "job_ids": job_ids,
+            },
+        )
+    ).json()
+    rejected = await client.post(f"/api/campaigns/{plan['id']}/reject", json={"job_ids": job_ids})
+    assert rejected.json()["status"] == "CANCELLED"
+    first = (await client.get("/api/applications", params={"page": 1, "page_size": 2})).json()
+    second = (await client.get("/api/applications", params={"page": 2, "page_size": 2})).json()
+    assert first["total"] == second["total"] == 3
+    assert len(first["items"]) == 2 and len(second["items"]) == 1
+    assert not {item["id"] for item in first["items"]} & {item["id"] for item in second["items"]}
+    filtered = (
+        await client.get(
+            "/api/applications", params={"statuses": "QUEUED", "campaign_id": plan["id"]}
+        )
+    ).json()
+    assert filtered["total"] == 0
+    assert filtered["status_counts"] == {"CANCELLED": 3}
+    assert (await client.get("/api/applications?page=0")).status_code == 422
+    assert (await client.get("/api/applications?page_size=201")).status_code == 422
+
+
+async def test_campaign_http_accepts_200_and_rejects_201(client: AsyncClient) -> None:
+    resume_id = await _upload_campaign_resume(client)
+    created = await client.post(
+        "/api/campaigns",
+        json={
+            "name": "200-job plan",
+            "resume_id": resume_id,
+            "max_jobs": 200,
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["max_jobs"] == 200
+    campaign_id = created.json()["id"]
+    updated = await client.patch(f"/api/campaigns/{campaign_id}", json={"max_jobs": 200})
+    assert updated.status_code == 200, updated.text
+    rejected = await client.patch(f"/api/campaigns/{campaign_id}", json={"max_jobs": 201})
+    assert rejected.status_code == 422
+
+
 async def _upload_campaign_resume(client: AsyncClient) -> str:
     resume_text = """Alex Chen
 
@@ -142,8 +251,7 @@ async def test_campaign_full_flow_preserves_pause_resume_state(client: AsyncClie
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "CANCELLED"
     assert all(
-        item["application"]["status"] == "CANCELLED"
-        for item in cancelled.json()["candidate_jobs"]
+        item["application"]["status"] == "CANCELLED" for item in cancelled.json()["candidate_jobs"]
     )
 
 

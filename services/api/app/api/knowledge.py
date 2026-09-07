@@ -2,9 +2,15 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.dependencies import get_job_knowledge_rag, get_knowledge_index_service
+from app.api.dependencies import (
+    get_job_knowledge_rag,
+    get_knowledge_index_service,
+    get_llm_provider,
+)
+from app.llm.provider import LLMProvider
 from app.models.entities import KnowledgeIndexRun, KnowledgeIndexRunItem
 from app.schemas.knowledge import (
+    KnowledgeHealthRead,
     KnowledgeIndexRunCreate,
     KnowledgeIndexRunItemListResponse,
     KnowledgeIndexRunItemRead,
@@ -12,10 +18,12 @@ from app.schemas.knowledge import (
     KnowledgeIndexRunRead,
 )
 from app.schemas.knowledge_search import (
+    AgenticRAGSearchResponse,
     JobKnowledgeSearchRequest,
     JobKnowledgeSearchResponse,
     JobKnowledgeStatistics,
 )
+from app.services.agentic_rag import AgenticRAGPipeline
 from app.services.job_knowledge_rag import (
     JobKnowledgeRAG,
     KnowledgeEmbeddingUnavailableError,
@@ -30,6 +38,13 @@ from app.services.knowledge_indexing import (
 )
 
 router = APIRouter(prefix="/api/knowledge", tags=["job-knowledge"])
+
+
+@router.get("/status", response_model=KnowledgeHealthRead)
+async def knowledge_status(
+    service: KnowledgeIndexService = Depends(get_knowledge_index_service),
+) -> KnowledgeHealthRead:
+    return KnowledgeHealthRead.model_validate(await service.health())
 
 
 def _run_read(run: KnowledgeIndexRun) -> KnowledgeIndexRunRead:
@@ -77,6 +92,24 @@ async def search_job_knowledge(
 ) -> JobKnowledgeSearchResponse:
     try:
         return await service.search(payload)
+    except KnowledgeEmbeddingUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except KnowledgeRetrievalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+
+@router.post("/agentic-search", response_model=AgenticRAGSearchResponse)
+async def search_job_knowledge_agentic(
+    payload: JobKnowledgeSearchRequest,
+    service: JobKnowledgeRAG = Depends(get_job_knowledge_rag),
+    provider: LLMProvider = Depends(get_llm_provider),
+) -> AgenticRAGSearchResponse:
+    try:
+        return await AgenticRAGPipeline(service, llm_provider=provider).run(payload)
     except KnowledgeEmbeddingUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
@@ -165,6 +198,10 @@ async def start_knowledge_index_run(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     if run.status != "PENDING":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="任务当前不可启动")
+    from app.services.work_queue import enqueue_work
+
+    await enqueue_work(service.session, "knowledge", run.id, retry=True)
+    await service.session.commit()
     schedule_knowledge_index(run.id)
     return _run_read(run)
 

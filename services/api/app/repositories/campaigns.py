@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import Text, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -46,6 +47,15 @@ class CampaignRepository:
         keywords: list[str],
         cities: list[str],
         limit: int,
+        offset: int = 0,
+        collected_after: datetime | None = None,
+        platform: str | None = None,
+        salary_min: int | None = None,
+        salary_max: int | None = None,
+        education: list[str] | None = None,
+        experience: list[str] | None = None,
+        job_types: list[str] | None = None,
+        industries: list[str] | None = None,
     ) -> list[Job]:
         query = select(Job).options(selectinload(Job.skills), selectinload(Job.company))
         normalized_keywords = list(
@@ -64,10 +74,53 @@ class CampaignRepository:
             query = query.where(
                 or_(*(Job.location.ilike(f"%{city}%") for city in normalized_cities))
             )
+        if collected_after is not None:
+            query = query.where(Job.last_collected_at >= collected_after)
+        if platform:
+            query = query.where(Job.platform == platform)
+        if salary_min is not None:
+            query = query.where(Job.salary_max.is_(None) | (Job.salary_max >= salary_min))
+        if salary_max is not None:
+            query = query.where(Job.salary_min.is_(None) | (Job.salary_min <= salary_max))
+        normalized_education = [value.strip() for value in (education or []) if value.strip()]
+        if normalized_education:
+            query = query.where(
+                or_(
+                    *(
+                        Job.education_requirement.ilike(f"%{value}%")
+                        for value in normalized_education
+                    )
+                )
+            )
+        normalized_experience = [value.strip() for value in (experience or []) if value.strip()]
+        if normalized_experience:
+            query = query.where(
+                or_(
+                    *(
+                        Job.experience_requirement.ilike(f"%{value}%")
+                        for value in normalized_experience
+                    )
+                )
+            )
+        normalized_job_types = [value.strip() for value in (job_types or []) if value.strip()]
+        if normalized_job_types:
+            query = query.where(
+                or_(*(Job.job_type.ilike(f"%{value}%") for value in normalized_job_types))
+            )
+        normalized_industries = [value.strip() for value in (industries or []) if value.strip()]
+        if normalized_industries:
+            query = query.where(
+                or_(
+                    *(
+                        Job.raw_data.cast(Text).ilike(f"%{value}%")
+                        for value in normalized_industries
+                    )
+                )
+            )
         return list(
             (
                 await self.session.scalars(
-                    query.order_by(Job.created_at.desc(), Job.id).limit(limit)
+                    query.order_by(Job.last_collected_at.desc(), Job.id).offset(offset).limit(limit)
                 )
             ).all()
         )
@@ -85,15 +138,34 @@ class CampaignRepository:
             ).all()
         )
 
-    async def list_applications(self) -> tuple[list[Application], int]:
+    async def list_applications(
+        self, *, page: int = 1, page_size: int = 50,
+        statuses: list[str] | None = None, campaign_id: UUID | None = None,
+        platform: str | None = None,
+    ) -> tuple[list[Application], int, dict[str, int]]:
+        conditions = []
+        if campaign_id is not None:
+            conditions.append(Application.campaign_id == campaign_id)
+        if platform:
+            conditions.append(Application.platform == platform)
+        counts = dict((await self.session.execute(
+            select(Application.status, func.count(Application.id))
+            .where(*conditions).group_by(Application.status)
+        )).all())
+        if statuses:
+            conditions.append(Application.status.in_(statuses))
         query = (
             select(Application)
             .options(selectinload(Application.job), selectinload(Application.campaign))
-            .order_by(Application.updated_at.desc())
+            .where(*conditions)
+            .order_by(Application.updated_at.desc(), Application.id)
+            .offset((page - 1) * page_size).limit(page_size)
         )
-        total = int((await self.session.scalar(select(func.count(Application.id)))) or 0)
+        total = int((await self.session.scalar(
+            select(func.count(Application.id)).where(*conditions)
+        )) or 0)
         applications = list((await self.session.scalars(query)).unique().all())
-        return applications, total
+        return applications, total, counts
 
     async def get_application(self, application_id: UUID) -> Application | None:
         return await self.session.scalar(
@@ -103,7 +175,11 @@ class CampaignRepository:
         )
 
     async def commit_campaign(self, campaign: Campaign) -> Campaign:
+        from app.services.campaign_completion import reconcile_campaign_completion
+
         self.session.add(campaign)
+        await self.session.flush()
+        await reconcile_campaign_completion(self.session, campaign.id)
         await self.session.commit()
         refreshed = await self.get_campaign(campaign.id)
         if refreshed is None:

@@ -1,19 +1,26 @@
-import { buildBossSearchUrl, isBossPageUrl, MAX_BOSS_BATCH_JOBS } from "../lib/platforms/boss";
+import { waitForTabComplete } from "../lib/browser-navigation";
+import { deliveryPlatform } from "../lib/delivery-url";
+import { handleZhaopinCollection } from "../lib/zhaopin-collection";
+import { buildBossSearchUrl, isBossPageUrl, matchesBossJobSearch, MAX_BOSS_BATCH_JOBS } from "../lib/platforms/boss";
 import type {
   ActionMessage,
   ActionResultMessage,
   BossTaskBatchLaunchRequest,
   BossBackgroundSearchTask,
-  BossBridgeRequest,
   BossBridgeResponse,
   BossCaptureProgress,
   BossCaptureResponse,
   BossPersistedJobSummary,
+  BossSearchCancelRequest,
   BossSearchRequest,
   BossSearchResumeRequest,
   BossTaskLaunchRequest,
   BrowserTaskBatchLifecycleMessage,
   BrowserTaskLifecycleMessage,
+  RecruitmentBridgeRequest,
+  RecruitmentBridgeResponse,
+  ZhaopinCaptureRequest,
+  ZhaopinCaptureResponse,
 } from "../lib/protocol";
 
 const API_WS_BASE = "ws://localhost:8010/api/browser-tasks/ws/";
@@ -23,6 +30,7 @@ const RESUMABLE_BOSS_SEARCH_STATES = new Set(["CAPTCHA", "LOGIN_REQUIRED", "RISK
 const sockets = new Map<string, WebSocket>();
 const activeTabs = new Map<string, number>();
 const activeSearchOrigins = new Map<string, number>();
+const cancelledBossSearchRequests = new Set<string>();
 const batchQueue: Array<{ task_id: string; url: string }> = [];
 let batchTabId: number | null = null;
 let activeBatchTaskId: string | null = null;
@@ -38,15 +46,18 @@ export default defineBackground(() => {
   });
 
   browser.runtime.onMessage.addListener(async (
-    message: ActionResultMessage | BossBridgeRequest | BossCaptureProgress,
+    message: ActionResultMessage | RecruitmentBridgeRequest | BossCaptureProgress,
     sender,
-  ): Promise<BossBridgeResponse | undefined> => {
+  ): Promise<RecruitmentBridgeResponse | undefined> => {
     if (message.type === "BOSS_CAPTURE_PROGRESS") {
       await forwardBossSearchProgress(message);
       return;
     }
+    if (message.type === "ZHAOPIN_CAPTURE_REQUEST") return captureZhaopinVisible(message);
+    if (message.type === "ZHAOPIN_SEARCH_REQUEST" || message.type === "ZHAOPIN_SEARCH_STATUS_REQUEST" || message.type === "ZHAOPIN_SEARCH_CANCEL_REQUEST" || message.type === "ZHAOPIN_SEARCH_RESUME_REQUEST" || message.type === "ZHAOPIN_SEARCH_OPEN_REQUEST") return handleZhaopinCollection(message);
     if (message.type === "BOSS_SEARCH_REQUEST") return runBossSearch(message, sender.tab?.id);
     if (message.type === "BOSS_SEARCH_RESUME_REQUEST") return resumeBossSearch(message, sender.tab?.id);
+    if (message.type === "BOSS_SEARCH_CANCEL_REQUEST") return cancelBossSearch(message);
     if (message.type === "BOSS_SEARCH_STATUS_REQUEST") {
       return {
         source: "careerpilot-extension",
@@ -56,7 +67,7 @@ export default defineBackground(() => {
       };
     }
     if (message.type === "BOSS_TASK_LAUNCH_REQUEST") return launchBossTask(message);
-    if (message.type === "BOSS_TASK_BATCH_LAUNCH_REQUEST") return launchBossTaskBatch(message);
+    if (message.type === "BOSS_TASK_BATCH_LAUNCH_REQUEST" || message.type === "RECRUITMENT_TASK_BATCH_LAUNCH_REQUEST") return launchBossTaskBatch(message);
     if (message.type !== "ACTION_RESULT") return;
     const tabId = sender.tab?.id;
     const taskId = [...activeTabs.entries()].find(([, activeTabId]) => activeTabId === tabId)?.[0];
@@ -64,6 +75,52 @@ export default defineBackground(() => {
     sockets.get(taskId)?.send(JSON.stringify(message));
   });
 });
+
+async function captureZhaopinVisible(
+  message: ZhaopinCaptureRequest,
+): Promise<ZhaopinCaptureResponse> {
+  const tabs = await browser.tabs.query({
+    url: ["https://zhaopin.com/*", "https://*.zhaopin.com/*"],
+  });
+  const tab = tabs.find((item) => item.id !== undefined);
+  if (!tab?.id) {
+    return {
+      source: "careerpilot-extension",
+      type: "ZHAOPIN_CAPTURE_RESULT",
+      request_id: message.request_id,
+      success: false,
+      page_url: "",
+      jobs: [],
+      page_state: "UNKNOWN_STATE",
+      error: "没有找到已打开的智联招聘标签页，请先打开智联招聘搜索结果页。",
+    };
+  }
+  try {
+    const response = await browser.tabs.sendMessage(tab.id, {
+      type: "CAPTURE_ZHAOPIN_VISIBLE",
+      request_id: message.request_id,
+      max_jobs: message.max_jobs,
+    });
+    return {
+      ...(response as ZhaopinCaptureResponse),
+      source: "careerpilot-extension",
+      request_id: message.request_id,
+    };
+  } catch (error) {
+    return {
+      source: "careerpilot-extension",
+      type: "ZHAOPIN_CAPTURE_RESULT",
+      request_id: message.request_id,
+      success: false,
+      page_url: tab.url || "",
+      jobs: [],
+      page_state: "UNKNOWN_STATE",
+      error: error instanceof Error
+        ? error.message
+        : "无法连接智联招聘页面内容脚本，请刷新页面后重试。",
+    };
+  }
+}
 
 async function runBossSearch(
   message: BossSearchRequest,
@@ -80,6 +137,7 @@ async function runBossSearch(
     if (existing?.status === "RUNNING" && existing.request_id !== message.request_id) {
       throw new Error("已有 BOSS 后台采集任务正在运行，请等待其完成后再启动新任务");
     }
+    cancelledBossSearchRequests.delete(message.request_id);
     const now = new Date().toISOString();
     task = {
       request_id: message.request_id,
@@ -110,8 +168,15 @@ async function runBossSearch(
     await waitForTabComplete(tab.id);
     const capture = await captureVisibleJobs(tab.id, maxJobs, message.request_id);
     const latestTask = await getStoredBossSearch();
+    if (latestTask?.request_id === message.request_id && latestTask.status === "CANCELLED") {
+      return bossSearchCancelledResult(latestTask, capture.jobs);
+    }
     const taskForRepair = latestTask?.request_id === message.request_id ? latestTask : task;
     task = await persistBossJobs(taskForRepair, capture.page_url, capture.jobs, capture.jobs.length, capture.page_state);
+    if (task.status === "CANCELLED" || cancelledBossSearchRequests.has(message.request_id)) {
+      const cancelled = await getStoredBossSearch();
+      return bossSearchCancelledResult(cancelled?.request_id === message.request_id ? cancelled : task, capture.jobs);
+    }
     const finishedAt = new Date().toISOString();
     const waitingForUser = !capture.success && RESUMABLE_BOSS_SEARCH_STATES.has(capture.page_state);
     task = {
@@ -136,6 +201,10 @@ async function runBossSearch(
       error: capture.error,
     };
   } catch (error) {
+    const stored = await getStoredBossSearch();
+    if (stored?.request_id === message.request_id && stored.status === "CANCELLED") {
+      return bossSearchCancelledResult(stored);
+    }
     if (task) {
       const failedAt = new Date().toISOString();
       task = {
@@ -174,6 +243,7 @@ async function resumeBossSearch(
   if (task.status !== "WAITING_FOR_USER") {
     return bossSearchFailure(message.request_id, `当前采集任务状态为 ${task.status}，不能继续` , task);
   }
+  cancelledBossSearchRequests.delete(task.request_id);
   if (originTabId !== undefined) activeSearchOrigins.set(task.request_id, originTabId);
 
   try {
@@ -190,6 +260,9 @@ async function resumeBossSearch(
 
     const capture = await captureVisibleJobs(tabId, task.target_count, task.request_id);
     const latestTask = await getStoredBossSearch();
+    if (latestTask?.request_id === task.request_id && latestTask.status === "CANCELLED") {
+      return bossSearchCancelledResult(latestTask, capture.jobs);
+    }
     const taskForRepair = latestTask?.request_id === task.request_id ? latestTask : task;
     task = await persistBossJobs(
       taskForRepair,
@@ -198,6 +271,10 @@ async function resumeBossSearch(
       capture.jobs.length,
       capture.page_state,
     );
+    if (task.status === "CANCELLED" || cancelledBossSearchRequests.has(message.request_id)) {
+      const cancelled = await getStoredBossSearch();
+      return bossSearchCancelledResult(cancelled?.request_id === message.request_id ? cancelled : task, capture.jobs);
+    }
     const finishedAt = new Date().toISOString();
     const waitingForUser = !capture.success && RESUMABLE_BOSS_SEARCH_STATES.has(capture.page_state);
     task = {
@@ -222,6 +299,10 @@ async function resumeBossSearch(
       error: capture.error,
     };
   } catch (error) {
+    const stored = await getStoredBossSearch();
+    if (stored?.request_id === message.request_id && stored.status === "CANCELLED") {
+      return bossSearchCancelledResult(stored);
+    }
     const failedAt = new Date().toISOString();
     task = {
       ...task,
@@ -235,6 +316,87 @@ async function resumeBossSearch(
   } finally {
     activeSearchOrigins.delete(message.request_id);
   }
+}
+
+async function cancelBossSearch(message: BossSearchCancelRequest): Promise<BossBridgeResponse> {
+  const task = await getStoredBossSearch();
+  if (!task || task.request_id !== message.request_id) {
+    return {
+      source: "careerpilot-extension",
+      type: "BOSS_SEARCH_CANCEL_RESULT",
+      request_id: message.request_id,
+      success: false,
+      task: null,
+      error: "没有找到可停止的 BOSS 职位采集任务",
+    };
+  }
+  if (task.status === "CANCELLED") {
+    return {
+      source: "careerpilot-extension",
+      type: "BOSS_SEARCH_CANCEL_RESULT",
+      request_id: message.request_id,
+      success: true,
+      task,
+    };
+  }
+  if (task.status !== "RUNNING" && task.status !== "WAITING_FOR_USER") {
+    return {
+      source: "careerpilot-extension",
+      type: "BOSS_SEARCH_CANCEL_RESULT",
+      request_id: message.request_id,
+      success: false,
+      task,
+      error: `当前采集任务状态为 ${task.status}，无需停止`,
+    };
+  }
+
+  cancelledBossSearchRequests.add(task.request_id);
+  const stoppedAt = new Date().toISOString();
+  const cancelledTask: BossBackgroundSearchTask = {
+    ...task,
+    status: "CANCELLED",
+    error: undefined,
+    updated_at: stoppedAt,
+    finished_at: stoppedAt,
+  };
+  // Persist the terminal state before notifying the content script. This makes
+  // late progress and completion messages harmless even if the tab is busy.
+  await storeBossSearch(cancelledTask);
+  if (task.tab_id !== undefined) {
+    try {
+      await browser.tabs.sendMessage(task.tab_id, {
+        type: "CANCEL_BOSS_CAPTURE",
+        request_id: task.request_id,
+      });
+    } catch {
+      // The tab may already be closed; the persisted state still prevents any
+      // subsequent progress from being imported or marked as completed.
+    }
+  }
+  return {
+    source: "careerpilot-extension",
+    type: "BOSS_SEARCH_CANCEL_RESULT",
+    request_id: message.request_id,
+    success: true,
+    task: cancelledTask,
+  };
+}
+
+function bossSearchCancelledResult(
+  task: BossBackgroundSearchTask,
+  jobs: import("../lib/platforms/boss").BossVisibleJob[] = [],
+): BossBridgeResponse {
+  return {
+    source: "careerpilot-extension",
+    type: "BOSS_SEARCH_RESULT",
+    request_id: task.request_id,
+    success: false,
+    page_url: task.page_url,
+    jobs,
+    page_state: task.page_state,
+    background_task: task,
+    error: "用户已停止职位采集",
+  };
 }
 
 function bossSearchFailure(
@@ -259,20 +421,33 @@ async function resolveBossSearchTab(task: BossBackgroundSearchTask): Promise<num
   if (task.tab_id !== undefined) {
     try {
       const tab = await browser.tabs.get(task.tab_id);
-      if (tab.id !== undefined && tab.url && isBossPageUrl(tab.url)) return tab.id;
+      if (tab.id !== undefined) {
+        await ensureBossSearchPage(tab.id, task);
+        return tab.id;
+      }
     } catch {
       // The original background tab was closed; recreate the search below.
     }
   }
   const tab = await browser.tabs.create({
     active: false,
-    url: task.page_url && isBossPageUrl(task.page_url)
-      ? task.page_url
-      : buildBossSearchUrl(task.requirements, task.city),
+    url: buildBossSearchUrl(task.requirements, task.city),
   });
   if (!tab.id) throw new Error("无法恢复 BOSS 搜索标签页");
   await waitForTabComplete(tab.id);
   return tab.id;
+}
+
+async function ensureBossSearchPage(tabId: number, task: BossBackgroundSearchTask): Promise<void> {
+  const tab = await browser.tabs.get(tabId);
+  if (tab.url && matchesBossJobSearch(tab.url, task.requirements, task.city)) {
+    if (tab.status !== "complete") await waitForTabComplete(tabId);
+    return;
+  }
+  await browser.tabs.update(tabId, {
+    url: buildBossSearchUrl(task.requirements, task.city),
+  });
+  await waitForTabComplete(tabId);
 }
 
 async function forwardBossSearchProgress(message: BossCaptureProgress): Promise<void> {
@@ -346,6 +521,12 @@ async function persistBossJobs(
   collectedCount: number,
   pageState: import("../lib/platforms/boss").BossPageState,
 ): Promise<BossBackgroundSearchTask> {
+  const currentBeforeImport = await getStoredBossSearch();
+  if (currentBeforeImport?.request_id === task.request_id && (
+    currentBeforeImport.status === "CANCELLED" || cancelledBossSearchRequests.has(task.request_id)
+  )) {
+    return currentBeforeImport;
+  }
   const knownExternalIds = new Set(task.persisted_jobs.map((job) => job.external_job_id).filter(Boolean));
   const pending = jobs.filter((job) => !knownExternalIds.has(job.external_job_id));
   let persistedJobs = [...task.persisted_jobs];
@@ -353,6 +534,10 @@ async function persistBossJobs(
   let updatedCount = task.updated_count;
 
   for (let index = 0; index < pending.length; index += 25) {
+    const current = await getStoredBossSearch();
+    if (current?.request_id === task.request_id && (
+      current.status === "CANCELLED" || cancelledBossSearchRequests.has(task.request_id)
+    )) return current;
     const batch = pending.slice(index, index + 25);
     const imported = await importBossJobs(pageUrl, batch);
     const summaries = imported.items.map(toPersistedJobSummary);
@@ -361,6 +546,20 @@ async function persistBossJobs(
     persistedJobs = [...merged.values()];
     createdCount += imported.created;
     updatedCount += imported.updated;
+    const currentAfterImport = await getStoredBossSearch();
+    if (currentAfterImport?.request_id === task.request_id && (
+      currentAfterImport.status === "CANCELLED" || cancelledBossSearchRequests.has(task.request_id)
+    )) {
+      return preserveCancelledImportProgress(
+        currentAfterImport,
+        pageUrl,
+        persistedJobs,
+        collectedCount,
+        pageState,
+        createdCount,
+        updatedCount,
+      );
+    }
   }
 
   const updated: BossBackgroundSearchTask = {
@@ -376,8 +575,54 @@ async function persistBossJobs(
     error: undefined,
     updated_at: new Date().toISOString(),
   };
+  const currentBeforeStore = await getStoredBossSearch();
+  if (currentBeforeStore?.request_id === task.request_id && (
+    currentBeforeStore.status === "CANCELLED" || cancelledBossSearchRequests.has(task.request_id)
+  )) {
+    return preserveCancelledImportProgress(
+      currentBeforeStore,
+      pageUrl,
+      persistedJobs,
+      collectedCount,
+      pageState,
+      createdCount,
+      updatedCount,
+    );
+  }
   await storeBossSearch(updated);
   return updated;
+}
+
+async function preserveCancelledImportProgress(
+  cancelledTask: BossBackgroundSearchTask,
+  pageUrl: string,
+  persistedJobs: BossPersistedJobSummary[],
+  collectedCount: number,
+  pageState: import("../lib/platforms/boss").BossPageState,
+  createdCount: number,
+  updatedCount: number,
+): Promise<BossBackgroundSearchTask> {
+  const merged = new Map(cancelledTask.persisted_jobs.map((job) => [job.id, job]));
+  persistedJobs.forEach((job) => merged.set(job.id, job));
+  const jobs = [...merged.values()];
+  const stoppedAt = cancelledTask.finished_at ?? new Date().toISOString();
+  const preserved: BossBackgroundSearchTask = {
+    ...cancelledTask,
+    status: "CANCELLED",
+    collected_count: Math.max(cancelledTask.collected_count, collectedCount),
+    persisted_count: jobs.length,
+    created_count: Math.max(cancelledTask.created_count, createdCount),
+    updated_count: Math.max(cancelledTask.updated_count, updatedCount),
+    detailed_count: jobs.filter((job) => job.description_source === "detail_panel").length,
+    page_url: pageUrl || cancelledTask.page_url,
+    page_state: pageState,
+    persisted_jobs: jobs,
+    error: undefined,
+    updated_at: new Date().toISOString(),
+    finished_at: stoppedAt,
+  };
+  await storeBossSearch(preserved);
+  return preserved;
 }
 
 type BossImportResponse = {
@@ -400,7 +645,11 @@ async function importBossJobs(
   const response = await fetch(`${API_BASE_URL}/api/platforms/boss/import-visible`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ page_url: pageUrl, jobs }),
+    body: JSON.stringify({
+      page_url: pageUrl,
+      captured_at: new Date().toISOString(),
+      jobs,
+    }),
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as { detail?: string };
@@ -423,14 +672,16 @@ function toPersistedJobSummary(job: BossImportResponse["items"][number]): BossPe
 }
 
 async function launchBossTaskBatch(message: BossTaskBatchLaunchRequest): Promise<BossBridgeResponse> {
+  const responseType = message.type === "BOSS_TASK_BATCH_LAUNCH_REQUEST" ? "BOSS_TASK_BATCH_LAUNCH_RESULT" : "RECRUITMENT_TASK_BATCH_LAUNCH_RESULT";
   try {
     if (message.tasks.length === 0) throw new Error("投递队列为空");
     const queuedIds = new Set(batchQueue.map((item) => item.task_id));
     const accepted: Array<{ task_id: string; url: string }> = [];
     for (const item of message.tasks) {
       const url = new URL(item.url);
-      if (!isBossPageUrl(url.toString()) || url.searchParams.get("task") !== item.task_id) {
-        throw new Error(`Browser Task ${item.task_id.slice(0, 8)} URL 未通过 BOSS 安全校验`);
+      const platform = deliveryPlatform(url.toString());
+      if (!platform || (message.type === "BOSS_TASK_BATCH_LAUNCH_REQUEST" && platform !== "boss") || (item.platform && platform !== item.platform) || url.searchParams.get("task") !== item.task_id) {
+        throw new Error(`Browser Task ${item.task_id.slice(0, 8)} URL 未通过招聘平台安全校验`);
       }
       if (queuedIds.has(item.task_id) || activeBatchTaskId === item.task_id) continue;
       queuedIds.add(item.task_id);
@@ -440,7 +691,7 @@ async function launchBossTaskBatch(message: BossTaskBatchLaunchRequest): Promise
     await startNextBatchTask();
     return {
       source: "careerpilot-extension",
-      type: "BOSS_TASK_BATCH_LAUNCH_RESULT",
+      type: responseType,
       request_id: message.request_id,
       success: true,
       accepted_count: accepted.length,
@@ -448,11 +699,11 @@ async function launchBossTaskBatch(message: BossTaskBatchLaunchRequest): Promise
   } catch (error) {
     return {
       source: "careerpilot-extension",
-      type: "BOSS_TASK_BATCH_LAUNCH_RESULT",
+      type: responseType,
       request_id: message.request_id,
       success: false,
       accepted_count: 0,
-      error: error instanceof Error ? error.message : "BOSS 串行投递队列启动失败",
+      error: error instanceof Error ? error.message : "招聘平台串行投递队列启动失败",
     };
   }
 }
@@ -470,12 +721,14 @@ async function startNextBatchTask(): Promise<void> {
       batchTabId = null;
     }
   }
-  const tab = await browser.tabs.create({ active: false, url: next.url });
-  if (!tab.id) {
+  try {
+    const tab = await browser.tabs.create({ active: false, url: next.url });
+    if (!tab.id) throw new Error("无法创建招聘平台串行投递标签页");
+    batchTabId = tab.id;
+  } catch (error) {
     activeBatchTaskId = null;
-    throw new Error("无法创建 BOSS 串行投递标签页");
+    throw error;
   }
-  batchTabId = tab.id;
 }
 
 function finishBatchTask(taskId: string): void {
@@ -511,6 +764,24 @@ async function captureVisibleJobs(
   let lastError: unknown = null;
   const terminalStates = new Set(["CAPTCHA", "LOGIN_REQUIRED", "PLATFORM_LIMIT", "RISK_CONTROL", "DOM_CHANGED"]);
   for (let attempt = 0; attempt < 24; attempt += 1) {
+    const task = await getStoredBossSearch();
+    if (task?.request_id === requestId && (
+      task.status === "CANCELLED" || cancelledBossSearchRequests.has(requestId)
+    )) {
+      return {
+        type: "BOSS_CAPTURE_RESULT",
+        success: false,
+        cancelled: true,
+        page_url: task.page_url,
+        jobs: [],
+        page_state: task.page_state,
+        error: "用户已停止职位采集",
+      };
+    }
+    if (!task || task.request_id !== requestId) {
+      throw new Error("BOSS 采集任务状态已丢失，无法验证搜索页面");
+    }
+    await ensureBossSearchPage(tabId, task);
     await new Promise((resolve) => globalThis.setTimeout(resolve, attempt === 0 ? 900 : 1000));
     try {
       const result = await browser.tabs.sendMessage(tabId, {
@@ -518,8 +789,10 @@ async function captureVisibleJobs(
         request_id: requestId,
         max_jobs: maxJobs,
         include_details: true,
+        require_search_page: true,
       }) as BossCaptureResponse;
       lastResult = result;
+      if (result.cancelled) return result;
       if (!result.success && terminalStates.has(result.page_state)) return result;
       if (!result.success && result.error?.includes("empty=true")) return result;
       if (result.success && result.jobs.length > 0) return result;
@@ -563,23 +836,6 @@ async function launchBossTask(message: BossTaskLaunchRequest): Promise<BossBridg
   }
 }
 
-async function waitForTabComplete(tabId: number): Promise<void> {
-  const tab = await browser.tabs.get(tabId);
-  if (tab.status === "complete") return;
-  await new Promise<void>((resolve, reject) => {
-    const timeout = globalThis.setTimeout(() => {
-      browser.tabs.onUpdated.removeListener(listener);
-      reject(new Error("BOSS 页面加载超时，请检查登录状态或网络"));
-    }, 30_000);
-    const listener = (updatedTabId: number, changeInfo: { status?: string }) => {
-      if (updatedTabId !== tabId || changeInfo.status !== "complete") return;
-      globalThis.clearTimeout(timeout);
-      browser.tabs.onUpdated.removeListener(listener);
-      resolve();
-    };
-    browser.tabs.onUpdated.addListener(listener);
-  });
-}
 
 function connectTask(taskId: string, tabId: number) {
   if (sockets.has(taskId)) return;
@@ -610,19 +866,19 @@ function connectTask(taskId: string, tabId: number) {
           type: "ACTION_RESULT",
           action_id: message.action.id,
           success: true,
-          data: { page_url: message.action.url, platform: "boss" },
+          data: { page_url: message.action.url, platform: deliveryPlatform(message.action.url) },
           page_state: "NAVIGATED",
         }));
         return;
       }
       await browser.tabs.sendMessage(tabId, message);
     } catch (error) {
-      if (!message) return;
+      if (!message || message.type === "REQUEST_USER_ACTION") return;
       socket.send(JSON.stringify({
         type: "ACTION_RESULT",
         action_id: message.action.id,
         success: false,
-        error: error instanceof Error ? error.message : "无法在 BOSS 页面执行浏览器动作",
+        error: error instanceof Error ? error.message : "无法在招聘页面执行浏览器动作",
       }));
     }
   });

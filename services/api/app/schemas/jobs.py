@@ -20,8 +20,10 @@ class JobCreate(BaseModel):
     publish_time: datetime | None = None
     source_url: HttpUrl | None = None
     raw_data: dict[str, Any] = Field(default_factory=dict)
+    platform_metadata: dict[str, Any] = Field(default_factory=dict)
     normalized_data: dict[str, Any] = Field(default_factory=dict)
     content_hash: str | None = Field(default=None, max_length=128)
+    job_fingerprint: str | None = Field(default=None, max_length=128)
 
 
 class JobUpdate(BaseModel):
@@ -35,6 +37,7 @@ class JobUpdate(BaseModel):
     experience_requirement: str | None = Field(default=None, max_length=500)
     source_url: HttpUrl | None = None
     raw_data: dict[str, Any] | None = None
+    platform_metadata: dict[str, Any] | None = None
 
 
 class JobRead(BaseModel):
@@ -55,8 +58,15 @@ class JobRead(BaseModel):
     publish_time: datetime | None
     source_url: str | None
     raw_data: dict[str, Any]
+    platform_metadata: dict[str, Any]
     normalized_data: dict[str, Any]
     content_hash: str | None
+    job_fingerprint: str | None
+    lifecycle_status: str = "active"
+    data_quality_score: float | None = None
+    data_quality_level: str = "unknown"
+    duplicate_group_id: str | None = None
+    last_collected_at: datetime
     created_at: datetime
     updated_at: datetime
 
@@ -66,3 +76,13 @@ class JobListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class JobPipelineRead(BaseModel):
+    job_id: UUID
+    status: str
+    quality_score: float | None = None
+    quality_level: str = "unknown"
+    lifecycle_status: str = "active"
+    raw_snapshot_count: int = 0
+    canonical: dict[str, Any] = Field(default_factory=dict)

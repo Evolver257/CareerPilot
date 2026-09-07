@@ -20,6 +20,7 @@ class ApplicationStateMachine:
         ApplicationStatus.QUEUED: {ApplicationStatus.EXECUTING},
         ApplicationStatus.EXECUTING: {
             ApplicationStatus.SUBMITTED,
+            ApplicationStatus.MANUAL_REQUIRED,
             ApplicationStatus.CAPTCHA_REQUIRED,
             ApplicationStatus.LOGIN_REQUIRED,
             ApplicationStatus.PLATFORM_LIMIT,
@@ -39,7 +40,11 @@ class ApplicationStateMachine:
         ApplicationStatus.UNKNOWN_STATE,
         ApplicationStatus.FAILED,
     }
-    terminal = {ApplicationStatus.SUBMITTED, ApplicationStatus.CANCELLED}
+    terminal = {
+        ApplicationStatus.SUBMITTED,
+        ApplicationStatus.MANUAL_REQUIRED,
+        ApplicationStatus.CANCELLED,
+    }
 
     def initialize(self, application: Application) -> None:
         application.status = ApplicationStatus.DISCOVERED.value

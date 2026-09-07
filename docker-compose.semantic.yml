@@ -1,0 +1,23 @@
+# Opt-in real CPU semantic models. No live index is rebuilt implicitly.
+services:
+  api:
+    build:
+      args:
+        INSTALL_SEMANTIC: "true"
+    environment:
+      EMBEDDING_PROVIDER: sentence_transformers
+      SEMANTIC_CACHE_DIR: /models
+      OMP_NUM_THREADS: "4"
+      RAG_RERANKER: ${RAG_RERANKER:-local}
+    volumes:
+      - ./outputs/model-cache:/models
+  worker:
+    build:
+      args:
+        INSTALL_SEMANTIC: "true"
+    environment:
+      EMBEDDING_PROVIDER: sentence_transformers
+      SEMANTIC_CACHE_DIR: /models
+      OMP_NUM_THREADS: "4"
+    volumes:
+      - ./outputs/model-cache:/models

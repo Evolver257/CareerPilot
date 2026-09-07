@@ -1,10 +1,10 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.dependencies import get_campaign_service
 from app.models.entities import Application, Campaign
-from app.models.states import CampaignJobStatus
+from app.models.states import ApplicationStatus, CampaignJobStatus
 from app.schemas.campaigns import (
     ApplicationListItem,
     ApplicationListResponse,
@@ -114,7 +114,10 @@ def _campaign_detail(campaign: Campaign) -> CampaignDetailRead:
         )
         for item in sorted(campaign.campaign_jobs, key=lambda value: value.rank)
     ]
-    return CampaignDetailRead(**_campaign_read(campaign).model_dump(), candidate_jobs=candidates)
+    return CampaignDetailRead(
+        **_campaign_read(campaign).model_dump(), candidate_jobs=candidates,
+        reused_existing=getattr(campaign, "_reused_existing", False),
+    )
 
 
 @router.get("", response_model=CampaignListResponse)
@@ -284,9 +287,18 @@ async def cancel_campaign(
 
 @applications_router.get("", response_model=ApplicationListResponse)
 async def list_applications(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    statuses: list[ApplicationStatus] | None = Query(default=None),
+    campaign_id: UUID | None = None,
+    platform: str | None = Query(default=None, max_length=50),
     service: CampaignService = Depends(get_campaign_service),
 ) -> ApplicationListResponse:
-    applications, total = await service.list_applications()
+    applications, total, counts = await service.list_applications(
+        page=page, page_size=page_size,
+        statuses=[value.value for value in statuses] if statuses else None,
+        campaign_id=campaign_id, platform=platform,
+    )
     return ApplicationListResponse(
         items=[
             ApplicationListItem(
@@ -297,6 +309,9 @@ async def list_applications(
             for item in applications
         ],
         total=total,
+        status_counts=counts,
+        page=page,
+        page_size=page_size,
     )
 
 

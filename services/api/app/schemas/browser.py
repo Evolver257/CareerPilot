@@ -130,6 +130,7 @@ class BrowserTaskCampaignGroupRead(BaseModel):
     platforms: list[str]
     task_count: int
     submitted_count: int
+    manual_count: int
     active_count: int
     waiting_count: int
     failed_count: int

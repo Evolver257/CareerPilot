@@ -49,7 +49,6 @@ class DashboardService:
             ("queued", "已排队", queued),
             ("submitted", "已投递", submitted),
         ]
-        previous = None
         funnel: list[FunnelStageRead] = []
         for key, label, count in funnel_counts:
             funnel.append(
@@ -57,11 +56,10 @@ class DashboardService:
                     key=key,
                     label=label,
                     count=count,
-                    conversion_rate=self._conversion_rate(count, previous),
+                    # Independent inventory/status snapshots are not a cohort funnel.
+                    conversion_rate=None,
                 )
             )
-            if count > 0:
-                previous = count
 
         runs = raw["agent_runs"]
         steps = [step for run in runs for step in run.steps]
@@ -105,16 +103,6 @@ class DashboardService:
             token_usage=LLMUsageRead.model_validate(usage),
             refreshed_at=datetime.now(UTC),
         )
-
-    @staticmethod
-    def _conversion_rate(count: int, previous: int | None) -> float | None:
-        if previous is None or previous <= 0:
-            return None
-        # Jobs can enter later stages through curated campaigns without a
-        # persisted high-match score, so adjacent dashboard buckets are not
-        # guaranteed to be monotonically decreasing. Keep the displayed rate
-        # a valid percentage instead of allowing dashboard serialization to fail.
-        return round(min(count / previous * 100, 100.0), 2)
 
     @staticmethod
     def _aggregate_usage(runs: list[Any]) -> dict[str, Any]:

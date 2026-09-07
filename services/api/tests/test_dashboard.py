@@ -38,7 +38,7 @@ async def test_dashboard_returns_product_metrics_and_safe_empty_states(
     assert populated.json()["funnel"][0]["count"] == 1
 
 
-async def test_dashboard_caps_non_monotonic_funnel_conversion_rates() -> None:
+async def test_dashboard_does_not_invent_conversion_rates_between_independent_counts() -> None:
     class NonMonotonicDashboardRepository:
         async def snapshot(self):
             return {
@@ -53,8 +53,8 @@ async def test_dashboard_caps_non_monotonic_funnel_conversion_rates() -> None:
     dashboard = await DashboardService(NonMonotonicDashboardRepository()).overview()
     queued = next(stage for stage in dashboard.funnel if stage.key == "queued")
     assert queued.count == 8
-    assert queued.conversion_rate == 100.0
+    assert queued.conversion_rate is None
     assert all(
-        stage.conversion_rate is None or 0 <= stage.conversion_rate <= 100
+        stage.conversion_rate is None
         for stage in dashboard.funnel
     )

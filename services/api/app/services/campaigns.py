@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import delete, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
@@ -15,6 +16,7 @@ from app.models.entities import (
     Campaign,
     CampaignJob,
     RankingRun,
+    Resume,
 )
 from app.models.states import ApplicationStatus, CampaignJobStatus, CampaignStatus
 from app.repositories.campaigns import CampaignRepository
@@ -33,6 +35,7 @@ from app.services.application_state import (
     CampaignStateMachine,
     InvalidStateTransitionError,
 )
+from app.services.job_freshness import auto_delivery_cutoff, is_fresh_for_auto_delivery
 from app.services.ranking_runs import RankingRunService, stop_ranking_run
 
 
@@ -149,13 +152,9 @@ class CampaignService:
             CampaignStatus.FAILED.value,
         }
         if campaign.status not in deletable:
-            raise CampaignMaintenanceError(
-                "Active campaigns must be cancelled before deletion"
-            )
+            raise CampaignMaintenanceError("Active campaigns must be cancelled before deletion")
         await self.session.execute(
-            update(AgentRun)
-            .where(AgentRun.campaign_id == campaign.id)
-            .values(campaign_id=None)
+            update(AgentRun).where(AgentRun.campaign_id == campaign.id).values(campaign_id=None)
         )
         await self.session.execute(
             update(BrowserTask)
@@ -184,6 +183,34 @@ class CampaignService:
         if missing:
             raise CampaignCandidateError("One or more selected jobs do not exist")
 
+        # Serialize exact-selection submissions for this resume across API workers.
+        await self.session.execute(
+            select(Resume.id).where(Resume.id == resume.id).with_for_update()
+        )
+        resume_version = resume.updated_at.isoformat()
+        recent = await self.session.scalars(
+            select(Campaign)
+            .where(
+                Campaign.resume_id == resume.id,
+                Campaign.created_at >= datetime.now(UTC) - timedelta(hours=24),
+                Campaign.status.not_in(["CANCELLED", "FAILED"]),
+            )
+            .order_by(Campaign.created_at.desc())
+        )
+        for previous in recent:
+            if (
+                previous.filters.get("selection_mode") == "user_curated"
+                and set(previous.filters.get("job_ids", []))
+                == {str(value) for value in requested_ids}
+                and previous.filters.get("resume_version") == resume_version
+                and previous.filters.get("selection_message", "") == payload.message
+                and previous.query.strip() == payload.query.strip()
+            ):
+                existing = await self.get_campaign(previous.id)
+                existing._reused_existing = True
+                await self.session.commit()
+                return existing
+
         campaign = Campaign(
             user_id=resume.user_id,
             resume_id=resume.id,
@@ -197,6 +224,8 @@ class CampaignService:
             filters={
                 "selection_mode": "user_curated",
                 "job_ids": [str(job_id) for job_id in requested_ids],
+                "resume_version": resume_version,
+                "selection_message": payload.message,
             },
         )
         self.session.add(campaign)
@@ -260,6 +289,9 @@ class CampaignService:
                 keywords=self._keywords(campaign),
                 cities=campaign.target_cities,
                 limit=self.settings.ranking_candidate_limit,
+                collected_after=auto_delivery_cutoff(
+                    max_age_days=self.settings.auto_delivery_max_job_age_days
+                ),
             )
             self.campaign_state.transition(campaign, CampaignStatus.RANKING)
             campaign.finished_at = None
@@ -310,6 +342,20 @@ class CampaignService:
         missing = [job_id for job_id in requested if job_id not in candidates]
         if missing:
             raise CampaignCandidateError("One or more jobs do not belong to this campaign")
+        stale = [
+            candidates[job_id].job
+            for job_id in requested
+            if not is_fresh_for_auto_delivery(
+                candidates[job_id].job,
+                max_age_days=self.settings.auto_delivery_max_job_age_days,
+            )
+        ]
+        if stale:
+            raise CampaignCandidateError(
+                f"{len(stale)} 个所选职位的采集时间已超过 "
+                f"{self.settings.auto_delivery_max_job_age_days} 天，已阻止加入自动投递队列；"
+                "重新检索相同岗位即可刷新采集时间"
+            )
         for job_id in requested:
             campaign_job = candidates[job_id]
             application = applications.get(job_id)
@@ -343,9 +389,7 @@ class CampaignService:
             CampaignStatus.WAITING_APPROVAL.value,
             CampaignStatus.RUNNING.value,
         }:
-            raise InvalidStateTransitionError(
-                f"Campaign cannot reject jobs from {campaign.status}"
-            )
+            raise InvalidStateTransitionError(f"Campaign cannot reject jobs from {campaign.status}")
         candidates = {item.job_id: item for item in campaign.campaign_jobs}
         applications = {item.job_id: item for item in campaign.applications}
         requested = list(dict.fromkeys(payload.job_ids))
@@ -406,8 +450,8 @@ class CampaignService:
             stop_ranking_run(ranking_run.id)
         return campaign
 
-    async def list_applications(self) -> tuple[list[Application], int]:
-        return await self.repository.list_applications()
+    async def list_applications(self, **filters) -> tuple[list[Application], int, dict[str, int]]:
+        return await self.repository.list_applications(**filters)
 
     async def transition_application(
         self,
@@ -419,6 +463,9 @@ class CampaignService:
         application = await self.repository.get_application(application_id)
         if application is None:
             raise ApplicationNotFoundError("Application not found")
+        await self.session.execute(
+            select(Campaign.id).where(Campaign.id == application.campaign_id).with_for_update()
+        )
         if action == "execute":
             self.application_state.transition(
                 application, ApplicationStatus.EXECUTING, event="execute"
@@ -427,6 +474,11 @@ class CampaignService:
             self.application_state.transition(
                 application, ApplicationStatus.SUBMITTED, event="submit"
             )
+        elif action == "manual_required":
+            self.application_state.transition(
+                application, ApplicationStatus.MANUAL_REQUIRED, event="manual_required"
+            )
+            application.failure_reason = reason
         elif action == "pause":
             self.application_state.pause(application)
         elif action == "resume":
@@ -480,6 +532,7 @@ class CampaignService:
             ApplicationStatus.EXECUTING.value: CampaignJobStatus.EXECUTING.value,
             ApplicationStatus.PAUSED.value: CampaignJobStatus.PAUSED.value,
             ApplicationStatus.SUBMITTED.value: CampaignJobStatus.SUBMITTED.value,
+            ApplicationStatus.MANUAL_REQUIRED.value: CampaignJobStatus.MANUAL_REQUIRED.value,
             ApplicationStatus.CANCELLED.value: CampaignJobStatus.CANCELLED.value,
         }
         return mapping.get(application_status, CampaignJobStatus.FAILED.value)

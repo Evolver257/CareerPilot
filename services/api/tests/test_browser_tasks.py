@@ -79,6 +79,37 @@ async def test_mock_browser_task_completes_application_and_records_actions(
     assert submitted["applied_at"] is not None
 
 
+async def test_manual_application_result_completes_task_and_marks_application(
+    client: AsyncClient,
+) -> None:
+    application_ids = await _create_queued_applications(client)
+    created = await client.post(
+        "/api/browser-tasks",
+        json={
+            "application_id": application_ids[0],
+            "platform": "mock",
+            "scenario": "MANUAL_REQUIRED",
+            "auto_start": False,
+        },
+    )
+    assert created.status_code == 201
+
+    completed = await client.post(
+        f"/api/browser-tasks/{created.json()['id']}/mock-extension"
+    )
+    assert completed.status_code == 200
+    task = completed.json()
+    assert task["status"] == "COMPLETED"
+    assert task["result"]["status"] == "MANUAL_REQUIRED"
+
+    applications = await client.get("/api/applications")
+    manual = next(
+        item for item in applications.json()["items"] if item["id"] == application_ids[0]
+    )
+    assert manual["status"] == "MANUAL_REQUIRED"
+    assert "立即网申" in (manual["failure_reason"] or "")
+
+
 async def test_campaign_browser_tasks_create_all_queued_applications_idempotently(
     client: AsyncClient,
 ) -> None:
@@ -131,6 +162,66 @@ async def test_campaign_browser_tasks_create_all_queued_applications_idempotentl
         if item["id"] in application_ids
     }
     assert statuses == {application_id: "SUBMITTED" for application_id in application_ids}
+
+
+async def test_campaign_browser_tasks_exclude_stale_jobs_at_execution_boundary(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:
+    application_ids = await _create_queued_applications(client)
+    applications = await client.get("/api/applications")
+    campaign_id = next(
+        item["campaign_id"]
+        for item in applications.json()["items"]
+        if item["id"] == application_ids[0]
+    )
+    monkeypatch.setattr(
+        "app.services.browser_tasks.is_fresh_for_auto_delivery",
+        lambda *args, **kwargs: False,
+    )
+
+    created = await client.post(
+        "/api/browser-tasks/campaign",
+        json={
+            "campaign_id": campaign_id,
+            "scenario": "SUCCESS",
+            "auto_start": False,
+        },
+    )
+
+    assert created.status_code == 201
+    batch = created.json()
+    assert batch["queued_count"] == 2
+    assert batch["created_count"] == 0
+    assert batch["failed_count"] == 2
+    assert {item["application_id"] for item in batch["failures"]} == set(application_ids)
+    assert all("重新检索" in item["reason"] for item in batch["failures"])
+
+
+async def test_pending_browser_task_rechecks_freshness_before_start(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:
+    application_ids = await _create_queued_applications(client)
+    created = await client.post(
+        "/api/browser-tasks",
+        json={
+            "application_id": application_ids[0],
+            "platform": "mock",
+            "scenario": "SUCCESS",
+            "auto_start": False,
+        },
+    )
+    assert created.status_code == 201
+
+    monkeypatch.setattr(
+        "app.services.browser_tasks.is_fresh_for_auto_delivery",
+        lambda *args, **kwargs: False,
+    )
+    started = await client.post(f"/api/browser-tasks/{created.json()['id']}/start")
+
+    assert started.status_code == 409
+    assert "重新检索" in started.json()["detail"]
 
 
 async def test_campaign_task_records_are_grouped_cancelled_and_deleted_as_one_unit(

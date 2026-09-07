@@ -3,26 +3,43 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.llm.provider import LLMProvider
+from app.platforms.registry import RecruitmentProviderRegistry
 from app.repositories.dashboard import DashboardRepository
 from app.services.agent_runtime import AgentRuntime
 from app.services.browser_tasks import BrowserTaskService
 from app.services.campaigns import CampaignService
 from app.services.career_advisor import CareerAdvisorService
+from app.services.career_memory import CareerMemoryService
 from app.services.dashboard import DashboardService
+from app.services.evaluations import EvaluationService
 from app.services.job_knowledge_rag import JobKnowledgeRAG
 from app.services.jobs import JobService
 from app.services.knowledge_indexing import KnowledgeIndexService
 from app.services.llm_settings import LLMSettingsService
 from app.services.market_insights import MarketInsightService
 from app.services.matching import MatchingService
+from app.services.mcp_connections import MCPConnectionService
 from app.services.quick_matching import QuickMatchingService
 from app.services.ranking import RankingService
 from app.services.ranking_runs import RankingRunService
+from app.services.recruitment_search import RecruitmentSearchService
 from app.services.resumes import ResumeService
 
 
 def get_job_service(session: AsyncSession = Depends(get_db)) -> JobService:
     return JobService(session)
+
+
+def get_recruitment_provider_registry(
+    session: AsyncSession = Depends(get_db),
+) -> RecruitmentProviderRegistry:
+    return RecruitmentProviderRegistry(session)
+
+
+def get_recruitment_search_service(
+    session: AsyncSession = Depends(get_db),
+) -> RecruitmentSearchService:
+    return RecruitmentSearchService(session)
 
 
 async def get_llm_provider(
@@ -106,6 +123,25 @@ def get_career_advisor_service(
     embedding_provider: LLMProvider | None = Depends(get_optional_embedding_provider),
 ) -> CareerAdvisorService:
     return CareerAdvisorService(session, provider, embedding_provider=embedding_provider)
+
+
+def get_career_memory_service(
+    session: AsyncSession = Depends(get_db),
+    embedding_provider: LLMProvider | None = Depends(get_optional_embedding_provider),
+) -> CareerMemoryService:
+    return CareerMemoryService(session, embedding_provider=embedding_provider)
+
+
+def get_mcp_connection_service(
+    session: AsyncSession = Depends(get_db),
+) -> MCPConnectionService:
+    return MCPConnectionService(session)
+
+
+def get_evaluation_service(
+    session: AsyncSession = Depends(get_db),
+) -> EvaluationService:
+    return EvaluationService(session)
 
 
 def get_browser_task_service(

@@ -8,10 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.llm.provider import LLMProvider
+from app.llm.tokenization import token_counter_for_provider
 from app.models.entities import Application, Campaign, JobScore, Resume, ResumeChunk, User
 from app.repositories.resumes import ResumeRepository
 from app.schemas.resumes import ResumeUpdate
 from app.services.resume_chunking import ResumeChunkDraft, ResumeSemanticChunker
+from app.services.resume_embeddings import replace_resume_chunks
 from app.services.resume_extraction import HeuristicResumeExtractor
 from app.services.resume_parsing import ResumeFileParser
 
@@ -37,10 +39,12 @@ class ResumeService:
         self.session = session
         self.repository = ResumeRepository(session)
         self.embedding_provider = embedding_provider
+        self.settings = get_settings()
         self.file_parser = ResumeFileParser()
         self.extractor = HeuristicResumeExtractor()
-        self.chunker = ResumeSemanticChunker()
-        self.settings = get_settings()
+        self.chunker = ResumeSemanticChunker(
+            token_counter=token_counter_for_provider(embedding_provider)
+        )
 
     async def upload(
         self,
@@ -86,7 +90,6 @@ class ResumeService:
         profile = self.extractor.extract(resume.raw_text)
         drafts = self.chunker.chunk(resume.raw_text, profile)
         resume.structured_profile = profile.model_dump()
-        await self.session.execute(delete(ResumeChunk).where(ResumeChunk.resume_id == resume.id))
         return await self._persist_chunks(resume, drafts)
 
     async def update_resume(self, resume_id: UUID, payload: ResumeUpdate) -> Resume:
@@ -120,12 +123,7 @@ class ResumeService:
             profile = self.extractor.extract(resume.raw_text)
             resume.structured_profile = profile.model_dump()
             drafts = self.chunker.chunk(resume.raw_text, profile)
-            await self.session.execute(
-                delete(ResumeChunk).where(ResumeChunk.resume_id == resume.id)
-            )
-            await self.session.execute(
-                delete(JobScore).where(JobScore.resume_id == resume.id)
-            )
+            await self.session.execute(delete(JobScore).where(JobScore.resume_id == resume.id))
             return await self._persist_chunks(resume, drafts)
 
         await self.session.commit()
@@ -142,9 +140,7 @@ class ResumeService:
             select(Application.id).where(Application.resume_id == resume.id).limit(1)
         )
         if referenced:
-            raise ResumeInUseError(
-                "Resume is used by an application plan and cannot be deleted"
-            )
+            raise ResumeInUseError("Resume is used by an application plan and cannot be deleted")
         if resume.is_default:
             replacement = await self.session.scalar(
                 select(Resume)
@@ -163,30 +159,15 @@ class ResumeService:
         return await self._persist_chunks(resume, drafts)
 
     async def _persist_chunks(self, resume: Resume, drafts: list[ResumeChunkDraft]) -> Resume:
-        chunks: list[ResumeChunk] = []
-        embedding_signature = getattr(
-            self.embedding_provider, "embedding_signature", self.settings.embedding_model
+        await replace_resume_chunks(
+            self.session,
+            resume,
+            drafts,
+            self.embedding_provider,
+            self.settings,
         )
-        for draft in drafts:
-            embedding = await self.embedding_provider.embed(
-                draft.content, model=self.settings.embedding_model
-            )
-            metadata = {
-                **draft.metadata,
-                "embedding_signature": embedding_signature,
-                "embedding_dimensions": len(embedding),
-            }
-            chunks.append(
-                ResumeChunk(
-                    resume_id=resume.id,
-                    chunk_type=draft.chunk_type,
-                    content=draft.content,
-                    chunk_metadata=metadata,
-                    embedding=embedding,
-                )
-            )
-        self.session.add_all(chunks)
         await self.session.commit()
+        await self.session.refresh(resume, attribute_names=["chunks"])
         refreshed = await self.repository.get(resume.id)
         if refreshed is None:
             raise ResumeNotFoundError("Resume disappeared during persistence")

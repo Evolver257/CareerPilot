@@ -3,17 +3,18 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, case, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import Settings, get_settings
 from app.core.database import SessionLocal
-from app.llm.provider import LLMProvider
+from app.llm.provider import LLMProvider, embed_texts
+from app.llm.tokenization import token_counter_for_provider
 from app.models.entities import (
     Job,
     JobKnowledgeChunk,
@@ -25,20 +26,21 @@ from app.models.entities import (
     SkillAlias,
     SkillTaxonomy,
 )
+from app.models.work import BackgroundWork
 from app.schemas.knowledge import KnowledgeIndexRunCreate
 from app.services.job_knowledge import (
     JOB_KNOWLEDGE_PARSER_VERSION,
     JOB_KNOWLEDGE_VERSION,
     build_job_knowledge_chunks,
     canonicalize_skill,
+    normalize_experience_requirement,
     normalize_skill_name,
     skill_category,
 )
+from app.services.job_knowledge_rag import clear_knowledge_search_cache
+from app.services.work_queue import enqueue_work
 
 KNOWLEDGE_INDEX_TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
-KNOWLEDGE_EMBEDDING_DIMENSIONS = 384
-
-
 class KnowledgeIndexNotFoundError(ValueError):
     pass
 
@@ -85,11 +87,23 @@ def _structured_job(job: Job) -> dict[str, Any]:
     return (job.normalized_data or {}).get("structured_job") or {}
 
 
+def _normalized_experience(job: Job, structured: dict[str, Any]) -> str:
+    for candidate in (
+        structured.get("experience_requirement"),
+        job.experience_requirement,
+    ):
+        normalized = normalize_experience_requirement(str(candidate or ""))
+        if normalized:
+            return normalized
+    return ""
+
+
 def _embedding_signature(provider: LLMProvider, settings: Settings) -> str:
     dimensions = int(getattr(provider, "dimensions", settings.embedding_dimensions))
-    if dimensions != KNOWLEDGE_EMBEDDING_DIMENSIONS:
+    if dimensions != settings.embedding_dimensions:
         raise KnowledgeIndexJobError(
-            "岗位知识库当前使用 384 维向量；请将 EMBEDDING_DIMENSIONS 设置为 384 后重试。"
+            "岗位知识库向量维度不匹配；"
+            f"当前配置为 {settings.embedding_dimensions}，Provider 为 {dimensions}。"
         )
     signature = str(getattr(provider, "embedding_signature", "") or "")
     if not signature:
@@ -125,19 +139,166 @@ class KnowledgeIndexService:
         )
         return runs, int(total)
 
+    async def health(self) -> dict[str, Any]:
+        documents, indexed, updated = (
+            await self.session.execute(
+                select(
+                    func.count(JobKnowledgeDocument.id),
+                    func.count(func.distinct(JobKnowledgeDocument.job_id)),
+                    func.max(JobKnowledgeDocument.updated_at),
+                ).where(JobKnowledgeDocument.active.is_(True))
+            )
+        ).one()
+        chunks = (
+            await self.session.scalar(
+                select(func.count(JobKnowledgeChunk.id))
+                .join(JobKnowledgeDocument)
+                .where(JobKnowledgeDocument.active.is_(True))
+            )
+            or 0
+        )
+        vector_conditions = [
+            JobKnowledgeDocument.active.is_(True),
+            JobKnowledgeChunk.embedding.is_not(None),
+            JobKnowledgeChunk.embedding_dimensions == self.settings.embedding_dimensions,
+        ]
+        signature = str(getattr(self.embedding_provider, "embedding_signature", "") or "")
+        if signature:
+            vector_conditions.append(JobKnowledgeChunk.embedding_signature == signature)
+        embedded_chunks = (
+            await self.session.scalar(
+                select(func.count(JobKnowledgeChunk.id))
+                .join(JobKnowledgeDocument)
+                .where(*vector_conditions)
+            )
+            or 0
+        )
+        jobs_total = await self.session.scalar(select(func.count(Job.id))) or 0
+        chunk_is_compatible = and_(
+            JobKnowledgeChunk.embedding.is_not(None),
+            JobKnowledgeChunk.embedding_dimensions == self.settings.embedding_dimensions,
+        )
+        if signature:
+            chunk_is_compatible = and_(
+                chunk_is_compatible,
+                JobKnowledgeChunk.embedding_signature == signature,
+            )
+        coverage_rows = (
+            await self.session.execute(
+                select(
+                    Job.id.label("job_id"),
+                    Job.content_hash.label("job_content_hash"),
+                    JobKnowledgeDocument.id.label("document_id"),
+                    JobKnowledgeDocument.current_embedding_signature,
+                    JobKnowledgeDocument.knowledge_version,
+                    JobVersion.content_hash.label("version_content_hash"),
+                    func.count(JobKnowledgeChunk.id).label("document_chunk_count"),
+                    func.sum(case((chunk_is_compatible, 0), else_=1)).label(
+                        "incompatible_chunk_count"
+                    ),
+                )
+                .select_from(Job)
+                .outerjoin(
+                    JobKnowledgeDocument,
+                    and_(
+                        JobKnowledgeDocument.job_id == Job.id,
+                        JobKnowledgeDocument.active.is_(True),
+                    ),
+                )
+                .outerjoin(JobVersion, JobVersion.id == JobKnowledgeDocument.job_version_id)
+                .outerjoin(
+                    JobKnowledgeChunk,
+                    JobKnowledgeChunk.document_id == JobKnowledgeDocument.id,
+                )
+                .group_by(
+                    Job.id,
+                    Job.content_hash,
+                    JobKnowledgeDocument.id,
+                    JobKnowledgeDocument.current_embedding_signature,
+                    JobKnowledgeDocument.knowledge_version,
+                    JobVersion.content_hash,
+                )
+            )
+        ).all()
+        indexed_job_ids: set[UUID] = set()
+        compatible_job_ids: set[UUID] = set()
+        for row in coverage_rows:
+            if row.document_id is None:
+                continue
+            indexed_job_ids.add(row.job_id)
+            hash_matches = bool(
+                row.job_content_hash
+                and row.version_content_hash
+                and row.job_content_hash == row.version_content_hash
+            )
+            document_is_compatible = bool(
+                row.knowledge_version == JOB_KNOWLEDGE_VERSION
+                and row.current_embedding_signature == signature
+                and row.document_chunk_count
+                and not row.incompatible_chunk_count
+                and hash_matches
+            )
+            if document_is_compatible:
+                compatible_job_ids.add(row.job_id)
+        compatible_jobs = len(compatible_job_ids)
+        needs_update_jobs = max(0, int(jobs_total) - compatible_jobs)
+        if not documents or not chunks:
+            knowledge_status = "not_built"
+        elif compatible_jobs == int(jobs_total) and jobs_total > 0:
+            knowledge_status = "ready"
+        elif len(indexed_job_ids) < int(jobs_total):
+            knowledge_status = "partial"
+        else:
+            knowledge_status = "needs_update"
+        active = await self.session.scalar(
+            select(KnowledgeIndexRun)
+            .where(KnowledgeIndexRun.status.in_(["PENDING", "RUNNING"]))
+            .order_by(KnowledgeIndexRun.created_at)
+            .limit(1)
+        )
+        latest = active or await self.session.scalar(
+            select(KnowledgeIndexRun).order_by(KnowledgeIndexRun.created_at.desc()).limit(1)
+        )
+        return {
+            "status": knowledge_status,
+            "ready": knowledge_status == "ready" and active is None,
+            "jobs_total": jobs_total,
+            "document_count": documents,
+            "indexed_jobs": indexed,
+            "compatible_jobs": compatible_jobs,
+            "needs_update_jobs": needs_update_jobs,
+            "chunk_count": chunks,
+            "embedded_chunk_count": embedded_chunks,
+            "coverage_percent": round(compatible_jobs / max(1, int(jobs_total)) * 100, 1),
+            "embedding_model": str(
+                getattr(
+                    self.embedding_provider,
+                    "embedding_model",
+                    getattr(self.embedding_provider, "model", self.settings.embedding_model),
+                )
+                or self.settings.embedding_model
+            ),
+            "embedding_dimensions": self.settings.embedding_dimensions,
+            "updated_at": updated,
+            "latest_run": latest,
+        }
+
     async def get_run(self, run_id: UUID) -> KnowledgeIndexRun:
-        run = await self.session.get(KnowledgeIndexRun, run_id)
+        run = await self.session.get(KnowledgeIndexRun, run_id, populate_existing=True)
         if run is None:
             raise KnowledgeIndexNotFoundError("知识库索引任务不存在")
         return run
 
     async def list_items(self, run_id: UUID) -> tuple[list[KnowledgeIndexRunItem], int]:
         await self.get_run(run_id)
-        total = await self.session.scalar(
-            select(func.count(KnowledgeIndexRunItem.id)).where(
-                KnowledgeIndexRunItem.run_id == run_id
+        total = (
+            await self.session.scalar(
+                select(func.count(KnowledgeIndexRunItem.id)).where(
+                    KnowledgeIndexRunItem.run_id == run_id
+                )
             )
-        ) or 0
+            or 0
+        )
         items = list(
             (
                 await self.session.scalars(
@@ -169,6 +330,13 @@ class KnowledgeIndexService:
         self.session.add_all(
             [KnowledgeIndexRunItem(run_id=run.id, job_id=job_id) for job_id in job_ids]
         )
+        if job_ids and payload.auto_start and get_settings().independent_worker:
+            await enqueue_work(
+                self.session,
+                "knowledge",
+                run.id,
+                delay_seconds=10 if payload.mode == "incremental" else 0,
+            )
         await self.session.commit()
         await self.session.refresh(run)
         return run
@@ -244,6 +412,8 @@ class KnowledgeIndexService:
                         "last_reused_embedding_count": result.reused_embedding_count,
                     }
                     await self.session.commit()
+                    if not result.skipped:
+                        clear_knowledge_search_cache()
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -317,6 +487,8 @@ class KnowledgeIndexService:
         run.processed_jobs = run.succeeded_jobs + run.skipped_jobs
         run.failed_jobs = 0
         run.progress = round(run.processed_jobs / max(1, run.total_jobs) * 100)
+        if get_settings().independent_worker:
+            await enqueue_work(self.session, "knowledge", run.id, retry=True)
         await self.session.commit()
         return run
 
@@ -358,7 +530,12 @@ class KnowledgeIndexService:
         return [
             job.id
             for job in jobs
-            if self._job_needs_index(job, by_job.get(job.id, []), signature)
+            if self._job_needs_index(
+                job,
+                by_job.get(job.id, []),
+                signature,
+                self.settings.embedding_dimensions,
+            )
         ]
 
     @staticmethod
@@ -366,6 +543,7 @@ class KnowledgeIndexService:
         job: Job,
         documents: list[JobKnowledgeDocument],
         embedding_signature: str,
+        embedding_dimensions: int,
     ) -> bool:
         current = next((document for document in documents if document.active), None)
         if current is None or current.job_version is None:
@@ -376,7 +554,23 @@ class KnowledgeIndexService:
             return True
         if embedding_signature and current.current_embedding_signature != embedding_signature:
             return True
-        return not bool(current.chunks)
+        if not current.chunks:
+            return True
+        chunk_keys = [
+            (chunk.section_type, chunk.content_hash)
+            for chunk in current.chunks
+        ]
+        if len(chunk_keys) != len(set(chunk_keys)):
+            return True
+        return any(
+            chunk.embedding is None
+            or chunk.embedding_dimensions != embedding_dimensions
+            or (
+                embedding_signature
+                and chunk.embedding_signature != embedding_signature
+            )
+            for chunk in current.chunks
+        )
 
     async def _index_job(
         self,
@@ -387,7 +581,11 @@ class KnowledgeIndexService:
     ) -> IndexedJobResult:
         job = await self.session.scalar(
             select(Job)
-            .options(selectinload(Job.skills), selectinload(Job.company))
+            .options(
+                selectinload(Job.skills),
+                selectinload(Job.company),
+                selectinload(Job.requirements),
+            )
             .where(Job.id == job_id)
         )
         if job is None:
@@ -482,11 +680,7 @@ class KnowledgeIndexService:
                     or job.education_requirement
                     or ""
                 ),
-                normalized_experience=(
-                    str(structured.get("experience_requirement") or "").strip()
-                    or job.experience_requirement
-                    or ""
-                ),
+                normalized_experience=_normalized_experience(job, structured),
                 salary_min=job.salary_min,
                 salary_max=job.salary_max,
                 salary_unit=_salary_unit(job),
@@ -500,31 +694,41 @@ class KnowledgeIndexService:
         else:
             current_document.role_family = str(structured.get("role_category") or "").strip()
             current_document.normalized_title = job.title
-            current_document.normalized_city = job.location or str(
-                structured.get("location") or ""
-            ).strip()
+            current_document.normalized_city = (
+                job.location or str(structured.get("location") or "").strip()
+            )
             current_document.normalized_education = (
                 str(structured.get("education_requirement") or "").strip()
                 or job.education_requirement
                 or ""
             )
-            current_document.normalized_experience = (
-                str(structured.get("experience_requirement") or "").strip()
-                or job.experience_requirement
-                or ""
-            )
+            current_document.normalized_experience = _normalized_experience(job, structured)
             current_document.salary_min = job.salary_min
             current_document.salary_max = job.salary_max
             current_document.salary_unit = _salary_unit(job)
-            current_document.employment_type = job.job_type or str(
-                structured.get("job_type") or ""
-            ).strip()
+            current_document.employment_type = (
+                job.job_type or str(structured.get("job_type") or "").strip()
+            )
             current_document.current_embedding_signature = signature
             current_document.knowledge_version = JOB_KNOWLEDGE_VERSION
             current_document.active = True
 
-        drafts = build_job_knowledge_chunks(job)
-        hashes = [draft.content_hash for draft in drafts]
+        # The database uniqueness boundary is section + content hash. Some
+        # imported/legacy normalized payloads can produce the same section
+        # twice, so normalize drafts before embedding and inserting them.
+        drafts = []
+        seen_draft_keys: set[tuple[str, str]] = set()
+        for draft in build_job_knowledge_chunks(
+            job,
+            token_counter=token_counter_for_provider(provider),
+        ):
+            draft_key = (draft.section_type, draft.content_hash)
+            if draft_key in seen_draft_keys:
+                continue
+            seen_draft_keys.add(draft_key)
+            drafts.append(draft)
+        draft_keys = [(draft.section_type, draft.content_hash) for draft in drafts]
+        hashes = [content_hash for _, content_hash in draft_keys]
         reusable_chunks = (
             list(
                 (
@@ -539,34 +743,55 @@ class KnowledgeIndexService:
             if hashes
             else []
         )
-        reusable_by_hash = {
-            chunk.content_hash: chunk
+        reusable_by_key = {
+            (chunk.section_type, chunk.content_hash): chunk
             for chunk in reusable_chunks
-            if len(chunk.embedding or []) == KNOWLEDGE_EMBEDDING_DIMENSIONS
+            if len(chunk.embedding or []) == self.settings.embedding_dimensions
+        }
+
+        missing = [
+            draft
+            for draft in drafts
+            if (draft.section_type, draft.content_hash) not in reusable_by_key
+        ]
+        generated_vectors = await embed_texts(
+            provider,
+            [draft.content for draft in missing],
+            model=self.settings.embedding_model,
+        )
+        generated_by_key = {
+            (draft.section_type, draft.content_hash): vector
+            for draft, vector in zip(missing, generated_vectors, strict=True)
         }
 
         embeddings: list[tuple[Any, list[float]]] = []
         reused = 0
         for draft in drafts:
-            cached = reusable_by_hash.get(draft.content_hash)
+            cached = reusable_by_key.get((draft.section_type, draft.content_hash))
             if cached is not None and cached.embedding is not None:
                 embedding = list(cached.embedding)
                 reused += 1
             else:
-                embedding = list(await provider.embed(draft.content))
-            if len(embedding) != KNOWLEDGE_EMBEDDING_DIMENSIONS:
+                embedding = list(generated_by_key[(draft.section_type, draft.content_hash)])
+            if len(embedding) != self.settings.embedding_dimensions:
                 raise KnowledgeIndexJobError(
                     "Embedding 维度不匹配："
-                    f"期望 {KNOWLEDGE_EMBEDDING_DIMENSIONS}，实际 {len(embedding)}"
+                    f"期望 {self.settings.embedding_dimensions}，实际 {len(embedding)}"
                 )
             embeddings.append((draft, embedding))
 
         await self.session.execute(
             delete(JobKnowledgeChunk).where(JobKnowledgeChunk.document_id == current_document.id)
         )
-        self.session.add_all(
-            [
+        chunk_rows: list[JobKnowledgeChunk] = []
+        company_name = str((job.raw_data or {}).get("company_name") or "").strip()
+        if not company_name and job.company is not None:
+            company_name = job.company.name
+        for draft, embedding in embeddings:
+            chunk_id = uuid4()
+            chunk_rows.append(
                 JobKnowledgeChunk(
+                    id=chunk_id,
                     document_id=current_document.id,
                     job_id=job.id,
                     section_type=draft.section_type,
@@ -574,7 +799,13 @@ class KnowledgeIndexService:
                     content_hash=draft.content_hash,
                     token_count=draft.token_count,
                     embedding=embedding,
-                    embedding_provider=str(getattr(provider, "provider_name", "unknown")),
+                    embedding_provider=str(
+                        getattr(
+                            provider,
+                            "embedding_provider_name",
+                            getattr(provider, "provider_name", "unknown"),
+                        )
+                    ),
                     embedding_model=str(
                         getattr(provider, "embedding_model", getattr(provider, "model", "unknown"))
                     ),
@@ -582,13 +813,32 @@ class KnowledgeIndexService:
                     embedding_signature=signature,
                     chunk_metadata={
                         **draft.metadata,
+                        "document_id": str(current_document.id),
+                        "chunk_id": str(chunk_id),
+                        "parent_id": str(current_document.id),
+                        "filename": f"{job.platform}-{job.title}",
+                        "title": job.title,
+                        "section": draft.section_type,
+                        "page": None,
+                        "document_type": "job_description",
+                        "author": company_name,
+                        "created_at": (
+                            current_document.created_at.isoformat()
+                            if current_document.created_at
+                            else None
+                        ),
+                        "updated_at": (
+                            current_document.updated_at.isoformat()
+                            if current_document.updated_at
+                            else None
+                        ),
+                        "tags": [skill.skill_name for skill in job.skills[:20]],
                         "knowledge_version": JOB_KNOWLEDGE_VERSION,
                         "source_job_id": str(job.id),
                     },
                 )
-                for draft, embedding in embeddings
-            ]
-        )
+            )
+        self.session.add_all(chunk_rows)
         await self._refresh_skill_facts(job)
         return IndexedJobResult(
             skipped=False,
@@ -681,7 +931,10 @@ def _skill_evidence(description: str, skill_name: str) -> str:
         lowered = normalize_skill_name(line)
         if any(alias and alias in lowered for alias in aliases):
             return line.strip()[:500]
-    return f"岗位解析提取技能：{skill_name}"
+    # A derived skill is not evidence by itself. Keep the fact but leave its
+    # evidence empty so downstream agents can distinguish source text from an
+    # inference and avoid presenting invented quotations.
+    return ""
 
 
 _active_knowledge_tasks: dict[UUID, asyncio.Task[None]] = {}
@@ -710,12 +963,101 @@ async def execute_knowledge_index(run_id: UUID) -> None:
 
 
 def schedule_knowledge_index(run_id: UUID) -> None:
+    if get_settings().independent_worker:
+        return
     existing = _active_knowledge_tasks.get(run_id)
     if existing is not None and not existing.done():
         return
     task = asyncio.create_task(execute_knowledge_index(run_id))
     _active_knowledge_tasks[run_id] = task
     task.add_done_callback(lambda _: _active_knowledge_tasks.pop(run_id, None))
+
+
+async def enqueue_incremental_knowledge_index(
+    session: AsyncSession,
+    job_ids: list[UUID],
+    *,
+    force: bool = False,
+) -> UUID | None:
+    """Persist and start one incremental run for newly written job records.
+
+    The run is created with the caller's transaction/session so a successful
+    job write always leaves a durable indexing checkpoint. Runtime execution
+    uses its own session and is only scheduled for the production PostgreSQL
+    process; this keeps SQLite unit-test sessions isolated from the developer
+    database while preserving the same persisted behavior.
+    """
+    unique_job_ids = list(dict.fromkeys(job_ids))
+    if not unique_job_ids:
+        return None
+    bind = getattr(session.sync_session, "bind", None)
+    if bind is not None and bind.dialect.name == "postgresql":
+        # A short durable debounce turns rapid imports into one run. The queue's
+        # available_at gives other API workers time to join before execution.
+        from sqlalchemy import text
+
+        await session.execute(text("SELECT pg_advisory_xact_lock(4200917)"))
+        pending = await session.scalar(
+            select(KnowledgeIndexRun)
+            .join(BackgroundWork, BackgroundWork.run_id == KnowledgeIndexRun.id)
+            .where(
+                BackgroundWork.kind == "knowledge",
+                BackgroundWork.status == "PENDING",
+                KnowledgeIndexRun.mode == "incremental",
+                KnowledgeIndexRun.status == "PENDING",
+                KnowledgeIndexRun.created_at >= _now() - timedelta(seconds=10),
+            )
+            .order_by(KnowledgeIndexRun.created_at.desc())
+            .with_for_update()
+        )
+        if pending is not None:
+            existing = set(
+                await session.scalars(
+                    select(KnowledgeIndexRunItem.job_id).where(
+                        KnowledgeIndexRunItem.run_id == pending.id
+                    )
+                )
+            )
+            added = [job_id for job_id in unique_job_ids if job_id not in existing]
+            if added:
+                session.add_all(
+                    [KnowledgeIndexRunItem(run_id=pending.id, job_id=job_id) for job_id in added]
+                )
+                request = dict(pending.request_payload)
+                request["job_ids"] = list(
+                    dict.fromkeys([*request.get("job_ids", []), *(str(value) for value in added)])
+                )
+                pending.request_payload = request
+                pending.total_jobs += len(added)
+                work = await session.scalar(
+                    select(BackgroundWork).where(
+                        BackgroundWork.kind == "knowledge",
+                        BackgroundWork.run_id == pending.id,
+                    )
+                )
+                if work is not None:
+                    work.available_at = min(
+                        _now() + timedelta(seconds=5), pending.created_at + timedelta(seconds=15)
+                    )
+            if force:
+                pending.request_payload = {
+                    **dict(pending.request_payload),
+                    "force": True,
+                }
+            if added or force:
+                await session.commit()
+            return pending.id
+    run = await KnowledgeIndexService(session).create(
+        KnowledgeIndexRunCreate(
+            mode="incremental",
+            job_ids=unique_job_ids,
+            force=force,
+            auto_start=True,
+        )
+    )
+    if bind is not None and bind.dialect.name == "postgresql":
+        schedule_knowledge_index(run.id)
+    return run.id
 
 
 def stop_knowledge_index(run_id: UUID) -> None:
@@ -725,6 +1067,8 @@ def stop_knowledge_index(run_id: UUID) -> None:
 
 
 async def recover_interrupted_knowledge_indexes() -> list[UUID]:
+    if get_settings().independent_worker:
+        return []
     async with SessionLocal() as session:
         run_ids = list(
             (
@@ -756,6 +1100,29 @@ async def recover_interrupted_knowledge_indexes() -> list[UUID]:
             )
             await session.commit()
         return run_ids
+
+
+async def run_knowledge_consistency_check() -> dict[str, Any]:
+    """Run a read-only startup check without scheduling or computing embeddings."""
+
+    embedding_provider: LLMProvider | None = None
+    try:
+        from app.services.llm_settings import LLMSettingsService
+
+        async with SessionLocal() as session:
+            try:
+                embedding_provider = await LLMSettingsService(
+                    session
+                ).get_runtime_embedding_provider()
+            except Exception:
+                # A missing optional provider must not prevent the API from
+                # starting. The health result will still report the counts.
+                embedding_provider = None
+            return await KnowledgeIndexService(session, embedding_provider).health()
+    except Exception:
+        # Startup diagnostics are best-effort and must never create a recovery
+        # task or make the application unavailable.
+        return {"status": "not_built", "ready": False, "check_failed": True}
 
 
 async def shutdown_knowledge_index_tasks() -> None:

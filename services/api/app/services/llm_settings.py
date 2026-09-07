@@ -218,6 +218,14 @@ class LLMSettingsService:
         """Resolve the vector provider independently from the judge provider."""
 
         provider = self.settings.embedding_provider.strip().lower()
+        if provider == "sentence_transformers":
+            from app.llm.local_semantic import LocalSemanticProvider
+
+            return LocalSemanticProvider(
+                self.settings.semantic_model,
+                self.settings.semantic_cache_dir,
+                self.settings.embedding_dimensions,
+            )
         if provider in {"", "auto"}:
             return await self.get_runtime_provider()
         if provider == "mock":
@@ -246,9 +254,7 @@ class LLMSettingsService:
             )
             if credential is not None:
                 return self._build_remote_provider(credential)
-        raise LLMProviderNotConfiguredError(
-            f"{provider} embedding API key is not configured"
-        )
+        raise LLMProviderNotConfiguredError(f"{provider} embedding API key is not configured")
 
     async def _run_connection_test(
         self, provider: ProviderName, model: str, remote_provider: LLMProvider

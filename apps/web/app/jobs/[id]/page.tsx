@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   analyzeJob,
@@ -11,6 +11,9 @@ import {
   type Job,
   type JobAnalysis,
 } from "../../../lib/api";
+import { formatJobCollectionTime, isJobFreshForAutoDelivery } from "../../../lib/job-freshness";
+import { jobEducation, jobExperience, jobPlatformLabel, jobSalary, rawJobText } from "../../../lib/job-presentation";
+import { ZhaopinJobDescription } from "../../../components/zhaopin-job-description";
 
 type JobNeighbors = {
   previous: Job | null;
@@ -18,8 +21,7 @@ type JobNeighbors = {
 };
 
 function getRawText(job: Job, key: string): string | null {
-  const value = job.raw_data[key];
-  return typeof value === "string" && value.trim() ? value.trim() : null;
+  return rawJobText(job, key);
 }
 
 function getCompanyName(job: Job): string {
@@ -28,15 +30,7 @@ function getCompanyName(job: Job): string {
 }
 
 function getSalaryText(job: Job, analysis?: JobAnalysis | null): string {
-  const capturedSalary = getRawText(job, "salary_text");
-  if (capturedSalary && !/[\uE000-\uF8FF]/.test(capturedSalary)) return capturedSalary;
-
-  const minimum = job.salary_min ?? analysis?.structured_job.salary.minimum ?? null;
-  const maximum = job.salary_max ?? analysis?.structured_job.salary.maximum ?? null;
-  if (minimum !== null && maximum !== null) return `${minimum} - ${maximum}`;
-  if (minimum !== null) return `${minimum}+`;
-  if (maximum !== null) return `最高 ${maximum}`;
-  return "薪资面议";
+  return jobSalary(job, analysis);
 }
 
 function JobSwitcher({ neighbors }: { neighbors: JobNeighbors }) {
@@ -72,7 +66,7 @@ function RequirementList({ items, empty }: { items: string[]; empty: string }) {
   );
 }
 
-function StructuredJobDescription({ analysis, rawDescription }: { analysis: JobAnalysis; rawDescription: string }) {
+function StructuredJobDescription({ analysis, rawDescription, showOriginal = true }: { analysis: JobAnalysis; rawDescription: string; showOriginal?: boolean }) {
   const profile = analysis.structured_job;
   const requiredSkills = analysis.skills.filter((skill) => skill.skill_type !== "preferred");
   const preferredSkills = analysis.skills.filter((skill) => skill.skill_type === "preferred");
@@ -86,11 +80,11 @@ function StructuredJobDescription({ analysis, rawDescription }: { analysis: JobA
         <div className="mt-5 grid gap-3 md:grid-cols-2">
           <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4">
             <p className="text-xs font-semibold text-indigo-600">学历要求</p>
-            <p className="mt-2 text-lg font-semibold text-indigo-950">{analysis.requirements.education || profile.education_requirement || "未注明学历要求"}</p>
+            <p className="mt-2 text-lg font-semibold text-indigo-950">{jobEducation(analysis.job, analysis)}</p>
           </div>
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
             <p className="text-xs font-semibold text-slate-500">经验要求</p>
-            <p className="mt-2 text-lg font-semibold text-slate-800">{analysis.requirements.experience || profile.experience_requirement || "未注明经验要求"}</p>
+            <p className="mt-2 text-lg font-semibold text-slate-800">{jobExperience(analysis.job, analysis)}</p>
           </div>
         </div>
         <p className="mt-4 leading-7 text-slate-600">{profile.summary || "职位信息已完成结构化解析。"}</p>
@@ -113,10 +107,10 @@ function StructuredJobDescription({ analysis, rawDescription }: { analysis: JobA
 
       {analysis.requirements.benefits.length > 0 && <div className="panel"><p className="eyebrow">职位提供</p><h2 className="mt-2 text-xl font-semibold">福利与实习收获</h2><RequirementList empty="" items={analysis.requirements.benefits} /></div>}
 
-      <details className="panel group">
+      {showOriginal && <details className="panel group">
         <summary className="cursor-pointer font-semibold text-slate-800">查看原始职位描述</summary>
         <div className="mt-4 whitespace-pre-wrap rounded-xl bg-slate-50 p-5 text-sm leading-7 text-slate-600">{rawDescription}</div>
-      </details>
+      </details>}
     </section>
   );
 }
@@ -129,6 +123,8 @@ export default function JobDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [neighbors, setNeighbors] = useState<JobNeighbors>({ previous: null, next: null });
+  const activeId = useRef(params.id);
+  activeId.current = params.id;
 
   useEffect(() => {
     if (!params.id) return;
@@ -137,23 +133,23 @@ export default function JobDetailPage() {
       setAnalyzing(true);
       setError(null);
       setAnalysisError(null);
+      setJob(null);
+      setAnalysis(null);
       try {
-        const [loadedJob, loadedAnalysis] = await Promise.all([
-          getJob(params.id),
-          analyzeJob(params.id),
-        ]);
+        const loadedJob = await getJob(params.id);
         if (cancelled) return;
-        setJob(loadedAnalysis.job ?? loadedJob);
-        setAnalysis(loadedAnalysis);
-        setAnalyzing(false);
+        setJob(loadedJob);
+        try {
+          const loadedAnalysis = await analyzeJob(params.id);
+          if (cancelled) return;
+          setJob(loadedAnalysis.job ?? loadedJob);
+          setAnalysis(loadedAnalysis);
+        } catch (reason) {
+          if (!cancelled) setAnalysisError(reason instanceof Error ? reason.message : "职位自动解析失败。");
+        }
       } catch (reason) {
         if (cancelled) return;
-        try {
-          setJob(await getJob(params.id));
-          setAnalysisError(reason instanceof Error ? reason.message : "职位自动解析失败。");
-        } catch {
-          setError("职位不存在或 API 暂不可用。");
-        }
+        setError("职位不存在或 API 暂不可用。");
       } finally {
         if (!cancelled) {
           setAnalyzing(false);
@@ -167,6 +163,7 @@ export default function JobDetailPage() {
   useEffect(() => {
     if (!params.id) return;
     let cancelled = false;
+    setNeighbors({ previous: null, next: null });
     getJobs({ page: 1, page_size: 100 })
       .then((response) => {
         if (cancelled) return;
@@ -184,16 +181,18 @@ export default function JobDetailPage() {
 
   async function handleAnalyze() {
     if (!params.id) return;
+    const requestedId = params.id;
     setAnalyzing(true);
     setAnalysisError(null);
     try {
-      const nextAnalysis = await analyzeJob(params.id);
+      const nextAnalysis = await analyzeJob(requestedId);
+      if (activeId.current !== requestedId) return;
       setAnalysis(nextAnalysis);
       setJob(nextAnalysis.job);
     } catch (reason) {
-      setAnalysisError(reason instanceof Error ? reason.message : "职位分析失败。");
+      if (activeId.current === requestedId) setAnalysisError(reason instanceof Error ? reason.message : "职位分析失败。");
     } finally {
-      setAnalyzing(false);
+      if (activeId.current === requestedId) setAnalyzing(false);
     }
   }
 
@@ -204,17 +203,19 @@ export default function JobDetailPage() {
       {error && <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-800">{error}</div>}
       {analysisError && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-800">职位已加载，但自动解析暂时失败：{analysisError}</div>}
       {!job && !error && <div className="panel text-slate-500">加载中…</div>}
-      {job && (
+      {job && job.id === params.id && (
         <>
+          {!isJobFreshForAutoDelivery(job) && <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-800"><span className="font-semibold">该职位采集信息已超过 3 天，默认不纳入自动投递。</span> 请重新采集相同岗位以刷新有效期；你仍可查看详情或前往{jobPlatformLabel(job.platform)}原页面确认。</div>}
           <header className="panel">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
-                <p className="eyebrow">{job.platform}</p>
+                <p className="eyebrow">{jobPlatformLabel(job.platform)}</p>
                 <h1 className="mt-3 text-3xl font-semibold">{job.title}</h1>
                 <div className="mt-5 grid gap-3 sm:grid-cols-2">
                   <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
                     <p className="text-xs font-semibold text-emerald-700">薪资</p>
-                    <p className="mt-2 text-xl font-semibold text-emerald-900">{getSalaryText(job, analysis)}</p>
+                    <p className="mt-2 text-xl font-semibold text-emerald-900 dark:text-emerald-200">{getSalaryText(job, analysis)}</p>
+                    {job.platform === "zhaopin" && getRawText(job, "salary_source") === "search_card" && <p className="mt-2 text-xs text-emerald-700 dark:text-emerald-300">薪资来自同一岗位的智联搜索卡片</p>}
                   </div>
                   <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4">
                     <p className="text-xs font-semibold text-indigo-700">公司</p>
@@ -224,20 +225,24 @@ export default function JobDetailPage() {
                 <div className="mt-4 flex flex-wrap gap-2 text-sm">
                   <span className="rounded-full bg-slate-100 px-3 py-1.5 text-slate-700">地点 · {job.location ?? "未注明"}</span>
                   <span className="rounded-full bg-slate-100 px-3 py-1.5 text-slate-700">类型 · {job.job_type ?? "未注明"}</span>
-                  <span className="rounded-full bg-indigo-50 px-3 py-1.5 font-medium text-indigo-700">学历 · {job.education_requirement || analysis?.requirements.education || "未注明"}</span>
-                  <span className="rounded-full bg-slate-100 px-3 py-1.5 text-slate-700">经验 · {job.experience_requirement || analysis?.requirements.experience || "未注明"}</span>
+                  <span className="rounded-full bg-indigo-50 px-3 py-1.5 font-medium text-indigo-700">学历 · {jobEducation(job, analysis)}</span>
+                  <span className="rounded-full bg-slate-100 px-3 py-1.5 text-slate-700">经验 · {jobExperience(job, analysis)}</span>
+                  <span className={`rounded-full px-3 py-1.5 font-medium ${isJobFreshForAutoDelivery(job) ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>最近采集 · {formatJobCollectionTime(job)}</span>
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
-                <span className={`rounded-xl px-4 py-2.5 text-sm font-medium ${analyzing ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{analyzing ? "正在解析 JD…" : "职位分析已就绪"}</span>
-                {job.source_url && <a className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:border-indigo-300 hover:text-indigo-700" href={job.source_url} rel="noreferrer" target="_blank">BOSS 原页面</a>}
+                <span className={`rounded-xl px-4 py-2.5 text-sm font-medium ${analyzing || !analysis ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{analyzing ? "正在解析 JD…" : analysis ? "职位分析已就绪" : "JD 已保存 · 解析待重试"}</span>
+                {job.source_url && <a className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:border-indigo-300 hover:text-indigo-700" href={job.source_url} rel="noreferrer" target="_blank">{jobPlatformLabel(job.platform)}原页面</a>}
                 <button className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:border-indigo-300 hover:text-indigo-700 disabled:cursor-not-allowed disabled:opacity-50" disabled={analyzing} onClick={() => void handleAnalyze()} type="button">
                   {analyzing ? "解析中…" : "刷新解析"}
                 </button>
               </div>
             </div>
           </header>
-          {analysis ? <StructuredJobDescription analysis={analysis} rawDescription={job.description} /> : analyzing && <section className="panel animate-pulse text-slate-500">正在提取岗位职责、任职条件和技能要求…</section>}
+          {job.platform === "zhaopin" ? <>
+            <ZhaopinJobDescription job={job} />
+            {analysis && <details className="group" key={job.id}><summary className="panel cursor-pointer font-semibold text-slate-800">查看岗位职责、任职条件与技能解析</summary><div className="mt-4"><StructuredJobDescription analysis={analysis} rawDescription={job.description} showOriginal={false} /></div></details>}
+          </> : analysis ? <StructuredJobDescription analysis={analysis} rawDescription={job.description} /> : <section className="panel"><h2 className="text-xl font-semibold">职位描述</h2><p className="mt-4 whitespace-pre-wrap text-sm leading-7 text-slate-600">{job.description}</p></section>}
         </>
       )}
     </div>

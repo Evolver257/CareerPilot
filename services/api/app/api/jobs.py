@@ -17,7 +17,7 @@ from app.schemas.job_intelligence import (
     JobSkillRead,
     StructuredJob,
 )
-from app.schemas.jobs import JobCreate, JobListResponse, JobRead, JobUpdate
+from app.schemas.jobs import JobCreate, JobListResponse, JobPipelineRead, JobRead, JobUpdate
 from app.schemas.matching import (
     JobScoreRead,
     JobScoreRequest,
@@ -229,6 +229,16 @@ async def score_job(
     except MatchingResumeNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return JobScoreRead.model_validate(score)
+
+
+@router.get("/{job_id}/pipeline", response_model=JobPipelineRead)
+async def get_job_pipeline(
+    job_id: UUID, service: JobService = Depends(get_job_service)
+) -> JobPipelineRead:
+    pipeline = await service.get_pipeline(job_id)
+    if pipeline is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return JobPipelineRead.model_validate(pipeline)
 
 
 @router.get("/{job_id}", response_model=JobRead)

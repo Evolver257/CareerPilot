@@ -14,11 +14,14 @@ from app.api import (
     campaigns,
     career_advisor,
     dashboard,
+    evaluations,
     health,
     jobs,
     knowledge,
     llm,
     market_insights,
+    mcp,
+    memory,
     platforms,
     resumes,
 )
@@ -26,6 +29,7 @@ from app.core.config import get_settings
 from app.services.career_advisor import shutdown_career_advisor_tasks
 from app.services.knowledge_indexing import (
     recover_interrupted_knowledge_indexes,
+    run_knowledge_consistency_check,
     schedule_knowledge_index,
     shutdown_knowledge_index_tasks,
 )
@@ -43,6 +47,17 @@ from app.services.ranking_runs import (
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    knowledge_check = await run_knowledge_consistency_check()
+    if knowledge_check.get("check_failed"):
+        logging.getLogger("careerpilot.startup").warning(
+            "knowledge_consistency_check_failed"
+        )
+    else:
+        logging.getLogger("careerpilot.startup").info(
+            "knowledge_consistency_check status=%s needs_update_jobs=%s",
+            knowledge_check.get("status"),
+            knowledge_check.get("needs_update_jobs", 0),
+        )
     recovered_run_ids = await recover_interrupted_ranking_runs()
     for run_id in recovered_run_ids:
         schedule_ranking_run(run_id)
@@ -142,3 +157,6 @@ app.include_router(platforms.router)
 app.include_router(llm.router)
 app.include_router(market_insights.router)
 app.include_router(career_advisor.router)
+app.include_router(memory.router)
+app.include_router(mcp.router)
+app.include_router(evaluations.router)

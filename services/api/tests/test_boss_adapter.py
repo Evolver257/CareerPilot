@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from httpx import AsyncClient
 
@@ -172,6 +174,79 @@ async def test_boss_visible_import_deduplicates_without_raw_html(client: AsyncCl
     persisted = await client.get(f"/api/jobs/{enriched_job['id']}")
     assert persisted.status_code == 200
     assert full_jd in persisted.json()["description"]
+
+
+async def test_recollecting_same_boss_job_refreshes_freshness_and_restores_campaign_eligibility(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:
+    old_collection_time = datetime.now(UTC) - timedelta(days=4)
+    current_collection_time = datetime.now(UTC)
+    monkeypatch.setattr(
+        "app.services.boss._utc_now",
+        lambda: old_collection_time,
+    )
+    payload = {
+        "page_url": "https://www.zhipin.com/web/geek/jobs?query=RAG",
+        "captured_at": current_collection_time.isoformat(),
+        "jobs": [
+            {
+                "external_job_id": "boss-refresh-freshness-001",
+                "title": "RAG 工程师",
+                "description": "负责 RAG 检索、评估与服务部署",
+                "job_url": "https://www.zhipin.com/job_detail/boss-refresh-freshness-001.html",
+                "location": "北京",
+                "description_source": "detail_panel",
+            }
+        ],
+    }
+
+    first = await client.post("/api/platforms/boss/import-visible", json=payload)
+    assert first.status_code == 201
+    first_job = first.json()["items"][0]
+    assert datetime.fromisoformat(first_job["last_collected_at"]) == old_collection_time
+    assert first_job["raw_data"]["captured_at"] == old_collection_time.isoformat()
+    assert first_job["raw_data"]["client_captured_at"] == current_collection_time.isoformat()
+
+    resume_id = await _upload_campaign_resume(client)
+    stale_campaign = await client.post(
+        "/api/campaigns/curated",
+        json={
+            "name": "Stale BOSS Campaign",
+            "resume_id": resume_id,
+            "job_ids": [first_job["id"]],
+        },
+    )
+    assert stale_campaign.status_code == 201
+    campaign_id = stale_campaign.json()["id"]
+    stale_approval = await client.post(
+        f"/api/campaigns/{campaign_id}/approve",
+        json={"job_ids": [first_job["id"]]},
+    )
+    assert stale_approval.status_code == 409
+    assert "超过 3 天" in stale_approval.json()["detail"]
+
+    monkeypatch.setattr(
+        "app.services.boss._utc_now",
+        lambda: current_collection_time,
+    )
+    repeated = await client.post("/api/platforms/boss/import-visible", json=payload)
+    assert repeated.status_code == 201
+    assert repeated.json()["created"] == 0
+    assert repeated.json()["duplicates"] == 1
+    refreshed_job = repeated.json()["items"][0]
+    assert refreshed_job["id"] == first_job["id"]
+    assert datetime.fromisoformat(refreshed_job["last_collected_at"]) == current_collection_time
+    assert datetime.fromisoformat(refreshed_job["updated_at"]).replace(
+        tzinfo=None
+    ) == datetime.fromisoformat(first_job["updated_at"]).replace(tzinfo=None)
+
+    restored_approval = await client.post(
+        f"/api/campaigns/{campaign_id}/approve",
+        json={"job_ids": [first_job["id"]]},
+    )
+    assert restored_approval.status_code == 200
+    assert restored_approval.json()["queued_count"] == 1
 
 
 async def test_boss_visible_import_decodes_salary_before_analysis(client: AsyncClient) -> None:

@@ -14,8 +14,11 @@ export type Job = {
   publish_time: string | null;
   source_url: string | null;
   raw_data: Record<string, unknown>;
+  platform_metadata?: Record<string, unknown>;
   normalized_data: Record<string, unknown>;
   content_hash: string | null;
+  job_fingerprint?: string | null;
+  last_collected_at: string;
   created_at: string;
   updated_at: string;
 };
@@ -131,6 +134,31 @@ export type QuickJobScore = {
   missing_skills: string[];
   recommendation: JobScore["recommendation"];
   reasoning_summary: string;
+  direction_score: number;
+  score_confidence: number;
+  score_status: "SUFFICIENT" | "PARTIAL" | "INSUFFICIENT_DATA" | "FAILED";
+  confidence_factors: Record<string, number>;
+  hard_constraint_ledger: Array<{
+    requirement_group_id: string;
+    reason: string;
+    penalty: number;
+    cap: number | null;
+    affected_requirements: string[];
+    source_text: string;
+  }>;
+  hard_constraint_passed: boolean;
+  component_scores: Record<string, number>;
+  requirement_matches: Array<{
+    requirement_type: string;
+    requirement_value: string;
+    status: string;
+    score: number;
+    evidence: Array<Record<string, unknown>>;
+    match_method: string;
+    confidence: number;
+    deduction: number;
+    hard_constraint: boolean;
+  }>;
   cached: boolean;
 };
 
@@ -231,6 +259,7 @@ export type ApplicationStatus =
   | "QUEUED"
   | "EXECUTING"
   | "SUBMITTED"
+  | "MANUAL_REQUIRED"
   | "PAUSED"
   | "CANCELLED"
   | "CAPTCHA_REQUIRED"
@@ -295,13 +324,13 @@ export type CampaignJob = {
   updated_at: string;
 };
 
-export type CampaignDetail = Campaign & { candidate_jobs: CampaignJob[] };
+export type CampaignDetail = Campaign & { candidate_jobs: CampaignJob[]; reused_existing?: boolean };
 
 export type CampaignListResponse = { items: Campaign[]; total: number };
 
 export type ApplicationListItem = Application & { job: Job; campaign_name: string };
 
-export type ApplicationListResponse = { items: ApplicationListItem[]; total: number };
+export type ApplicationListResponse = { items: ApplicationListItem[]; total: number; status_counts?: Record<string, number>; page?: number; page_size?: number };
 
 export type AgentRunStatus =
   | "PENDING"
@@ -509,6 +538,7 @@ export type BrowserTaskCampaignGroup = {
   platforms: string[];
   task_count: number;
   submitted_count: number;
+  manual_count: number;
   active_count: number;
   waiting_count: number;
   failed_count: number;
@@ -557,6 +587,61 @@ export type BossVisibleImportResponse = {
   updated: number;
   total: number;
   safety_notice: string;
+};
+
+export type RecruitmentPlatform = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  capabilities: Record<string, boolean>;
+  browser_session_required: boolean;
+};
+
+export type ZhaopinVisibleJobCapture = {
+  external_job_id: string;
+  title: string;
+  description: string;
+  job_url: string;
+  location: string | null;
+  company_name: string | null;
+  salary_text: string | null;
+  experience: string | null;
+  education: string | null;
+  requirements: string[];
+  skills: string[];
+  benefits: string[];
+  raw_data: Record<string, unknown>;
+};
+
+export type RecruitmentImportResponse = {
+  platform: string;
+  collection_mode: string;
+  page_url: string;
+  items: Job[];
+  created: number;
+  duplicates: number;
+  updated: number;
+  total: number;
+  safety_notice: string;
+};
+
+export type RecruitmentProviderHealth = {
+  platform: string;
+  status: string;
+  result_count: number;
+  cards_found: number;
+  cards_parsed: number;
+  parse_failure_count: number;
+  error_code: string | null;
+  message: string | null;
+  duration_ms: number | null;
+};
+
+export type RecruitmentSearchResponse = {
+  items: Job[];
+  total: number;
+  possible_duplicate_count: number;
+  platform_status: Record<string, RecruitmentProviderHealth>;
 };
 
 export type ResumeEducation = {
@@ -1001,8 +1086,13 @@ export function rejectCampaignJobs(id: string, jobIds: string[]): Promise<Campai
   });
 }
 
-export function getApplications(): Promise<ApplicationListResponse> {
-  return apiFetch<ApplicationListResponse>("/api/applications");
+export function getApplications(filters: { page?: number; page_size?: number; statuses?: string[]; campaign_id?: string; platform?: string } = {}): Promise<ApplicationListResponse> {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (Array.isArray(value)) value.forEach((item) => query.append(key, item));
+    else if (value !== undefined && value !== "") query.set(key, String(value));
+  }
+  return apiFetch<ApplicationListResponse>(`/api/applications?${query}`);
 }
 
 export function getAgentRuns(): Promise<AgentRunListResponse> {
@@ -1095,7 +1185,7 @@ export function getBrowserTask(id: string): Promise<BrowserTask> {
 
 export function createBrowserTask(payload: {
   application_id: string;
-  platform?: "mock" | "careerboard" | "boss";
+  platform?: "mock" | "careerboard" | "boss" | "zhaopin";
   scenario?: string;
   auto_start?: boolean;
 }): Promise<BrowserTask> {
@@ -1108,7 +1198,7 @@ export function createBrowserTask(payload: {
 
 export function createCampaignBrowserTasks(payload: {
   campaign_id: string;
-  platform?: "mock" | "careerboard" | "boss";
+  platform?: "mock" | "careerboard" | "boss" | "zhaopin";
   scenario?: string;
   auto_start?: boolean;
 }): Promise<BrowserTaskCampaignResponse> {
@@ -1172,6 +1262,35 @@ export function importBossVisibleJobs(payload: {
   return apiFetch<BossVisibleImportResponse>("/api/platforms/boss/import-visible", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getRecruitmentPlatforms(): Promise<RecruitmentPlatform[]> {
+  return apiFetch<RecruitmentPlatform[]>('/api/platforms');
+}
+
+export function importZhaopinVisibleJobs(payload: {
+  page_url: string;
+  jobs: ZhaopinVisibleJobCapture[];
+}): Promise<RecruitmentImportResponse> {
+  return apiFetch<RecruitmentImportResponse>('/api/platforms/zhaopin/import-visible', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function searchRecruitmentPlatforms(payload: {
+  keyword?: string;
+  city?: string;
+  page?: number;
+  page_size?: number;
+  platforms?: string[];
+}): Promise<RecruitmentSearchResponse> {
+  return apiFetch<RecruitmentSearchResponse>('/api/platforms/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
 }
@@ -1249,4 +1368,696 @@ export function marketInsightAction(
 
 export function deleteMarketInsight(id: string): Promise<void> {
   return apiFetch<void>(`/api/market-insights/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export type CareerAdvisorIntent =
+  | "market_research"
+  | "learning_roadmap"
+  | "resume_gap"
+  | "role_comparison"
+  | "job_recommendation"
+  | "salary_analysis"
+  | "skill_analysis"
+  | "follow_up"
+  | "general_career_chat";
+
+export type JobKnowledgeFilters = {
+  cities: string[];
+  education: string | null;
+  experience: string | null;
+  job_types: string[];
+  platform: string | null;
+  salary_floor: number | null;
+  salary_ceiling: number | null;
+  published_after: string | null;
+  published_before: string | null;
+};
+
+export type CareerAdvisorCitation = {
+  id: string;
+  message_id: string;
+  job_id: string | null;
+  chunk_id: string | null;
+  citation_index: number;
+  evidence: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+export type CareerAdvisorMessage = {
+  id: string;
+  session_id: string;
+  role: "user" | "assistant" | string;
+  content: string;
+  status: string;
+  intent: CareerAdvisorIntent | null;
+  model_provider: string | null;
+  model_name: string | null;
+  token_usage: Record<string, unknown>;
+  tool_trace: Array<Record<string, unknown>>;
+  answer_metadata: Record<string, unknown>;
+  latency_ms: number;
+  error_message: string | null;
+  ui_action?: CareerAdvisorUiAction | null;
+  created_at: string;
+  updated_at: string;
+  citations: CareerAdvisorCitation[];
+};
+
+export type CareerAdvisorJobCandidate = {
+  id: string;
+  title: string;
+  company: string | null;
+  location: string | null;
+  platform: string;
+  salary_text: string;
+  education?: string | null;
+  experience?: string | null;
+  source_url?: string | null;
+  last_collected_at?: string;
+  match_score: number | null;
+  match_reason?: string | null;
+  warnings?: string[];
+  is_fresh?: boolean;
+  is_duplicate?: boolean;
+  default_selected?: boolean;
+};
+
+export type CareerAdvisorUiAction = {
+  type: "job_search_results" | "application_confirmation" | "application_progress" | string;
+  action_id: string;
+  message_id?: string;
+  campaign_id?: string;
+  title?: string;
+  summary?: string;
+  plan_name?: string;
+  resume_id?: string;
+  job_ids?: string[];
+  jobs?: CareerAdvisorJobCandidate[];
+  items?: Array<Record<string, unknown>>;
+  default_selected_job_ids?: string[];
+  low_match_job_ids?: string[];
+  expired_job_ids?: string[];
+  warnings?: string[];
+  confirmation_token?: string;
+  status?: string;
+  total_count?: number;
+  submitted_count?: number;
+  manual_count?: number;
+  waiting_count?: number;
+  [key: string]: unknown;
+};
+
+export type CareerAdvisorSession = {
+  id: string;
+  user_id: string;
+  resume_id: string | null;
+  title: string;
+  agent_type: string;
+  context_filters: JobKnowledgeFilters;
+  summary: string;
+  created_at: string;
+  updated_at: string;
+  messages: CareerAdvisorMessage[];
+  message_total: number;
+  message_offset: number;
+  message_has_more: boolean;
+};
+
+export type CareerAdvisorSessionListResponse = {
+  items: CareerAdvisorSession[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+};
+
+export type CareerAdvisorCitationListResponse = {
+  items: CareerAdvisorCitation[];
+  total: number;
+};
+
+export type CareerAdvisorStreamEvent = {
+  event_type: string;
+  payload: Record<string, unknown>;
+};
+
+export type AgentMemoryType =
+  | "USER_PROFILE"
+  | "CAREER_GOAL"
+  | "JOB_PREFERENCE"
+  | "SKILL_BACKGROUND"
+  | "LEARNING_PROGRESS"
+  | "CONVERSATION_SUMMARY"
+  | "USER_CONFIRMED_FACT";
+
+export type AgentMemorySettings = {
+  enabled: boolean;
+  auto_save_non_sensitive: boolean;
+  retention_days: number;
+  allowed_types: AgentMemoryType[];
+};
+
+export type AgentMemory = {
+  id: string;
+  memory_type: AgentMemoryType;
+  content: string;
+  confidence: number;
+  user_confirmed: boolean;
+  sensitivity: string;
+  provenance: Record<string, unknown>;
+  valid_until: string | null;
+  last_used_at: string | null;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AgentMemoryCandidate = {
+  id: string;
+  memory_type: AgentMemoryType;
+  content: string;
+  confidence: number;
+  sensitivity: string;
+  status: string;
+  reason: string;
+  created_at: string;
+};
+
+export function getAgentMemorySettings(): Promise<AgentMemorySettings> {
+  return apiFetch<AgentMemorySettings>("/api/career-memory/settings");
+}
+
+export function updateAgentMemorySettings(
+  payload: Partial<AgentMemorySettings>,
+): Promise<AgentMemorySettings> {
+  return apiFetch<AgentMemorySettings>("/api/career-memory/settings", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getAgentMemories(options?: {
+  query?: string;
+  memoryType?: AgentMemoryType | "";
+  includeDeleted?: boolean;
+}): Promise<{ items: AgentMemory[]; total: number; limit: number; offset: number; has_more: boolean }> {
+  const params = new URLSearchParams();
+  if (options?.query) params.set("query", options.query);
+  if (options?.memoryType) params.set("memory_type", options.memoryType);
+  if (options?.includeDeleted) params.set("include_deleted", "true");
+  return apiFetch(`/api/career-memory/items?${params.toString()}`);
+}
+
+export function updateAgentMemory(
+  id: string,
+  payload: { content?: string; memory_type?: AgentMemoryType; user_confirmed?: boolean },
+): Promise<AgentMemory> {
+  return apiFetch<AgentMemory>(`/api/career-memory/items/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteAgentMemory(id: string, permanent = false): Promise<void> {
+  return apiFetch<void>(
+    `/api/career-memory/items/${encodeURIComponent(id)}?permanent=${permanent}`,
+    { method: "DELETE" },
+  );
+}
+
+export function restoreAgentMemory(id: string): Promise<AgentMemory> {
+  return apiFetch<AgentMemory>(`/api/career-memory/items/${encodeURIComponent(id)}/restore`, {
+    method: "POST",
+  });
+}
+
+export function batchDeleteAgentMemories(ids: string[]): Promise<{ deleted: number }> {
+  return apiFetch<{ deleted: number }>("/api/career-memory/batch-delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+}
+
+export function clearAgentMemories(permanent = false): Promise<{ deleted: number }> {
+  return apiFetch<{ deleted: number }>(`/api/career-memory/items?permanent=${permanent}`, {
+    method: "DELETE",
+  });
+}
+
+export function getAgentMemoryCandidates(): Promise<{
+  items: AgentMemoryCandidate[];
+  total: number;
+}> {
+  return apiFetch("/api/career-memory/candidates");
+}
+
+export function resolveAgentMemoryCandidate(id: string, accept: boolean): Promise<AgentMemory | void> {
+  return apiFetch(`/api/career-memory/candidates/${encodeURIComponent(id)}/${accept ? "accept" : "reject"}`, {
+    method: "POST",
+  });
+}
+
+export async function downloadAgentMemoryExport(): Promise<void> {
+  const payload = await apiFetch<Record<string, unknown>>("/api/career-memory/export");
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
+  );
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `careerpilot-memory-${new Date().toISOString().slice(0, 10)}.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+export type MCPConnection = {
+  id: string;
+  name: string;
+  namespace: string;
+  transport: "streamable_http" | "stdio";
+  endpoint: string | null;
+  command: string | null;
+  arguments: string[];
+  credentials_configured: boolean;
+  credentials_hint: string | null;
+  enabled: boolean;
+  status: string;
+  permission_scopes: string[];
+  allowed_tools: string[];
+  blocked_tools: string[];
+  connect_timeout: number;
+  tool_timeout: number;
+  last_health_check: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MCPDiscoveredTool = {
+  id: string;
+  remote_name: string;
+  canonical_name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+  output_schema: Record<string, unknown>;
+  schema_hash: string;
+  active: boolean;
+  last_seen_at: string;
+};
+
+export function getMCPConnections(): Promise<MCPConnection[]> {
+  return apiFetch<MCPConnection[]>("/api/mcp/connections");
+}
+
+export function createMCPConnection(payload: {
+  name: string;
+  namespace: string;
+  transport: "streamable_http";
+  endpoint: string;
+  credentials?: Record<string, string>;
+  permission_scopes: string[];
+  allowed_tools: string[];
+}): Promise<MCPConnection> {
+  return apiFetch<MCPConnection>("/api/mcp/connections", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateMCPConnection(id: string, payload: Partial<MCPConnection>): Promise<MCPConnection> {
+  return apiFetch<MCPConnection>(`/api/mcp/connections/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteMCPConnection(id: string): Promise<void> {
+  return apiFetch<void>(`/api/mcp/connections/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function discoverMCPTools(id: string): Promise<{
+  connection: MCPConnection;
+  tools: MCPDiscoveredTool[];
+  changed: number;
+}> {
+  return apiFetch(`/api/mcp/connections/${encodeURIComponent(id)}/discover`, { method: "POST" });
+}
+
+export type EvaluationDataset = {
+  id: string;
+  name: string;
+  suite: "tool_calling" | "rag_retrieval" | "answer";
+  version: string;
+  label_status: string;
+  sha256: string;
+  case_count: number;
+  created_at: string;
+};
+
+export type EvaluationRun = {
+  id: string;
+  dataset_id: string;
+  status: string;
+  configuration: Record<string, unknown>;
+  result: Record<string, unknown>;
+  progress_current: number;
+  progress_total: number;
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export function getEvaluationDatasets(): Promise<EvaluationDataset[]> {
+  return apiFetch<EvaluationDataset[]>("/api/evaluations/datasets");
+}
+
+export function importToolEvaluationSeed(): Promise<EvaluationDataset> {
+  return apiFetch<EvaluationDataset>("/api/evaluations/datasets/import-tool-seed", {
+    method: "POST",
+  });
+}
+
+export function getEvaluationRuns(): Promise<EvaluationRun[]> {
+  return apiFetch<EvaluationRun[]>("/api/evaluations/runs");
+}
+
+export function getEvaluationRun(id: string): Promise<EvaluationRun> {
+  return apiFetch<EvaluationRun>(`/api/evaluations/runs/${encodeURIComponent(id)}`);
+}
+
+export function createEvaluationRun(payload: {
+  dataset_id: string;
+  observations: Array<Record<string, unknown>>;
+  configuration: Record<string, unknown>;
+  require_gold: boolean;
+}): Promise<EvaluationRun> {
+  return apiFetch<EvaluationRun>("/api/evaluations/runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateEvaluationRun(id: string, action: "cancel" | "retry"): Promise<EvaluationRun> {
+  return apiFetch<EvaluationRun>(`/api/evaluations/runs/${encodeURIComponent(id)}/${action}`, {
+    method: "POST",
+  });
+}
+
+export function compareEvaluationRuns(leftId: string, rightId: string): Promise<{
+  left: EvaluationRun;
+  right: EvaluationRun;
+  metric_delta: Record<string, number>;
+}> {
+  const params = new URLSearchParams({ left_id: leftId, right_id: rightId });
+  return apiFetch(`/api/evaluations/compare?${params.toString()}`);
+}
+
+export function getCareerAdvisorSessions(options?: { limit?: number; offset?: number }): Promise<CareerAdvisorSessionListResponse> {
+  const params = new URLSearchParams();
+  if (options?.limit !== undefined) params.set("limit", String(options.limit));
+  if (options?.offset !== undefined) params.set("offset", String(options.offset));
+  const query = params.toString();
+  return apiFetch<CareerAdvisorSessionListResponse>(`/api/career-advisor/sessions${query ? `?${query}` : ""}`);
+}
+
+export function getCareerAdvisorSession(
+  id: string,
+  options?: { limit?: number; offset?: number },
+): Promise<CareerAdvisorSession> {
+  const params = new URLSearchParams();
+  if (options?.limit !== undefined) params.set("limit", String(options.limit));
+  if (options?.offset !== undefined) params.set("offset", String(options.offset));
+  const query = params.toString();
+  return apiFetch<CareerAdvisorSession>(`/api/career-advisor/sessions/${encodeURIComponent(id)}${query ? `?${query}` : ""}`);
+}
+
+export function createCareerAdvisorSession(payload?: {
+  title?: string;
+  resume_id?: string | null;
+  context_filters?: JobKnowledgeFilters;
+}): Promise<CareerAdvisorSession> {
+  return apiFetch<CareerAdvisorSession>("/api/career-advisor/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload ?? {}),
+  });
+}
+
+export function updateCareerAdvisorSession(
+  id: string,
+  payload: {
+    title?: string;
+    resume_id?: string | null;
+    context_filters?: JobKnowledgeFilters;
+  },
+): Promise<CareerAdvisorSession> {
+  return apiFetch<CareerAdvisorSession>(`/api/career-advisor/sessions/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteCareerAdvisorSession(id: string): Promise<void> {
+  return apiFetch<void>(`/api/career-advisor/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function sendCareerAdvisorMessage(
+  sessionId: string,
+  payload: { content: string; resume_id?: string | null; filters?: JobKnowledgeFilters | null },
+): Promise<CareerAdvisorMessage> {
+  return apiFetch<CareerAdvisorMessage>(`/api/career-advisor/sessions/${encodeURIComponent(sessionId)}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function cancelCareerAdvisorMessage(messageId: string): Promise<CareerAdvisorMessage> {
+  return apiFetch<CareerAdvisorMessage>(`/api/career-advisor/messages/${encodeURIComponent(messageId)}/cancel`, {
+    method: "POST",
+  });
+}
+
+export function regenerateCareerAdvisorMessage(messageId: string): Promise<CareerAdvisorMessage> {
+  return apiFetch<CareerAdvisorMessage>(`/api/career-advisor/messages/${encodeURIComponent(messageId)}/regenerate`, {
+    method: "POST",
+  });
+}
+
+export function getCareerAdvisorCitations(messageId: string): Promise<CareerAdvisorCitationListResponse> {
+  return apiFetch<CareerAdvisorCitationListResponse>(`/api/career-advisor/messages/${encodeURIComponent(messageId)}/citations`);
+}
+
+export function prepareCareerAdvisorApplication(
+  sessionId: string,
+  payload: { message_id: string; job_ids: string[]; resume_id?: string | null; plan_name?: string; message?: string },
+): Promise<{ message_id: string; ui_action: CareerAdvisorUiAction }> {
+  return apiFetch(`/api/career-advisor/sessions/${encodeURIComponent(sessionId)}/actions/prepare-application`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function confirmCareerAdvisorApplication(
+  sessionId: string,
+  payload: { message_id: string; campaign_id: string; confirmation_token: string },
+): Promise<{ message_id: string; ui_action: CareerAdvisorUiAction }> {
+  return apiFetch(`/api/career-advisor/sessions/${encodeURIComponent(sessionId)}/actions/confirm-application`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getCareerAdvisorApplicationProgress(
+  sessionId: string,
+  payload: { message_id: string; campaign_id: string },
+): Promise<{ message_id: string; ui_action: CareerAdvisorUiAction }> {
+  return apiFetch(`/api/career-advisor/sessions/${encodeURIComponent(sessionId)}/actions/application-progress`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function cancelCareerAdvisorApplication(
+  sessionId: string,
+  payload: { message_id: string; campaign_id: string },
+): Promise<{ message_id: string; ui_action: CareerAdvisorUiAction }> {
+  return apiFetch(`/api/career-advisor/sessions/${encodeURIComponent(sessionId)}/actions/cancel-application`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+type CareerAdvisorStreamPayload = {
+  content?: string;
+  resume_id?: string | null;
+  filters?: JobKnowledgeFilters | null;
+};
+
+async function streamCareerAdvisorResponse(
+  url: string,
+  payload: CareerAdvisorStreamPayload,
+  onEvent: (eventType: string, payload: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<CareerAdvisorMessage> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${url}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+      signal,
+    });
+  } catch (reason) {
+    if (reason instanceof DOMException && reason.name === "AbortError") throw reason;
+    throw new Error("无法连接 API 服务，请确认后端已启动并稍后重试。");
+  }
+  if (!response.ok) {
+    let detail = `API request failed: ${response.status}`;
+    try {
+      const body = (await response.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      // Keep the HTTP status when the API response is not JSON.
+    }
+    throw new Error(detail);
+  }
+  if (!response.body) throw new Error("职业顾问暂时无法建立流式连接。");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventType = "message";
+  let eventData: string[] = [];
+  let finalMessage: CareerAdvisorMessage | null = null;
+
+  const dispatch = () => {
+    if (!eventData.length) return;
+    const raw = eventData.join("\n");
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      parsed = { content: raw };
+    }
+    onEvent(eventType, parsed);
+    if (eventType === "message_state") finalMessage = parsed as unknown as CareerAdvisorMessage;
+    eventType = "message";
+    eventData = [];
+  };
+
+  const consumeLine = (line: string) => {
+    if (line.startsWith("event:")) eventType = line.slice(6).trim();
+    else if (line.startsWith("data:")) eventData.push(line.slice(5).trimStart());
+    else if (!line.trim()) dispatch();
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+    lines.forEach(consumeLine);
+    if (done) break;
+  }
+  if (buffer) consumeLine(buffer);
+  dispatch();
+  if (!finalMessage) throw new Error("职业顾问未返回完整结果，请稍后重试。");
+  return finalMessage;
+}
+
+export function streamCareerAdvisorMessage(
+  sessionId: string,
+  payload: { content: string; resume_id?: string | null; filters?: JobKnowledgeFilters | null },
+  onEvent: (eventType: string, payload: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<CareerAdvisorMessage> {
+  return streamCareerAdvisorResponse(
+    `/api/career-advisor/sessions/${encodeURIComponent(sessionId)}/messages/stream`,
+    payload,
+    onEvent,
+    signal,
+  );
+}
+
+export function streamRegenerateCareerAdvisorMessage(
+  messageId: string,
+  onEvent: (eventType: string, payload: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<CareerAdvisorMessage> {
+  return streamCareerAdvisorResponse(
+    `/api/career-advisor/messages/${encodeURIComponent(messageId)}/regenerate/stream`,
+    {},
+    onEvent,
+    signal,
+  );
+}
+
+export type KnowledgeIndexRun = {
+  id: string;
+  mode: "incremental" | "backfill" | string;
+  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | string;
+  stage: string;
+  progress: number;
+  total_jobs: number;
+  processed_jobs: number;
+  succeeded_jobs: number;
+  skipped_jobs: number;
+  failed_jobs: number;
+  current_job_id: string | null;
+  request: Record<string, unknown>;
+  result: Record<string, unknown>;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+};
+
+export type KnowledgeIndexRunListResponse = {
+  items: KnowledgeIndexRun[];
+  total: number;
+};
+
+export function getKnowledgeIndexRuns(): Promise<KnowledgeIndexRunListResponse> {
+  return apiFetch<KnowledgeIndexRunListResponse>("/api/knowledge/index-runs");
+}
+
+export type KnowledgeHealth = {
+  status: "not_built" | "partial" | "needs_update" | "ready";
+  ready: boolean; jobs_total: number; document_count: number; indexed_jobs: number;
+  compatible_jobs: number; needs_update_jobs: number; chunk_count: number;
+  embedded_chunk_count?: number; coverage_percent?: number; embedding_model?: string;
+  embedding_dimensions?: number; updated_at: string | null;
+  latest_run: Pick<KnowledgeIndexRun, "id" | "status" | "progress" | "processed_jobs" | "total_jobs" | "error"> | null;
+};
+
+export function getKnowledgeHealth(): Promise<KnowledgeHealth> {
+  return apiFetch<KnowledgeHealth>("/api/knowledge/status");
+}
+
+export function createKnowledgeIndexRun(payload: {
+  mode: "incremental" | "backfill";
+  job_ids?: string[];
+  force?: boolean;
+  auto_start?: boolean;
+}): Promise<KnowledgeIndexRun> {
+  return apiFetch<KnowledgeIndexRun>("/api/knowledge/index-runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }

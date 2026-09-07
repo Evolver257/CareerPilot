@@ -41,6 +41,12 @@ export type BossCaptureRequest = {
   request_id?: string;
   max_jobs?: number;
   include_details?: boolean;
+  require_search_page?: boolean;
+};
+
+export type BossCaptureCancelRequest = {
+  type: "CANCEL_BOSS_CAPTURE";
+  request_id: string;
 };
 
 export type BossCaptureProgress = {
@@ -59,6 +65,32 @@ export type BossCaptureResponse = {
   page_url: string;
   jobs: import("./platforms/boss").BossVisibleJob[];
   page_state: import("./platforms/boss").BossPageState;
+  cancelled?: boolean;
+  error?: string;
+};
+
+export type ZhaopinCaptureRequest = {
+  source: "careerpilot-web";
+  type: "ZHAOPIN_CAPTURE_REQUEST";
+  request_id: string;
+  max_jobs?: number;
+};
+
+export type ZhaopinCaptureTabRequest = {
+  type: "CAPTURE_ZHAOPIN_VISIBLE";
+  request_id: string;
+  max_jobs?: number;
+};
+
+export type ZhaopinCaptureResponse = {
+  empty?: boolean;
+  source?: "careerpilot-extension";
+  type: "ZHAOPIN_CAPTURE_RESULT";
+  request_id?: string;
+  success: boolean;
+  page_url: string;
+  jobs: import("./platforms/zhaopin").ZhaopinVisibleJob[];
+  page_state: import("./platforms/zhaopin").ZhaopinPageState;
   error?: string;
 };
 
@@ -91,6 +123,21 @@ export type BossSearchResumeRequest = {
   source: "careerpilot-web";
   type: "BOSS_SEARCH_RESUME_REQUEST";
   request_id: string;
+};
+
+export type BossSearchCancelRequest = {
+  source: "careerpilot-web";
+  type: "BOSS_SEARCH_CANCEL_REQUEST";
+  request_id: string;
+};
+
+export type BossSearchCancelResponse = {
+  source: "careerpilot-extension";
+  type: "BOSS_SEARCH_CANCEL_RESULT";
+  request_id: string;
+  success: boolean;
+  task: BossBackgroundSearchTask | null;
+  error?: string;
 };
 
 export type BossSearchResponse = {
@@ -129,7 +176,7 @@ export type BossPersistedJobSummary = {
 
 export type BossBackgroundSearchTask = {
   request_id: string;
-  status: "RUNNING" | "WAITING_FOR_USER" | "COMPLETED" | "FAILED";
+  status: "RUNNING" | "WAITING_FOR_USER" | "COMPLETED" | "FAILED" | "CANCELLED";
   requirements: string;
   city: string;
   target_count: number;
@@ -181,22 +228,24 @@ export type BossTaskLaunchResponse = {
 
 export type BossTaskBatchLaunchRequest = {
   source: "careerpilot-web";
-  type: "BOSS_TASK_BATCH_LAUNCH_REQUEST";
+  type: "BOSS_TASK_BATCH_LAUNCH_REQUEST" | "RECRUITMENT_TASK_BATCH_LAUNCH_REQUEST";
   request_id: string;
-  tasks: Array<{ task_id: string; url: string }>;
+  tasks: Array<{ task_id: string; url: string; platform?: "boss" | "zhaopin" }>;
 };
 
 export type BossTaskBatchLaunchResponse = {
   source: "careerpilot-extension";
-  type: "BOSS_TASK_BATCH_LAUNCH_RESULT";
+  type: "BOSS_TASK_BATCH_LAUNCH_RESULT" | "RECRUITMENT_TASK_BATCH_LAUNCH_RESULT";
   request_id: string;
   success: boolean;
   accepted_count: number;
   error?: string;
 };
 
-export type BossBridgeRequest = BossExtensionPing | BossSearchRequest | BossSearchResumeRequest | BossSearchStatusRequest | BossTaskLaunchRequest | BossTaskBatchLaunchRequest;
-export type BossBridgeResponse = BossExtensionPong | BossSearchProgress | BossSearchResponse | BossSearchStatusResponse | BossTaskLaunchResponse | BossTaskBatchLaunchResponse;
+export type BossBridgeRequest = BossExtensionPing | BossSearchRequest | BossSearchResumeRequest | BossSearchCancelRequest | BossSearchStatusRequest | BossTaskLaunchRequest | BossTaskBatchLaunchRequest;
+export type BossBridgeResponse = BossExtensionPong | BossSearchProgress | BossSearchResponse | BossSearchCancelResponse | BossSearchStatusResponse | BossTaskLaunchResponse | BossTaskBatchLaunchResponse;
+export type RecruitmentBridgeRequest = BossBridgeRequest | ZhaopinCaptureRequest | import("./collection-types").ZhaopinCollectionRequest;
+export type RecruitmentBridgeResponse = BossBridgeResponse | ZhaopinCaptureResponse | import("./collection-types").ZhaopinCollectionResponse;
 
 export function findSemanticElement(action: BrowserAction): Element | null {
   if (action.target?.selector) {

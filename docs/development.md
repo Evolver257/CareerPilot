@@ -21,7 +21,7 @@ GET  /api/resumes/{id}/chunks     semantic chunks and embedding dimensions
 ```
 
 Supported files are PDF, DOCX, Markdown, and UTF-8 TXT. The default local
-provider creates deterministic 384-dimensional hash embeddings, so no LLM key
+provider creates deterministic local embeddings in development, so no LLM key
 is required for development. PostgreSQL uses pgvector; SQLite uses JSON only
 for local tests.
 
@@ -58,7 +58,7 @@ Job skills are persisted in `job_skills` with `required`, `preferred`, or
 ## Phase 2 Job Knowledge Base
 
 Phase 2 adds a versioned, independently indexed job knowledge base. It keeps
-the raw JD in `job_versions`, semantic sections and 384-dimensional embeddings
+the raw JD in `job_versions`, semantic sections and 1024-dimensional embeddings
 in `job_knowledge_documents`/`job_knowledge_chunks`, normalized skill facts in
 `skill_taxonomy`/`skill_aliases`/`job_skill_facts`, and durable progress in
 `knowledge_index_runs`/`knowledge_index_run_items`.
@@ -103,7 +103,7 @@ Index only new, changed, incomplete, or stale jobs:
 To target specific jobs, include `job_ids`. The API returns immediately with a
 persisted run ID; poll the run and its items for progress and per-job errors.
 The API startup lifecycle requeues `PENDING` and interrupted `RUNNING` runs,
-then resumes them from the item checkpoint. Keep `EMBEDDING_DIMENSIONS=384`
+then resumes them from the item checkpoint. Keep `EMBEDDING_DIMENSIONS=1024`
 for this phase so the new index remains compatible with the existing vector
 type and SQLite test fallback.
 

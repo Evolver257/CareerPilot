@@ -38,7 +38,11 @@ Phase 0 (repository audit) through Phase 10 (Productization) are implemented:
 - JobKnowledgeRAG with SQL statistics, PostgreSQL full-text/SQLite fallback, pgvector retrieval, RRF fusion, diversity reranking, citations, cache, and optional Resume RAG evidence
 - Bounded terminal Agent Retry that creates a new auditable Run linked by `retry_of`
 - Productization architecture diagram, real local-page Demo GIF, screenshots, technical highlights, and interview talking points
-- Redis and a worker placeholder in Docker Compose
+- Independent PostgreSQL-backed ranking/index worker with transactional dispatch, advisory locks,
+  retry-generation fencing, persisted checkpoints, and process-crash integration tests
+- Optional pinned multilingual semantic embeddings / cross-encoder reranking and a reproducible
+  80-question retrieval benchmark; see [measured report](docs/evaluation-report.md) and
+  [runbook](docs/evaluation-worker-runbook.md)
 - API parser/upload/chunk tests, migration test, frontend typecheck, lint, and production build
 
 ## Architecture
@@ -92,7 +96,11 @@ python -m alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
 
-In another terminal:
+Run `python -m app.worker` in another API terminal with the same PostgreSQL configuration.
+Ranking and knowledge indexing now require this independent process. The legacy
+in-process development fallback is available with `INDEPENDENT_WORKER=false`.
+
+For the frontend, in another terminal:
 
 ```powershell
 cd apps/web
@@ -106,7 +114,7 @@ CareerPilot does not upload recruitment-site cookies, passwords, authentication 
 
 LLM API keys can be entered from `/settings`. They are encrypted at rest by the API service and only a four-character hint is returned to the web app. The connection test makes one minimal generation request without saving or changing the configuration. Set `LLM_ENCRYPTION_KEY` to a long random secret in any non-development deployment, and never commit provider keys to the repository. The default provider remains the local Mock provider until a user explicitly saves and enables a remote provider.
 
-Semantic embeddings are configured independently from the LLM judge. The default `mock-hash-384-v2` mode is local and requires no key. To use an OpenAI-compatible embedding endpoint, set `EMBEDDING_PROVIDER=openai`, `EMBEDDING_MODEL=text-embedding-3-small`, `EMBEDDING_API_KEY`, and optionally `EMBEDDING_BASE_URL`. Existing resume chunks are automatically re-embedded when their persisted embedding signature changes.
+Semantic embeddings are configured independently from the LLM judge. The default semantic deployment uses the local `Qwen/Qwen3-Embedding-0.6B` model and 1024-dimensional normalized vectors. To use an OpenAI-compatible embedding endpoint instead, set `EMBEDDING_PROVIDER=openai`, `EMBEDDING_MODEL=text-embedding-3-small`, `EMBEDDING_API_KEY`, and optionally `EMBEDDING_BASE_URL`. Existing resume chunks and job knowledge chunks must be re-embedded after changing the model; the persisted embedding signature prevents vectors from different models being mixed.
 
 ## Roadmap
 

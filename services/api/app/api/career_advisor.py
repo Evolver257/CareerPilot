@@ -5,16 +5,20 @@ import json
 from collections.abc import AsyncIterator
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import get_career_advisor_service
 from app.models.entities import CareerAdvisorCitation, CareerAdvisorMessage, CareerAdvisorSession
 from app.schemas.career_advisor import (
+    CareerAdvisorApplicationProgressRequest,
+    CareerAdvisorCancelApplicationRequest,
     CareerAdvisorCitationListResponse,
     CareerAdvisorCitationRead,
+    CareerAdvisorConfirmApplicationRequest,
     CareerAdvisorMessageCreate,
     CareerAdvisorMessageRead,
+    CareerAdvisorPrepareApplicationRequest,
     CareerAdvisorRoleComparisonRequest,
     CareerAdvisorSessionCreate,
     CareerAdvisorSessionListResponse,
@@ -67,15 +71,37 @@ def _message_read(message: CareerAdvisorMessage) -> CareerAdvisorMessageRead:
         answer_metadata=message.answer_metadata,
         latency_ms=message.latency_ms,
         error_message=message.error_message,
+        ui_action=(
+            message.answer_metadata.get("ui_action")
+            if isinstance(message.answer_metadata, dict)
+            else None
+        ),
         created_at=message.created_at,
         updated_at=message.updated_at,
-        citations=[_citation_read(item) for item in message.citations],
+        citations=[
+            _citation_read(item)
+            for item in sorted(
+                message.citations,
+                key=lambda citation: citation.citation_index,
+            )
+        ],
     )
 
 
-def _session_read(session: CareerAdvisorSession) -> CareerAdvisorSessionRead:
+def _session_read(
+    session: CareerAdvisorSession,
+    *,
+    include_messages: bool = True,
+    messages: list[CareerAdvisorMessage] | None = None,
+    message_total: int | None = None,
+    message_offset: int = 0,
+) -> CareerAdvisorSessionRead:
     from app.schemas.knowledge_search import JobKnowledgeFilters
 
+    message_items = (
+        messages if messages is not None else (session.messages if include_messages else [])
+    )
+    total = message_total if message_total is not None else len(message_items)
     return CareerAdvisorSessionRead(
         id=session.id,
         user_id=session.user_id,
@@ -86,10 +112,19 @@ def _session_read(session: CareerAdvisorSession) -> CareerAdvisorSessionRead:
         summary=session.summary,
         created_at=session.created_at,
         updated_at=session.updated_at,
-        messages=[
-            _message_read(item)
-            for item in sorted(session.messages, key=lambda value: value.created_at)
-        ],
+        messages=(
+            [
+                _message_read(item)
+                for item in sorted(message_items, key=lambda value: value.created_at)
+            ]
+            if include_messages
+            else []
+        ),
+        message_total=total if include_messages else 0,
+        message_offset=message_offset if include_messages else 0,
+        message_has_more=(message_offset + len(message_items) < total)
+        if include_messages
+        else False,
     )
 
 
@@ -182,13 +217,75 @@ async def estimate_career_advisor_coverage(
         ) from exc
 
 
+@router.post("/sessions/{session_id}/actions/prepare-application")
+async def prepare_career_advisor_application(
+    session_id: UUID,
+    payload: CareerAdvisorPrepareApplicationRequest,
+    service: CareerAdvisorService = Depends(get_career_advisor_service),
+) -> dict:
+    try:
+        return await service.prepare_application(session_id, payload)
+    except CareerAdvisorNotFoundError as exc:
+        raise _not_found(exc) from exc
+    except CareerAdvisorActionError as exc:
+        raise _action_error(exc) from exc
+
+
+@router.post("/sessions/{session_id}/actions/confirm-application")
+async def confirm_career_advisor_application(
+    session_id: UUID,
+    payload: CareerAdvisorConfirmApplicationRequest,
+    service: CareerAdvisorService = Depends(get_career_advisor_service),
+) -> dict:
+    try:
+        return await service.confirm_application(session_id, payload)
+    except CareerAdvisorNotFoundError as exc:
+        raise _not_found(exc) from exc
+    except CareerAdvisorActionError as exc:
+        raise _action_error(exc) from exc
+
+
+@router.post("/sessions/{session_id}/actions/application-progress")
+async def career_advisor_application_progress(
+    session_id: UUID,
+    payload: CareerAdvisorApplicationProgressRequest,
+    service: CareerAdvisorService = Depends(get_career_advisor_service),
+) -> dict:
+    try:
+        return await service.application_progress(session_id, payload)
+    except CareerAdvisorNotFoundError as exc:
+        raise _not_found(exc) from exc
+    except CareerAdvisorActionError as exc:
+        raise _action_error(exc) from exc
+
+
+@router.post("/sessions/{session_id}/actions/cancel-application")
+async def cancel_career_advisor_application(
+    session_id: UUID,
+    payload: CareerAdvisorCancelApplicationRequest,
+    service: CareerAdvisorService = Depends(get_career_advisor_service),
+) -> dict:
+    try:
+        return await service.cancel_application(session_id, payload)
+    except CareerAdvisorNotFoundError as exc:
+        raise _not_found(exc) from exc
+    except CareerAdvisorActionError as exc:
+        raise _action_error(exc) from exc
+
+
 @router.get("/sessions", response_model=CareerAdvisorSessionListResponse)
 async def list_career_advisor_sessions(
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     service: CareerAdvisorService = Depends(get_career_advisor_service),
 ) -> CareerAdvisorSessionListResponse:
-    sessions, total = await service.list_sessions()
+    sessions, total = await service.list_sessions(limit=limit, offset=offset)
     return CareerAdvisorSessionListResponse(
-        items=[_session_read(item) for item in sessions], total=total
+        items=[_session_read(item, include_messages=False) for item in sessions],
+        total=total,
+        limit=limit,
+        offset=offset,
+        has_more=offset + len(sessions) < total,
     )
 
 
@@ -210,10 +307,22 @@ async def create_career_advisor_session(
 @router.get("/sessions/{session_id}", response_model=CareerAdvisorSessionRead)
 async def get_career_advisor_session(
     session_id: UUID,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     service: CareerAdvisorService = Depends(get_career_advisor_service),
 ) -> CareerAdvisorSessionRead:
     try:
-        return _session_read(await service.get_session(session_id))
+        session, messages, total = await service.get_session_page(
+            session_id,
+            limit=limit,
+            offset=offset,
+        )
+        return _session_read(
+            session,
+            messages=messages,
+            message_total=total,
+            message_offset=offset,
+        )
     except CareerAdvisorNotFoundError as exc:
         raise _not_found(exc) from exc
 
@@ -268,19 +377,10 @@ def _sse(event_type: str, payload: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-@router.post("/sessions/{session_id}/messages/stream")
-async def stream_career_advisor_message(
-    session_id: UUID,
-    payload: CareerAdvisorMessageCreate,
-    service: CareerAdvisorService = Depends(get_career_advisor_service),
+def _stream_pending_message(
+    service: CareerAdvisorService,
+    pending: CareerAdvisorMessage,
 ) -> StreamingResponse:
-    try:
-        pending = await service.create_pending_message(session_id, payload)
-    except CareerAdvisorNotFoundError as exc:
-        raise _not_found(exc) from exc
-    except CareerAdvisorActionError as exc:
-        raise _action_error(exc) from exc
-
     queue: asyncio.Queue[tuple[str, dict]] = asyncio.Queue()
 
     async def on_event(event_type: str, event_payload: dict) -> None:
@@ -327,6 +427,22 @@ async def stream_career_advisor_message(
     )
 
 
+@router.post("/sessions/{session_id}/messages/stream")
+async def stream_career_advisor_message(
+    session_id: UUID,
+    payload: CareerAdvisorMessageCreate,
+    service: CareerAdvisorService = Depends(get_career_advisor_service),
+) -> StreamingResponse:
+    try:
+        pending = await service.create_pending_message(session_id, payload)
+    except CareerAdvisorNotFoundError as exc:
+        raise _not_found(exc) from exc
+    except CareerAdvisorActionError as exc:
+        raise _action_error(exc) from exc
+
+    return _stream_pending_message(service, pending)
+
+
 @router.post("/messages/{message_id}/cancel", response_model=CareerAdvisorMessageRead)
 async def cancel_career_advisor_message(
     message_id: UUID,
@@ -337,6 +453,20 @@ async def cancel_career_advisor_message(
         return _message_read(await service.cancel_message(message_id))
     except CareerAdvisorNotFoundError as exc:
         raise _not_found(exc) from exc
+
+
+@router.post("/messages/{message_id}/regenerate/stream")
+async def stream_regenerate_career_advisor_message(
+    message_id: UUID,
+    service: CareerAdvisorService = Depends(get_career_advisor_service),
+) -> StreamingResponse:
+    try:
+        pending = await service.create_regeneration_pending(message_id)
+        return _stream_pending_message(service, pending)
+    except CareerAdvisorNotFoundError as exc:
+        raise _not_found(exc) from exc
+    except CareerAdvisorActionError as exc:
+        raise _action_error(exc) from exc
 
 
 @router.post("/messages/{message_id}/regenerate", response_model=CareerAdvisorMessageRead)

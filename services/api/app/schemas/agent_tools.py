@@ -20,12 +20,14 @@ class SearchJobsInput(BaseModel):
     keywords: list[str] = Field(default_factory=list, max_length=30)
     cities: list[str] = Field(default_factory=list, max_length=30)
     limit: int = Field(default=100, ge=1, le=300)
+    platforms: list[str] = Field(default_factory=list, max_length=10)
 
 
 class SearchJobsOutput(BaseModel):
     count: int
     job_ids: list[UUID]
     jobs: list[ToolJob]
+    platform_status: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class GetJobInput(BaseModel):

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from pydantic import BaseModel
@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.llm.provider import LLMProvider
 from app.models.states import CampaignJobStatus
+from app.platforms.domain import JobSearchQuery
 from app.repositories.campaigns import CampaignRepository
 from app.repositories.matching import MatchingRepository
 from app.schemas.agent_tools import (
@@ -42,6 +43,8 @@ from app.services.jobs import JobService
 from app.services.matching import MatchingResumeNotFoundError, MatchingService
 from app.services.ranking import RankingService
 from app.services.ranking_runs import RankingRunService
+from app.services.recruitment_search import RecruitmentSearchService
+from app.services.tool_governance import GovernancePhase, ToolManifest, ToolRiskLevel
 
 ToolHandler = Callable[[BaseModel], Awaitable[BaseModel]]
 
@@ -53,6 +56,16 @@ class AgentTool:
     input_schema: type[BaseModel]
     output_schema: type[BaseModel]
     handler: ToolHandler
+    manifest: ToolManifest | None = None
+
+    def get_manifest(self) -> ToolManifest:
+        if self.manifest is not None and self.manifest.input_schema:
+            return self.manifest
+        manifest = self.manifest or ToolManifest(
+            name=self.name,
+            description=self.description,
+        )
+        return replace(manifest, input_schema=self.input_schema.model_json_schema())
 
     async def execute(self, payload: dict[str, Any]) -> dict[str, Any]:
         parsed_input = self.input_schema.model_validate(payload)
@@ -79,6 +92,174 @@ class ToolRegistry:
     def catalog(self) -> list[AgentTool]:
         return list(self._tools.values())
 
+    def get_tools_by_capability(self, capability: str) -> list[AgentTool]:
+        normalized = capability.casefold().strip()
+        return [
+            tool
+            for tool in self._tools.values()
+            if normalized in {item.casefold() for item in tool.get_manifest().capabilities}
+        ]
+
+    def list_available_tools(self, phase: str | None = None) -> list[AgentTool]:
+        if phase is None:
+            return self.catalog()
+        return [
+            tool for tool in self._tools.values() if phase in tool.get_manifest().allowed_states
+        ]
+
+    def filter_by_risk(self, risk_level: ToolRiskLevel) -> list[AgentTool]:
+        return [
+            tool for tool in self._tools.values() if tool.get_manifest().risk_level == risk_level
+        ]
+
+
+def _manifest(
+    name: str,
+    description: str,
+    *,
+    capabilities: tuple[str, ...],
+    allowed_states: tuple[str, ...],
+    risk_level: ToolRiskLevel = ToolRiskLevel.LOW,
+    cost_level: str = "LOW",
+    latency_level: str = "LOW",
+    requires_confirmation: bool = False,
+    suitable_for: tuple[str, ...] = (),
+    unsuitable_for: tuple[str, ...] = (),
+    preconditions: tuple[str, ...] = (),
+    postconditions: tuple[str, ...] = (),
+    tags: tuple[str, ...] = (),
+) -> ToolManifest:
+    return ToolManifest(
+        name=name,
+        description=description,
+        capabilities=capabilities,
+        suitable_for=suitable_for,
+        unsuitable_for=unsuitable_for,
+        input_schema={},
+        risk_level=risk_level,
+        cost_level=cost_level,
+        latency_level=latency_level,
+        requires_confirmation=requires_confirmation,
+        preconditions=preconditions,
+        postconditions=postconditions,
+        allowed_states=allowed_states,
+        tags=tags,
+    )
+
+
+TOOL_MANIFESTS = {
+    "search_jobs": _manifest(
+        "search_jobs",
+        "Search normalized jobs by keywords, cities, and recruitment platforms.",
+        capabilities=("job_search", "local_database_search", "platform_search"),
+        suitable_for=("job_search",),
+        allowed_states=(GovernancePhase.SEARCH.value,),
+        cost_level="LOW",
+        latency_level="MEDIUM",
+        tags=("read", "retrieval"),
+    ),
+    "get_job": _manifest(
+        "get_job",
+        "Load one normalized job and its description.",
+        capabilities=("job_detail", "local_database_read"),
+        suitable_for=("job_detail",),
+        allowed_states=(GovernancePhase.RETRIEVE.value, GovernancePhase.ANALYZE.value),
+        tags=("read",),
+    ),
+    "analyze_job": _manifest(
+        "analyze_job",
+        "Analyze and normalize a batch of jobs.",
+        capabilities=("job_analysis", "job_etl"),
+        suitable_for=("job_analysis",),
+        allowed_states=(GovernancePhase.ANALYZE.value,),
+        risk_level=ToolRiskLevel.MEDIUM,
+        latency_level="HIGH",
+        tags=("write", "etl"),
+    ),
+    "retrieve_resume": _manifest(
+        "retrieve_resume",
+        "Load the selected private resume profile and retrieval inventory.",
+        capabilities=("resume_retrieval", "private_data_read"),
+        suitable_for=("resume_matching",),
+        allowed_states=(GovernancePhase.ANALYZE.value,),
+        tags=("private", "read"),
+    ),
+    "score_job": _manifest(
+        "score_job",
+        "Score one job against a resume with Resume RAG.",
+        capabilities=("resume_matching", "job_scoring", "job_ranking"),
+        suitable_for=("resume_matching", "job_ranking"),
+        allowed_states=(GovernancePhase.ANALYZE.value,),
+        cost_level="MEDIUM",
+        latency_level="HIGH",
+        tags=("private", "scoring"),
+    ),
+    "rank_jobs": _manifest(
+        "rank_jobs",
+        "Run the cost-aware multi-stage ranking pipeline.",
+        capabilities=("resume_matching", "job_ranking", "llm_analysis"),
+        suitable_for=("resume_matching",),
+        allowed_states=(GovernancePhase.ANALYZE.value,),
+        cost_level="HIGH",
+        latency_level="HIGH",
+        tags=("private", "scoring"),
+    ),
+    "create_campaign": _manifest(
+        "create_campaign",
+        "Create and start a persisted campaign from requested criteria.",
+        capabilities=("campaign_management", "job_ranking"),
+        suitable_for=("campaign_creation",),
+        allowed_states=(GovernancePhase.EXECUTE.value,),
+        risk_level=ToolRiskLevel.MEDIUM,
+        cost_level="HIGH",
+        latency_level="HIGH",
+        preconditions=("resume_exists",),
+        postconditions=("campaign_persisted",),
+        tags=("write", "campaign"),
+    ),
+    "request_approval": _manifest(
+        "request_approval",
+        "Pause execution and request explicit user approval.",
+        capabilities=("user_approval",),
+        suitable_for=("user_approval",),
+        allowed_states=(GovernancePhase.VERIFY.value,),
+        postconditions=("approval_prompt_persisted",),
+        tags=("interactive",),
+    ),
+    "queue_application": _manifest(
+        "queue_application",
+        "Approve selected campaign jobs and queue their applications.",
+        capabilities=("job_application_queue", "external_side_effect"),
+        suitable_for=("application_submit",),
+        allowed_states=(GovernancePhase.EXECUTE.value,),
+        risk_level=ToolRiskLevel.HIGH,
+        cost_level="MEDIUM",
+        latency_level="MEDIUM",
+        requires_confirmation=True,
+        preconditions=(
+            "campaign_exists",
+            "selected_jobs_exist",
+            "user_confirmed",
+            "not_already_queued",
+        ),
+        postconditions=("applications_queued", "local_status_updated"),
+        tags=("write", "external-side-effect", "confirmation"),
+    ),
+}
+
+
+TOOL_INPUT_SCHEMAS: dict[str, type[BaseModel]] = {
+    "search_jobs": SearchJobsInput,
+    "get_job": GetJobInput,
+    "analyze_job": AnalyzeJobsInput,
+    "retrieve_resume": RetrieveResumeInput,
+    "score_job": ScoreJobToolInput,
+    "rank_jobs": RankJobsToolInput,
+    "create_campaign": CreateCampaignToolInput,
+    "queue_application": QueueApplicationInput,
+    "request_approval": RequestApprovalInput,
+}
+
 
 class AgentToolService:
     def __init__(
@@ -104,6 +285,7 @@ class AgentToolService:
                 SearchJobsInput,
                 SearchJobsOutput,
                 self.search_jobs,
+                TOOL_MANIFESTS["search_jobs"],
             ),
             AgentTool(
                 "get_job",
@@ -111,6 +293,7 @@ class AgentToolService:
                 GetJobInput,
                 GetJobOutput,
                 self.get_job,
+                TOOL_MANIFESTS["get_job"],
             ),
             AgentTool(
                 "analyze_job",
@@ -118,6 +301,7 @@ class AgentToolService:
                 AnalyzeJobsInput,
                 AnalyzeJobsOutput,
                 self.analyze_jobs,
+                TOOL_MANIFESTS["analyze_job"],
             ),
             AgentTool(
                 "retrieve_resume",
@@ -125,6 +309,7 @@ class AgentToolService:
                 RetrieveResumeInput,
                 RetrieveResumeOutput,
                 self.retrieve_resume,
+                TOOL_MANIFESTS["retrieve_resume"],
             ),
             AgentTool(
                 "score_job",
@@ -132,6 +317,7 @@ class AgentToolService:
                 ScoreJobToolInput,
                 ScoreJobToolOutput,
                 self.score_job,
+                TOOL_MANIFESTS["score_job"],
             ),
             AgentTool(
                 "rank_jobs",
@@ -139,6 +325,7 @@ class AgentToolService:
                 RankJobsToolInput,
                 RankJobsToolOutput,
                 self.rank_jobs,
+                TOOL_MANIFESTS["rank_jobs"],
             ),
             AgentTool(
                 "create_campaign",
@@ -146,6 +333,7 @@ class AgentToolService:
                 CreateCampaignToolInput,
                 CreateCampaignToolOutput,
                 self.create_campaign,
+                TOOL_MANIFESTS["create_campaign"],
             ),
             AgentTool(
                 "queue_application",
@@ -153,6 +341,7 @@ class AgentToolService:
                 QueueApplicationInput,
                 QueueApplicationOutput,
                 self.queue_application,
+                TOOL_MANIFESTS["queue_application"],
             ),
             AgentTool(
                 "request_approval",
@@ -160,6 +349,7 @@ class AgentToolService:
                 RequestApprovalInput,
                 RequestApprovalOutput,
                 self.request_approval,
+                TOOL_MANIFESTS["request_approval"],
             ),
         ]
         for tool in definitions:
@@ -168,6 +358,33 @@ class AgentToolService:
 
     async def search_jobs(self, raw_input: BaseModel) -> SearchJobsOutput:
         payload = SearchJobsInput.model_validate(raw_input)
+        if payload.platforms:
+            result = await RecruitmentSearchService(self.session).search(
+                JobSearchQuery(
+                    keyword=" ".join(payload.keywords),
+                    city=payload.cities[0] if payload.cities else None,
+                    page_size=payload.limit,
+                    platforms=tuple(payload.platforms),
+                )
+            )
+            summaries = [
+                ToolJob(
+                    id=job.id,
+                    title=job.title,
+                    location=job.location,
+                    platform=job.platform,
+                )
+                for job in result.jobs
+                if job.id is not None
+            ]
+            return SearchJobsOutput(
+                count=len(summaries),
+                job_ids=[job.id for job in summaries],
+                jobs=summaries,
+                platform_status={
+                    key: value.__dict__ for key, value in result.platform_status.items()
+                },
+            )
         jobs = await self.campaign_repository.search_jobs(
             keywords=payload.keywords,
             cities=payload.cities,
@@ -325,17 +542,14 @@ class AgentToolService:
 
     async def queue_application(self, raw_input: BaseModel) -> QueueApplicationOutput:
         payload = QueueApplicationInput.model_validate(raw_input)
-        campaign = await CampaignService(
-            self.session, self.provider, self.settings
-        ).approve(
+        campaign = await CampaignService(self.session, self.provider, self.settings).approve(
             payload.campaign_id,
             CampaignApproveRequest(job_ids=payload.job_ids),
         )
         return QueueApplicationOutput(
             campaign_id=campaign.id,
             queued_count=sum(
-                item.status == CampaignJobStatus.QUEUED.value
-                for item in campaign.campaign_jobs
+                item.status == CampaignJobStatus.QUEUED.value for item in campaign.campaign_jobs
             ),
             status=campaign.status,
         )

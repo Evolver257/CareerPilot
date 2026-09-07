@@ -5,11 +5,15 @@ import re
 from uuid import UUID
 
 from app.core.config import Settings
-from app.llm.provider import LLMProvider
+from app.llm.provider import LLMProvider, LLMProviderError, embed_texts
+from app.llm.tokenization import token_counter_for_provider
 from app.models.entities import Job, Resume
 from app.repositories.matching import MatchingRepository
 from app.schemas.job_intelligence import StructuredJob
 from app.schemas.matching import ResumeEvidenceRead
+from app.schemas.resumes import ResumeProfile
+from app.services.resume_chunking import ResumeSemanticChunker
+from app.services.resume_embeddings import replace_resume_chunks, resume_chunks_need_rebuild
 
 
 class ResumeRAG:
@@ -29,9 +33,7 @@ class ResumeRAG:
         await self._ensure_resume_embeddings(resume)
         candidates: dict[UUID, tuple[object, float, str]] = {}
         for field, query, chunk_types in self.build_queries(job):
-            query_embedding = await self.provider.embed(
-                query, model=self.settings.embedding_model
-            )
+            query_embedding = await self.provider.embed(query, model=self.settings.embedding_model)
             for chunk, semantic in await self.repository.retrieve_resume_chunks(
                 resume_id=resume.id,
                 query_embedding=query_embedding,
@@ -65,6 +67,22 @@ class ResumeRAG:
         return evidence[: self.settings.matching_rerank_top_k]
 
     async def _ensure_resume_embeddings(self, resume: Resume) -> None:
+        if resume_chunks_need_rebuild(resume.chunks):
+            profile = ResumeProfile.model_validate(resume.structured_profile or {})
+            drafts = ResumeSemanticChunker(
+                token_counter=token_counter_for_provider(self.provider)
+            ).chunk(resume.raw_text, profile)
+            await replace_resume_chunks(
+                self.repository.session,
+                resume,
+                drafts,
+                self.provider,
+                self.settings,
+            )
+            await self.repository.session.commit()
+            await self.repository.session.refresh(resume, attribute_names=["chunks"])
+            return
+
         expected_signature = getattr(
             self.provider, "embedding_signature", self.settings.embedding_model
         )
@@ -76,10 +94,18 @@ class ResumeRAG:
         ]
         if not stale_chunks:
             return
-        for chunk in stale_chunks:
-            chunk.embedding = await self.provider.embed(
-                chunk.content, model=self.settings.embedding_model
-            )
+        vectors = await embed_texts(
+            self.provider,
+            [chunk.content for chunk in stale_chunks],
+            model=self.settings.embedding_model,
+        )
+        for chunk, vector in zip(stale_chunks, vectors, strict=True):
+            if len(vector) != self.settings.embedding_dimensions:
+                raise LLMProviderError(
+                    "resume embedding dimension mismatch: "
+                    f"expected {self.settings.embedding_dimensions}, got {len(vector)}"
+                )
+            chunk.embedding = vector
             chunk.chunk_metadata = {
                 **(chunk.chunk_metadata or {}),
                 "embedding_signature": expected_signature,
@@ -107,7 +133,7 @@ class ResumeRAG:
                         )
                         if value.split(":", 1)[-1].strip()
                     ),
-                    ("skill", "project", "experience", "summary"),
+                    ("skill", "project", "experience", "summary", "target_role"),
                 )
             )
         if responsibilities or profile.experience_requirement or job.experience_requirement:
@@ -172,18 +198,13 @@ class ResumeRAG:
     def _tokens(text: str) -> set[str]:
         normalized = re.sub(r"\s+", "", text.casefold())
         tokens = {
-            token
-            for token in re.findall(r"[a-z0-9][a-z0-9+#._/-]*", normalized)
-            if len(token) > 1
+            token for token in re.findall(r"[a-z0-9][a-z0-9+#._/-]*", normalized) if len(token) > 1
         }
         for segment in re.findall(r"[\u3400-\u9fff]+", normalized):
-            tokens.update(
-                f"zh2:{segment[index:index + 2]}" for index in range(len(segment) - 1)
-            )
+            tokens.update(f"zh2:{segment[index : index + 2]}" for index in range(len(segment) - 1))
             if len(segment) >= 3:
                 tokens.update(
-                    f"zh3:{segment[index:index + 3]}"
-                    for index in range(len(segment) - 2)
+                    f"zh3:{segment[index : index + 3]}" for index in range(len(segment) - 2)
                 )
         return tokens
 

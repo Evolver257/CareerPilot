@@ -17,7 +17,7 @@ class CampaignCreate(BaseModel):
     query: str = Field(default="", max_length=500)
     keywords: list[str] = Field(default_factory=list, max_length=30)
     min_score: float = Field(default=50.0, ge=0, le=100)
-    max_jobs: int = Field(default=20, ge=1, le=100)
+    max_jobs: int = Field(default=20, ge=1, le=200)
     scoring_mode: RankingScoringMode = "fast"
     target_cities: list[str] = Field(default_factory=list, max_length=30)
     filters: dict[str, Any] = Field(default_factory=dict)
@@ -29,7 +29,7 @@ class CampaignUpdate(BaseModel):
     query: str | None = Field(default=None, max_length=500)
     keywords: list[str] | None = Field(default=None, max_length=30)
     min_score: float | None = Field(default=None, ge=0, le=100)
-    max_jobs: int | None = Field(default=None, ge=1, le=100)
+    max_jobs: int | None = Field(default=None, ge=1, le=200)
     scoring_mode: RankingScoringMode | None = None
     target_cities: list[str] | None = Field(default=None, max_length=30)
     filters: dict[str, Any] | None = None
@@ -40,7 +40,7 @@ class CuratedCampaignCreate(BaseModel):
 
     name: str = Field(min_length=1, max_length=300)
     resume_id: UUID | None = None
-    job_ids: list[UUID] = Field(min_length=1, max_length=20)
+    job_ids: list[UUID] = Field(min_length=1, max_length=200)
     query: str = Field(default="", max_length=500)
     message: str = Field(default="", max_length=2000)
 
@@ -102,6 +102,7 @@ class CampaignJobRead(BaseModel):
 
 class CampaignDetailRead(CampaignRead):
     candidate_jobs: list[CampaignJobRead]
+    reused_existing: bool = False
 
 
 class CampaignListResponse(BaseModel):
@@ -110,16 +111,17 @@ class CampaignListResponse(BaseModel):
 
 
 class CampaignApproveRequest(BaseModel):
-    job_ids: list[UUID] = Field(min_length=1, max_length=100)
+    job_ids: list[UUID] = Field(min_length=1, max_length=200)
 
 
 class CampaignRejectRequest(BaseModel):
-    job_ids: list[UUID] = Field(min_length=1, max_length=100)
+    job_ids: list[UUID] = Field(min_length=1, max_length=200)
 
 
 ApplicationAction = Literal[
     "execute",
     "submit",
+    "manual_required",
     "pause",
     "resume",
     "retry",
@@ -147,3 +149,6 @@ class ApplicationListItem(ApplicationRead):
 class ApplicationListResponse(BaseModel):
     items: list[ApplicationListItem]
     total: int
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    page: int = 1
+    page_size: int = 50

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -10,6 +11,40 @@ from app.schemas.browser import BrowserAction
 
 class PlatformAdapterError(RuntimeError):
     """Base error raised by a platform adapter."""
+
+
+class ProviderErrorCode(StrEnum):
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    VERIFICATION_REQUIRED = "VERIFICATION_REQUIRED"
+    RATE_LIMITED = "RATE_LIMITED"
+    PAGE_CHANGED = "PAGE_CHANGED"
+    PARSER_FAILED = "PARSER_FAILED"
+    NETWORK_ERROR = "NETWORK_ERROR"
+    SESSION_EXPIRED = "SESSION_EXPIRED"
+    UNSUPPORTED_FILTER = "UNSUPPORTED_FILTER"
+    UNKNOWN = "UNKNOWN"
+
+
+class RecruitmentProviderError(PlatformAdapterError):
+    """Diagnosable provider error safe to expose to the search aggregator."""
+
+    def __init__(
+        self,
+        platform: str,
+        code: ProviderErrorCode,
+        message: str,
+        *,
+        recoverable: bool = True,
+        parser_stage: str | None = None,
+        field: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.platform = platform
+        self.code = code
+        self.message = message
+        self.recoverable = recoverable
+        self.parser_stage = parser_stage
+        self.field = field
 
 
 class CaptchaRequiredError(PlatformAdapterError):

@@ -14,7 +14,7 @@ class EmbeddingType(TypeDecorator[list[float] | None]):
     impl = JSON
     cache_ok = True
 
-    def __init__(self, dimensions: int = 384, **kwargs: Any) -> None:
+    def __init__(self, dimensions: int = 1024, **kwargs: Any) -> None:
         self.dimensions = dimensions
         super().__init__(**kwargs)
 
