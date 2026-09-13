@@ -11,7 +11,14 @@ from app.llm.provider import (
     OpenAIProvider,
 )
 from app.schemas.llm import LLMConnectionTestRead
-from app.schemas.tool_protocol import ToolDefinition
+from app.schemas.tool_protocol import (
+    AgentMessage,
+    AgentToolCall,
+    AgentToolResult,
+    JsonContentBlock,
+    ToolCallStatus,
+    ToolDefinition,
+)
 from app.services.llm_settings import LLMSettingsService
 
 
@@ -161,6 +168,11 @@ async def test_openai_provider_uses_native_function_calling() -> None:
         base_url="https://proxy.example/v1",
         transport=httpx.MockTransport(handler),
     )
+    previous_call = AgentToolCall(
+        call_id="previous-call",
+        tool_name="search_jobs",
+        arguments={"query": "Python"},
+    )
     result = await provider.decide_with_tools(
         "choose",
         [
@@ -170,12 +182,31 @@ async def test_openai_provider_uses_native_function_calling() -> None:
                 input_schema={"type": "object"},
             )
         ],
+        messages=[
+            AgentMessage(role="user", content="find a job"),
+            AgentMessage(role="assistant", tool_calls=[previous_call]),
+            AgentMessage(
+                role="tool",
+                tool_result=AgentToolResult(
+                    call_id="previous-call",
+                    tool_name="search_jobs",
+                    status=ToolCallStatus.SUCCESS,
+                    content=[JsonContentBlock(data={"count": 2})],
+                ),
+            ),
+        ],
     )
 
     body = json.loads(requests[0].content)
     assert body["tool_choice"] == "auto"
     assert body["parallel_tool_calls"] is False
     assert body["tools"][0]["function"]["name"] == "search_jobs"
+    assert [item["role"] for item in body["messages"]] == [
+        "user",
+        "assistant",
+        "tool",
+    ]
+    assert body["messages"][2]["tool_call_id"] == "previous-call"
     assert result.tool_calls[0].arguments == {"query": "RAG"}
     assert result.stop_reason == "tool_calls"
 
@@ -298,6 +329,11 @@ async def test_anthropic_provider_uses_native_tool_use_blocks() -> None:
         base_url="https://proxy.example",
         transport=httpx.MockTransport(handler),
     )
+    previous_call = AgentToolCall(
+        call_id="previous-tool",
+        tool_name="search_jobs",
+        arguments={"query": "Python"},
+    )
     result = await provider.decide_with_tools(
         "choose",
         [
@@ -307,11 +343,30 @@ async def test_anthropic_provider_uses_native_tool_use_blocks() -> None:
                 input_schema={"type": "object"},
             )
         ],
+        messages=[
+            AgentMessage(role="user", content="find a job"),
+            AgentMessage(role="assistant", tool_calls=[previous_call]),
+            AgentMessage(
+                role="tool",
+                tool_result=AgentToolResult(
+                    call_id="previous-tool",
+                    tool_name="search_jobs",
+                    status=ToolCallStatus.SUCCESS,
+                    content=[JsonContentBlock(data={"count": 2})],
+                ),
+            ),
+        ],
     )
 
     body = json.loads(requests[0].content)
     assert body["tools"][0]["input_schema"] == {"type": "object"}
     assert "tool_choice" not in body
+    assert [item["role"] for item in body["messages"]] == [
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert body["messages"][2]["content"][0]["type"] == "tool_result"
     assert result.tool_calls[0].arguments == {"query": "Agent"}
     assert result.stop_reason == "tool_use"
 

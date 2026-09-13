@@ -109,11 +109,11 @@ def _career_advisor_manifest(
     latency_level: str = "MEDIUM",
     tags: tuple[str, ...] = ("read", "knowledge-base"),
 ) -> ToolManifest:
-    """Manifests for the read-only Career Advisor tool surface.
+    """Manifests for Career Advisor tools and typed UI handoffs.
 
     Keeping these beside the generic Agent manifests makes the governance
-    layer independent from either caller.  Career Advisor tools deliberately
-    have no write or external-side-effect capability.
+    layer independent from either caller. External actions are represented as
+    explicit, auditable UI handoffs and run in a visible user browser.
     """
 
     return ToolManifest(
@@ -131,38 +131,65 @@ def _career_advisor_manifest(
 CAREER_ADVISOR_TOOL_MANIFESTS: dict[str, ToolManifest] = {
     "search_jobs": _career_advisor_manifest(
         "search_jobs",
-        "Search recent normalized jobs and return interactive candidates for the user.",
+        "检索系统中已经持久化的具体岗位，并返回可查看、筛选和准备投递的岗位卡片；"
+        "适合用户要求查找系统现有岗位，不用于联网采集。",
         capabilities=("job_search", "local_database_search", "job_recommendation"),
         suitable_for=("job_recommendation", "market_research"),
         allowed_states=(GovernancePhase.SEARCH.value,),
         latency_level="MEDIUM",
         tags=("read", "retrieval", "interactive-card"),
     ),
+    "collect_jobs_online": _career_advisor_manifest(
+        "collect_jobs_online",
+        "通过 CareerPilot 浏览器扩展在 BOSS 直聘或智联招聘搜索岗位；"
+        "在聊天内创建可操作卡片，并逐步采集、持久化完整 JD 和快速评分。"
+        "用户明确要求在招聘网站搜索、采集或爬取岗位时调用。",
+        capabilities=(
+            "job_search",
+            "external_job_collection",
+            "browser_automation",
+            "job_recommendation",
+        ),
+        suitable_for=("job_recommendation", "market_research"),
+        allowed_states=(GovernancePhase.SEARCH.value,),
+        cost_level="MEDIUM",
+        latency_level="HIGH",
+        tags=("interactive-card", "external", "user-visible", "persisted-results"),
+    ),
     "search_job_knowledge": _career_advisor_manifest(
         "search_job_knowledge",
-        "Retrieve grounded job knowledge and JD evidence.",
+        "从岗位知识库检索可追溯的 JD 证据；适合回答岗位要求、职责、学历、经验和技能问题。",
         capabilities=("job_knowledge_search", "local_database_search", "evidence_retrieval"),
         suitable_for=("market_research", "salary_analysis", "skill_analysis"),
         allowed_states=(GovernancePhase.SEARCH.value, GovernancePhase.RETRIEVE.value),
         latency_level="HIGH",
     ),
+    "retrieve_career_memory": _career_advisor_manifest(
+        "retrieve_career_memory",
+        "在明确的类型、键和 token 限制内读取用户已确认的职业偏好与长期记忆。",
+        capabilities=("memory_retrieval", "private_data_read", "read_only"),
+        suitable_for=("learning_roadmap", "resume_gap", "job_recommendation", "follow_up"),
+        allowed_states=(GovernancePhase.RETRIEVE.value,),
+        latency_level="LOW",
+        tags=("read", "private", "memory"),
+    ),
     "aggregate_job_market": _career_advisor_manifest(
         "aggregate_job_market",
-        "Aggregate salary, education, experience, and skill statistics.",
+        "聚合相关岗位的薪资、学历、经验和技能分布；适合市场行情与薪资分析。",
         capabilities=("market_analysis", "job_knowledge_search", "statistics"),
         suitable_for=("market_research", "salary_analysis"),
         allowed_states=(GovernancePhase.ANALYZE.value,),
     ),
     "explain_skill_demand": _career_advisor_manifest(
         "explain_skill_demand",
-        "Explain skill demand from normalized job evidence.",
+        "依据标准化岗位证据解释技能需求、出现频率、必备程度和典型工作场景。",
         capabilities=("skill_analysis", "job_knowledge_search", "evidence_retrieval"),
         suitable_for=("skill_analysis",),
         allowed_states=(GovernancePhase.ANALYZE.value,),
     ),
     "build_learning_roadmap": _career_advisor_manifest(
         "build_learning_roadmap",
-        "Build a learning roadmap grounded in target-role demand.",
+        "根据目标岗位需求构建可执行学习路线；仅在用户要求学习规划或准备路径时使用。",
         capabilities=("learning_plan", "job_knowledge_search", "evidence_retrieval"),
         suitable_for=("learning_roadmap",),
         allowed_states=(GovernancePhase.ANALYZE.value,),
@@ -171,7 +198,7 @@ CAREER_ADVISOR_TOOL_MANIFESTS: dict[str, ToolManifest] = {
     ),
     "analyze_resume_gap": _career_advisor_manifest(
         "analyze_resume_gap",
-        "Compare a private resume profile with grounded role demand.",
+        "将当前会话绑定的私有简历与目标岗位证据比较，识别已覆盖能力和关键差距。",
         capabilities=("resume_matching", "private_data_read", "job_knowledge_search"),
         suitable_for=("resume_gap",),
         allowed_states=(GovernancePhase.ANALYZE.value,),
@@ -179,7 +206,7 @@ CAREER_ADVISOR_TOOL_MANIFESTS: dict[str, ToolManifest] = {
     ),
     "compare_role_profiles": _career_advisor_manifest(
         "compare_role_profiles",
-        "Compare two role profiles using the same evidence pipeline.",
+        "使用相同证据口径比较恰好两个岗位方向，包括岗位量、要求和能力侧重点。",
         capabilities=("role_comparison", "job_knowledge_search", "evidence_retrieval"),
         suitable_for=("role_comparison",),
         allowed_states=(GovernancePhase.ANALYZE.value,),
@@ -187,7 +214,7 @@ CAREER_ADVISOR_TOOL_MANIFESTS: dict[str, ToolManifest] = {
     ),
     "recommend_jobs": _career_advisor_manifest(
         "recommend_jobs",
-        "Recommend jobs grounded in the knowledge base and optional resume.",
+        "依据岗位知识库和可选简历推荐岗位；用于分析型推荐，不负责联网采集。",
         capabilities=("job_recommendation", "resume_matching", "job_knowledge_search"),
         suitable_for=("job_recommendation",),
         allowed_states=(GovernancePhase.SEARCH.value, GovernancePhase.ANALYZE.value),
@@ -196,7 +223,7 @@ CAREER_ADVISOR_TOOL_MANIFESTS: dict[str, ToolManifest] = {
     ),
     "deep_dive_skill_requirements": _career_advisor_manifest(
         "deep_dive_skill_requirements",
-        "Retrieve bounded JD evidence for concrete skill responsibilities and requirements.",
+        "针对已有高频技能继续检索有限数量的 JD 职责与任职要求，补充可验证能力标准。",
         capabilities=("skill_analysis", "jd_deep_retrieval", "evidence_retrieval"),
         suitable_for=("learning_roadmap", "skill_analysis", "resume_gap"),
         allowed_states=(GovernancePhase.RETRIEVE.value, GovernancePhase.ANALYZE.value),
@@ -420,6 +447,17 @@ class SemanticValidator:
             payload.get(field_name) for field_name in ("keywords", "cities", "platforms")
         ):
             errors.append("search_jobs requires at least one search constraint")
+        if tool_name == "collect_jobs_online":
+            if not str(payload.get("query", "")).strip():
+                errors.append("collect_jobs_online requires a non-blank query")
+            if payload.get("platform") not in {"boss", "zhaopin", "auto"}:
+                errors.append("collect_jobs_online platform must be boss, zhaopin, or auto")
+            max_jobs = payload.get("max_jobs")
+            if not isinstance(max_jobs, int) or not 1 <= max_jobs <= 200:
+                errors.append("collect_jobs_online max_jobs must be between 1 and 200")
+            threshold = payload.get("quick_score_threshold")
+            if not isinstance(threshold, int | float) or not 0 <= threshold <= 100:
+                errors.append("collect_jobs_online quick_score_threshold must be between 0 and 100")
         if tool_name == "queue_application" and not payload.get("job_ids"):
             errors.append("queue_application requires at least one job")
         # ``search_jobs`` is shared with the job-search orchestrator and uses
@@ -427,7 +465,7 @@ class SemanticValidator:
         # own contract above rather than applying the advisor query contract.
         if (
             tool_name in CAREER_ADVISOR_TOOL_MANIFESTS
-            and tool_name != "search_jobs"
+            and tool_name not in {"search_jobs", "collect_jobs_online"}
             and not str(payload.get("query", "")).strip()
         ):
             errors.append(f"{tool_name} requires a non-blank query")
@@ -541,7 +579,7 @@ class ToolBudget:
         if calls_used >= self.max_tool_calls:
             return False, f"tool budget exhausted ({self.max_tool_calls} calls)"
         if (
-            tool_name == "search_jobs"
+            tool_name in {"search_jobs", "collect_jobs_online"}
             and self.max_search_calls is not None
             and search_calls_used >= self.max_search_calls
         ):
@@ -680,6 +718,15 @@ class ToolResultVerifier:
             return ResultVerification(
                 True, ToolSemanticStatus.VALID, 0.9, {"has_results": True}, confidence=0.9
             )
+        if tool_name == "collect_jobs_online":
+            action = result.get("ui_action")
+            valid = isinstance(action, dict) and action.get("type") == "job_collection_request"
+            return ResultVerification(
+                valid,
+                ToolSemanticStatus.VALID if valid else ToolSemanticStatus.INVALID,
+                0.95 if valid else 0.1,
+                reason=None if valid else "online collection did not return a typed UI action",
+            )
         if tool_name == "get_job":
             found = bool(result.get("found"))
             return ResultVerification(
@@ -735,6 +782,22 @@ class ToolResultVerifier:
                 ToolSemanticStatus.VALID if valid else ToolSemanticStatus.INVALID,
                 0.95 if valid else 0.1,
                 reason=None if valid else "queue result is incomplete",
+            )
+        if tool_name == "retrieve_career_memory":
+            count = result.get("count")
+            try:
+                valid = count is not None and int(count) >= 0
+            except (TypeError, ValueError):
+                valid = False
+            return ResultVerification(
+                valid,
+                (
+                    ToolSemanticStatus.VALID
+                    if valid and int(count or 0) > 0
+                    else ToolSemanticStatus.PARTIAL
+                ),
+                0.9 if valid and int(count or 0) > 0 else 0.45 if valid else 0.1,
+                reason=None if valid else "memory retrieval result is incomplete",
             )
         if tool_name in CAREER_ADVISOR_TOOL_MANIFESTS:
             sample_count = result.get("sample_count")

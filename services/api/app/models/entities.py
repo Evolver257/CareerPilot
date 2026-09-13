@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -252,6 +253,9 @@ class Job(Base):
         back_populates="job", cascade="all, delete-orphan"
     )
     requirements: Mapped[list[JobRequirement]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
+    career_advisor_links: Mapped[list[CareerAdvisorSessionJob]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
     raw_snapshots: Mapped[list[RawJobSnapshot]] = relationship(
@@ -960,6 +964,51 @@ class CareerAdvisorSession(Base):
     messages: Mapped[list[CareerAdvisorMessage]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
+    job_links: Mapped[list[CareerAdvisorSessionJob]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
+
+
+class CareerAdvisorSessionJob(Base):
+    """A durable reference from one advisor conversation to a persisted job."""
+
+    __tablename__ = "career_advisor_session_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "job_id",
+            name="uq_career_advisor_session_jobs_session_job",
+        ),
+        Index(
+            "ix_career_advisor_session_jobs_session_last_linked",
+            "session_id",
+            "last_linked_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    session_id: Mapped[UUID] = mapped_column(
+        ForeignKey("career_advisor_sessions.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), index=True
+    )
+    source_message_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("career_advisor_messages.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    source_type: Mapped[str] = mapped_column(
+        String(40), default="automated_collection", index=True
+    )
+    context_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
+    first_linked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_linked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    session: Mapped[CareerAdvisorSession] = relationship(back_populates="job_links")
+    job: Mapped[Job] = relationship(back_populates="career_advisor_links")
 
 
 class CareerAdvisorMessage(Base):
@@ -1026,9 +1075,13 @@ class AgentMemorySetting(Base):
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    auto_save_non_sensitive: Mapped[bool] = mapped_column(Boolean, default=False)
+    auto_save_non_sensitive: Mapped[bool] = mapped_column(Boolean, default=True)
     retention_days: Mapped[int] = mapped_column(Integer, default=180)
     allowed_types: Mapped[list[str]] = mapped_column(JSON, default=list)
+    allow_session_summaries: Mapped[bool] = mapped_column(Boolean, default=False)
+    allow_unconfirmed_context: Mapped[bool] = mapped_column(Boolean, default=False)
+    memory_token_budget: Mapped[int] = mapped_column(Integer, default=700)
+    extraction_confidence_threshold: Mapped[float] = mapped_column(Float, default=0.75)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
@@ -1041,15 +1094,38 @@ class AgentMemory(Base):
     __tablename__ = "agent_memories"
     __table_args__ = (
         UniqueConstraint("user_id", "content_hash", name="uq_agent_memories_user_hash"),
+        Index("ix_agent_memories_user_status", "user_id", "status"),
+        Index("ix_agent_memories_user_memory_key", "user_id", "memory_key"),
+        Index("ix_agent_memories_user_type", "user_id", "memory_type"),
+        Index("ix_agent_memories_user_valid_until", "user_id", "valid_until"),
+        Index("ix_agent_memories_embedding_signature", "embedding_signature"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    user_id: Mapped[UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True
-    )
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     memory_type: Mapped[str] = mapped_column(String(50), index=True)
+    memory_key: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    structured_value: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True, default=dict
+    )
+    scope: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    memory_class: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    stability: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    importance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
     content: Mapped[str] = mapped_column(Text)
     normalized_content: Mapped[str] = mapped_column(Text)
+    source_quote: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extraction_method: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    extraction_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    supersedes_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("agent_memories.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    last_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    use_count: Mapped[int] = mapped_column(Integer, default=0)
     source_session_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("career_advisor_sessions.id", ondelete="SET NULL"), nullable=True
     )
@@ -1070,6 +1146,7 @@ class AgentMemory(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    deleted_from_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
@@ -1085,12 +1162,23 @@ class MemoryCandidate(Base):
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    user_id: Mapped[UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True
-    )
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     memory_type: Mapped[str] = mapped_column(String(50), index=True)
+    memory_key: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    structured_value: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True, default=dict
+    )
+    scope: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    memory_class: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    stability: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    importance: Mapped[float | None] = mapped_column(Float, nullable=True)
     content: Mapped[str] = mapped_column(Text)
     normalized_content: Mapped[str] = mapped_column(Text)
+    source_quote: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extraction_method: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    extraction_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    requires_confirmation: Mapped[bool] = mapped_column(Boolean, default=True)
+    conflict_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
     source_session_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("career_advisor_sessions.id", ondelete="SET NULL"), nullable=True
@@ -1110,6 +1198,34 @@ class MemoryCandidate(Base):
     user: Mapped[User] = relationship(back_populates="memory_candidates")
 
 
+class MemoryEmbeddingRun(Base):
+    """Durable lifecycle record for long-term-memory embedding backfills."""
+
+    __tablename__ = "memory_embedding_runs"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    mode: Mapped[str] = mapped_column(String(30), default="incremental", index=True)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    processed: Mapped[int] = mapped_column(Integer, default=0)
+    succeeded: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    current_memory_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("agent_memories.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    request_payload: Mapped[dict[str, Any]] = mapped_column("request", JSON, default=dict)
+    result_payload: Mapped[dict[str, Any]] = mapped_column("result", JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class MCPConnection(Base):
     __tablename__ = "mcp_connections"
     __table_args__ = (
@@ -1117,9 +1233,7 @@ class MCPConnection(Base):
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    user_id: Mapped[UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True
-    )
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(120))
     namespace: Mapped[str] = mapped_column(String(80))
     transport: Mapped[str] = mapped_column(String(30))

@@ -5,8 +5,21 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 
 import { MarkdownContent } from "../../components/markdown-content";
 import { AdvisorDialog } from "../../components/advisor-dialog";
+import { AgentRunStatus } from "../../components/career-advisor/agent-run-status";
+import {
+  agentRunFromMessage,
+  createAgentRun,
+  eventFromCareerAdvisor,
+  reduceAgentRun,
+  type AgentConnectionState,
+  type AgentRunState,
+} from "../../components/career-advisor/agent-event-adapter";
+import { StreamingAnswer } from "../../components/career-advisor/streaming-answer";
+import { BossPluginWorkflow } from "../../components/boss-plugin-workflow";
+import { ZhaopinPluginWorkflow } from "../../components/zhaopin-plugin-workflow";
 import { shouldFollowMessages, splitAdvisorAnswer } from "../../lib/advisor-presentation";
 import {
+  bindCareerAdvisorSessionJobs,
   cancelCareerAdvisorMessage,
   cancelCareerAdvisorApplication,
   confirmCareerAdvisorApplication,
@@ -15,13 +28,14 @@ import {
   deleteCareerAdvisorSession,
   getCareerAdvisorSession,
   getCareerAdvisorSessions,
-  getKnowledgeHealth,
-  type KnowledgeHealth,
   getResumes,
-  createKnowledgeIndexRun,
   prepareCareerAdvisorApplication,
   streamCareerAdvisorMessage,
+  streamCareerAdvisorCollectionContinuation,
+  streamCareerAdvisorRecovery,
   streamRegenerateCareerAdvisorMessage,
+  markAgentMemoryOutdated,
+  updateAgentMemory,
   updateCareerAdvisorSession,
   type CareerAdvisorIntent,
   type CareerAdvisorJobCandidate,
@@ -50,14 +64,6 @@ const statusLabels: Record<string, string> = {
   FAILED: "生成失败",
   CANCELLED: "已停止",
 };
-
-const generationStages = [
-  { id: "understanding", label: "理解目标" },
-  { id: "searching", label: "检索岗位" },
-  { id: "analyzing", label: "分析需求" },
-  { id: "writing", label: "生成建议" },
-  { id: "finalizing", label: "整理引用" },
-];
 
 const quickPrompts = [
   { title: "规划学习方向", prompt: "我想学习 AI Agent，需要掌握哪些技术栈？", icon: "✦" },
@@ -202,9 +208,13 @@ function formatMetadataDate(value: unknown) {
 
 function messageUiAction(message: CareerAdvisorMessage): CareerAdvisorUiAction | null {
   const value = message.ui_action ?? message.answer_metadata.ui_action;
-  return value && typeof value === "object" && typeof (value as Record<string, unknown>).type === "string"
-    ? value as CareerAdvisorUiAction
-    : null;
+  if (!value || typeof value !== "object" || typeof (value as Record<string, unknown>).type !== "string") return null;
+  const action = value as CareerAdvisorUiAction;
+  if (action.type === "job_search_results") {
+    if (action.result_source !== "knowledge_base" || !Array.isArray(action.jobs) || action.jobs.length === 0) return null;
+  }
+  if (action.type === "job_collection_request" && action.result_source !== "automated_collection") return null;
+  return action;
 }
 
 function presentationMarkdown(value: string) {
@@ -247,6 +257,9 @@ function EvidenceContent({ message }: { message: CareerAdvisorMessage }) {
     ? message.answer_metadata.planned_tools.filter((item): item is string => typeof item === "string")
     : [];
   const sampleCount = metadataNumber(message.answer_metadata.sample_count);
+  const freshJobCount = metadataNumber(message.answer_metadata.fresh_job_count ?? sampleCount);
+  const requiredJobSamples = metadataNumber(message.answer_metadata.required_job_samples);
+  const sampleShortfall = metadataNumber(message.answer_metadata.sample_shortfall);
   const dataSufficient = message.answer_metadata.data_sufficient === true;
   const skillDeepDiveCount = metadataNumber(message.answer_metadata.skill_deep_dive_count);
   const skillEvidenceCount = metadataNumber(message.answer_metadata.skill_evidence_count);
@@ -254,6 +267,21 @@ function EvidenceContent({ message }: { message: CareerAdvisorMessage }) {
     ? message.answer_metadata.skill_focus.filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
     : [];
   const ragMode = metadataText(message.answer_metadata.rag_mode);
+  const knowledgeExecutionMode = metadataText(
+    message.answer_metadata.knowledge_execution_mode,
+    ragMode === "agentic" ? "agentic" : factSource === "database" ? "direct" : "none",
+  );
+  const agenticCapabilityLevel = metadataText(
+    message.answer_metadata.agentic_capability_level,
+    knowledgeExecutionMode === "agentic" ? "retrieval_only" : "unavailable",
+  );
+  const ragBudgetValue = message.answer_metadata.rag_budget;
+  const ragBudget = ragBudgetValue && typeof ragBudgetValue === "object"
+    ? ragBudgetValue as Record<string, unknown>
+    : null;
+  const ragToolCallsUsed = ragBudget ? metadataNumber(ragBudget.tool_calls_used) : 0;
+  const ragToolCallsLimit = ragBudget ? metadataNumber(ragBudget.tool_calls_limit) : 0;
+  const ragBudgetExhausted = ragBudget?.exhausted === true;
   const ragStatus = metadataText(message.answer_metadata.rag_knowledge_status);
   const ragConfidence = metadataText(message.answer_metadata.rag_confidence);
   const ragIterations = metadataNumber(message.answer_metadata.rag_iterations);
@@ -280,6 +308,57 @@ function EvidenceContent({ message }: { message: CareerAdvisorMessage }) {
   const warnings = Array.isArray(message.answer_metadata.warnings)
     ? message.answer_metadata.warnings.filter((item): item is string => typeof item === "string")
     : [];
+  const memory = message.answer_metadata.memory;
+  const memoryRecord = memory && typeof memory === "object" ? memory as Record<string, unknown> : null;
+  const memoryItems = memoryRecord && Array.isArray(memoryRecord.items) ? memoryRecord.items : [];
+  const memoryUsedCount = memoryRecord ? metadataNumber(memoryRecord.used_count ?? memoryRecord.retrieved_count) : 0;
+  const memoryTokenUsage = memoryRecord ? metadataNumber(memoryRecord.token_usage) : 0;
+  const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null);
+  const [memoryDraft, setMemoryDraft] = useState("");
+  const [memoryActionId, setMemoryActionId] = useState<string | null>(null);
+  const [memoryActionMessage, setMemoryActionMessage] = useState<string | null>(null);
+  async function saveMemoryCorrection(memoryId: string) {
+    const content = memoryDraft.trim();
+    if (!content || memoryActionId) return;
+    setMemoryActionId(memoryId);
+    setMemoryActionMessage(null);
+    try {
+      await updateAgentMemory(memoryId, { content, user_confirmed: true });
+      setEditingMemoryId(null);
+      setMemoryDraft("");
+      setMemoryActionMessage("记忆已纠正并确认");
+    } catch (reason) {
+      setMemoryActionMessage(reason instanceof Error ? reason.message : "记忆纠正失败");
+    } finally {
+      setMemoryActionId(null);
+    }
+  }
+  async function retireMemory(memoryId: string) {
+    if (memoryActionId) return;
+    setMemoryActionId(memoryId);
+    setMemoryActionMessage(null);
+    try {
+      await markAgentMemoryOutdated(memoryId);
+      setMemoryActionMessage("已禁止该记忆继续参与回答");
+    } catch (reason) {
+      setMemoryActionMessage(reason instanceof Error ? reason.message : "记忆操作失败");
+    } finally {
+      setMemoryActionId(null);
+    }
+  }
+  async function confirmMemory(memoryId: string) {
+    if (memoryActionId) return;
+    setMemoryActionId(memoryId);
+    setMemoryActionMessage(null);
+    try {
+      await updateAgentMemory(memoryId, { user_confirmed: true });
+      setMemoryActionMessage("记忆已确认");
+    } catch (reason) {
+      setMemoryActionMessage(reason instanceof Error ? reason.message : "记忆确认失败");
+    } finally {
+      setMemoryActionId(null);
+    }
+  }
   const tools = message.tool_trace
     .map((trace) => metadataText(trace.tool))
     .filter(Boolean);
@@ -287,7 +366,7 @@ function EvidenceContent({ message }: { message: CareerAdvisorMessage }) {
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-2">
-        <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs text-slate-500">岗位样本</p><p className="mt-1 text-lg font-semibold text-slate-900">{sampleCount}</p></div>
+        <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs text-slate-500">新鲜岗位样本</p><p className="mt-1 text-lg font-semibold text-slate-900">{freshJobCount}{requiredJobSamples > 0 ? <span className="ml-1 text-xs font-medium text-slate-500">/ {requiredJobSamples}</span> : null}</p></div>
         <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs text-slate-500">数据更新时间</p><p className="mt-1 text-xs font-medium leading-5 text-slate-800">{formatMetadataDate(message.answer_metadata.data_as_of)}</p></div>
       </div>
       <div className="flex flex-wrap gap-2 text-xs">
@@ -295,12 +374,31 @@ function EvidenceContent({ message }: { message: CareerAdvisorMessage }) {
         <span className="rounded-full bg-indigo-50 px-2.5 py-1 font-medium text-indigo-700">{adviceSource === "llm" ? "AI 整理" : "规则整理"}</span>
         <span className={`rounded-full px-2.5 py-1 font-medium ${dataSufficient ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{dataSufficient ? "样本充足" : "样本较少"}</span>
         {skillDeepDiveCount > 0 && <span className="rounded-full bg-violet-50 px-2.5 py-1 font-medium text-violet-700">JD 深挖 {skillDeepDiveCount} 项技能</span>}
+        <span className={`rounded-full px-2.5 py-1 font-medium ${knowledgeExecutionMode === "agentic" ? "bg-cyan-50 text-cyan-700 dark:bg-cyan-950/40 dark:text-cyan-300" : knowledgeExecutionMode === "fast" ? "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300" : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"}`}>{knowledgeExecutionMode === "agentic" ? agenticCapabilityLevel === "full" ? "LLM 动态检索" : "规则多轮检索" : knowledgeExecutionMode === "fast" ? "快速检索" : knowledgeExecutionMode === "direct" ? "单次知识检索" : "未使用知识库"}</span>
       </div>
+      {requiredJobSamples > 0 && sampleShortfall > 0 && <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">当前回答使用 {freshJobCount} 个三天内新鲜岗位，低于本问题建议的 {requiredJobSamples} 个；结论仅供参考，Agent 可继续提议在线补充。</p>}
       {skillDeepDiveCount > 0 && <div className="rounded-xl border border-violet-200 bg-violet-50/70 p-3 text-xs leading-5 text-violet-900 dark:border-violet-900/70 dark:bg-violet-950/30 dark:text-violet-100"><p className="font-semibold">岗位能力地图已生成</p><p className="mt-1">已针对 {skillFocus.join("、") || `${skillDeepDiveCount} 项重点技能`} 二次检索 JD，整理为能力要求、学习顺序和项目证明方式。</p><p className="mt-1 text-violet-700 dark:text-violet-300">补充证据片段：{skillEvidenceCount} 条</p></div>}
-      {ragMode === "agentic" && <div className="rounded-xl border border-cyan-200 bg-cyan-50/70 p-3 text-xs leading-5 text-cyan-950 dark:border-cyan-900/70 dark:bg-cyan-950/30 dark:text-cyan-100"><div className="flex items-center justify-between gap-2"><p className="font-semibold">Agentic RAG 证据链</p><span className="rounded-full bg-white/80 px-2 py-0.5 font-medium text-cyan-700 dark:bg-cyan-950 dark:text-cyan-300">{ragStatus || "unknown"} · {ragConfidence || "low"}</span></div><p className="mt-2">{ragIterations} 轮检索 · {ragQueryCount} 个查询 · {ragCandidateCount} 条候选 · {ragRerankedCount} 条重排 · {ragEvidenceCount} 条证据</p><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-cyan-700 dark:text-cyan-300"><span>证据覆盖度：{Math.round(ragCoverage * 100)}%</span>{hasRagRelevance && <span>最高直接相关性：{Math.round(ragMaxRelevance * 100)}%</span>}{ragPlannerSource && <span>规划：{ragPlannerSource.startsWith("llm") ? "LLM" : "规则兜底"}</span>}</div>{ragReflectionIterations > 0 && <p className="mt-1 text-cyan-700 dark:text-cyan-300">已反思修复 {ragReflectionIterations} 次{ragRepairActions.length > 0 ? ` · ${ragRepairActions.join("、")}` : ""} · 覆盖度 {Math.round(ragCoverageBefore * 100)}% → {Math.round(ragCoverageAfter * 100)}%</p>}{ragStopReason && <p className="mt-1 text-slate-600 dark:text-slate-300">停止原因：{ragStopReason}</p>}{ragMissing.length > 0 && <p className="mt-1 text-amber-700 dark:text-amber-300">尚未覆盖：{ragMissing.join("、")}</p>}</div>}
+      {ragMode === "agentic" && <div className="rounded-xl border border-cyan-200 bg-cyan-50/70 p-3 text-xs leading-5 text-cyan-950 dark:border-cyan-900/70 dark:bg-cyan-950/30 dark:text-cyan-100"><div className="flex items-center justify-between gap-2"><p className="font-semibold">岗位知识证据</p><span className="rounded-full bg-white/80 px-2 py-0.5 font-medium text-cyan-700 dark:bg-cyan-950 dark:text-cyan-300">{ragStatus || "unknown"} · {ragConfidence || "low"}</span></div><p className="mt-2">{ragIterations} 轮检索 · {ragQueryCount} 个查询 · {ragCandidateCount} 条候选 · {ragRerankedCount} 条重排 · {ragEvidenceCount} 条证据</p><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-cyan-700 dark:text-cyan-300"><span>证据覆盖度：{Math.round(ragCoverage * 100)}%</span>{hasRagRelevance && <span>最高直接相关性：{Math.round(ragMaxRelevance * 100)}%</span>}{ragPlannerSource && <span>规划：{ragPlannerSource.startsWith("llm") ? "LLM" : "规则兜底"}</span>}{ragToolCallsLimit > 0 && <span>调用预算：{ragToolCallsUsed}/{ragToolCallsLimit}</span>}</div>{ragReflectionIterations > 0 && <p className="mt-1 text-cyan-700 dark:text-cyan-300">已反思修复 {ragReflectionIterations} 次{ragRepairActions.length > 0 ? ` · ${ragRepairActions.join("、")}` : ""} · 覆盖度 {Math.round(ragCoverageBefore * 100)}% → {Math.round(ragCoverageAfter * 100)}%</p>}{ragBudgetExhausted && <p className="mt-1 text-amber-700 dark:text-amber-300">调用预算已达到上限，回答基于当前已有证据。</p>}{ragStopReason && <p className="mt-1 text-slate-600 dark:text-slate-300">停止原因：{ragStopReason}</p>}{ragMissing.length > 0 && <p className="mt-1 text-amber-700 dark:text-amber-300">尚未覆盖：{ragMissing.join("、")}</p>}</div>}
       {answerReflection !== undefined && answerReflection !== null && typeof answerReflection === "object" && <div className={`rounded-xl border p-3 text-xs leading-5 ${answerWasRepaired ? "border-amber-200 bg-amber-50/70 text-amber-900 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-100" : "border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300"}`}><p className="font-semibold">回答可靠性校验</p><p className="mt-1">{answerWasRepaired ? "发现缺少直接证据的表述，已在回答末尾标注待核实内容。" : "已完成回答断言与岗位证据的一致性检查。"}</p></div>}
       <div className="rounded-xl border border-slate-200 p-3 text-xs leading-5 text-slate-600"><span className="font-semibold text-slate-800">统计口径：</span>{filterSummary(message.answer_metadata.filters)}</div>
       {warnings.length > 0 && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800"><p className="font-semibold">数据质量提示</p><ul className="mt-1 list-disc space-y-1 pl-4">{warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div>}
+      {memoryRecord?.needed === true && <div className="rounded-xl border border-violet-200 bg-violet-50/70 p-3 text-xs leading-5 text-violet-900 dark:border-violet-900/70 dark:bg-violet-950/30 dark:text-violet-100">
+        <div className="flex items-center justify-between gap-2"><p className="font-semibold">个人记忆</p><span>{memoryUsedCount > 0 ? `已使用 ${memoryUsedCount} 条` : "本次未命中相关记忆"}</span></div>
+        {typeof memoryRecord.routing_reason === "string" && <p className="mt-1">{memoryRecord.routing_reason}</p>}
+        {memoryTokenUsage > 0 && <p className="mt-1 text-violet-700 dark:text-violet-300">上下文预算：约 {memoryTokenUsage.toLocaleString()} tokens</p>}
+        {memoryRecord.degraded === true && <p className="mt-1 text-amber-700 dark:text-amber-300">语义召回已降级：{metadataText(memoryRecord.degrade_reason, "Embedding 不可用")}</p>}
+        {memoryItems.length > 0 && <details className="mt-2"><summary className="cursor-pointer">查看使用明细</summary><div className="mt-2 space-y-2">{memoryItems.map((item, index) => {
+          const entry = item && typeof item === "object" ? item as Record<string, unknown> : {};
+          const memoryId = metadataText(entry.id);
+          const content = metadataText(entry.content);
+          const editing = editingMemoryId === memoryId;
+          return <div className="rounded-lg border border-violet-200/70 p-2 dark:border-violet-800/70" key={memoryId || String(index)}>
+            <p>· {metadataText(entry.memory_key, metadataText(entry.memory_type, "个人事实"))} · {metadataText(entry.usage_reason, "与当前问题相关")}{entry.user_confirmed === false ? " · 未确认" : " · 已确认"}</p>
+            {editing ? <div className="mt-2 space-y-2"><textarea aria-label={`纠正${metadataText(entry.memory_key, "个人记忆")}`} className="w-full rounded-lg border border-violet-200 bg-white p-2 text-xs text-slate-800 dark:border-violet-800 dark:bg-slate-900 dark:text-slate-100" onChange={(event) => setMemoryDraft(event.target.value)} value={memoryDraft} /><div className="flex gap-2"><button className="rounded-lg bg-indigo-600 px-2.5 py-1.5 text-xs text-white disabled:opacity-50" disabled={memoryActionId === memoryId} onClick={() => void saveMemoryCorrection(memoryId)} type="button">{memoryActionId === memoryId ? "保存中…" : "保存纠正"}</button><button className="rounded-lg border border-violet-200 px-2.5 py-1.5 text-xs" onClick={() => setEditingMemoryId(null)} type="button">取消</button></div></div> : <div className="mt-2 flex flex-wrap gap-2"><button className="text-indigo-700 dark:text-indigo-300" disabled={!memoryId || memoryActionId === memoryId} onClick={() => { setEditingMemoryId(memoryId); setMemoryDraft(content); }} type="button">纠正</button>{entry.user_confirmed === false && <button className="text-emerald-700 dark:text-emerald-300" disabled={!memoryId || memoryActionId === memoryId} onClick={() => void confirmMemory(memoryId)} type="button">确认使用</button>}<button className="text-amber-700 dark:text-amber-300" disabled={!memoryId || memoryActionId === memoryId} onClick={() => void retireMemory(memoryId)} type="button">禁止后续使用</button></div>}
+          </div>;
+        })}</div></details>}
+        {memoryActionMessage && <p className="mt-2 text-xs text-emerald-700 dark:text-emerald-300">{memoryActionMessage}</p>}
+      </div>}
       {(plannedTools.length > 0 || tools.length > 0 || tokenUsage) && <details className="rounded-xl border border-slate-200 p-3"><summary className="cursor-pointer text-xs font-semibold text-slate-700">运行详情</summary><div className="mt-3 space-y-2 text-xs leading-5 text-slate-500"><p>工具决策：{plannerSource.startsWith("llm") ? "LLM" : "规则"}</p>{plannedTools.length > 0 && <p>规划工具：{plannedTools.join("、")}</p>}{tools.length > 0 && <p>执行工具：{tools.join("、")}</p>}{tokenUsage && <p>模型消耗：{tokenUsage}</p>}</div></details>}
       <div>
         <p className="text-xs font-semibold text-slate-800">岗位引用 · {message.citations.length} 条</p>
@@ -375,19 +473,6 @@ function SessionList({
   </>;
 }
 
-function GenerationProgress({ stage, sampleCount, statusLabel }: { stage: string; sampleCount: number; statusLabel: string }) {
-  const activeIndex = Math.max(0, generationStages.findIndex((item) => item.id === stage));
-  return <div className="advisor-stream-status mb-4 rounded-2xl border border-indigo-200 p-3">
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <div className="flex items-center gap-2 text-sm font-semibold text-indigo-800"><span className="relative flex h-2.5 w-2.5"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-40" /><span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-indigo-500" /></span>{statusLabel || generationStages[activeIndex]?.label || "正在生成"}</div>
-      {sampleCount > 0 && <span className="text-xs text-indigo-600">已分析 {sampleCount} 个相关岗位</span>}
-    </div>
-    <div className="mt-3 grid grid-cols-5 gap-1.5" aria-label="回答生成进度">
-      {generationStages.map((item, index) => <div key={item.id}><div className={`h-1 rounded-full transition-colors duration-300 ${index <= activeIndex ? "bg-indigo-500" : "bg-indigo-100 dark:bg-slate-700"}`} /><p className={`mt-1 hidden text-center text-[10px] sm:block ${index <= activeIndex ? "text-indigo-700" : "text-slate-400"}`}>{item.label}</p></div>)}
-    </div>
-  </div>;
-}
-
 function JobSearchActionCard({
   action,
   sessionId,
@@ -440,10 +525,14 @@ function JobSearchActionCard({
           const expired = (action.expired_job_ids ?? []).includes(job.id);
           return <label className={`flex cursor-pointer gap-3 rounded-xl border bg-white p-3 transition-colors dark:bg-slate-900 ${selected.has(job.id) ? "border-indigo-300 dark:border-indigo-700" : "border-slate-200 dark:border-slate-700"}`} key={job.id}>
             <input className="mt-1 h-4 w-4 accent-indigo-600" checked={selected.has(job.id)} onChange={() => toggle(job.id)} type="checkbox" />
-            <span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-800 dark:text-slate-100"><span className="truncate">{job.title}</span>{job.match_score !== null && <span className={`rounded-full px-2 py-0.5 text-[11px] ${lowMatch ? "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300" : "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"}`}>匹配 {Math.round(job.match_score)} 分</span>}</span><span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">{job.company ?? "公司未注明"} · {job.location ?? "地点未注明"} · {job.salary_text}</span>{(lowMatch || expired || (job.warnings?.length ?? 0) > 0) && <span className="mt-1 block text-xs leading-5 text-amber-700 dark:text-amber-300">{expired ? "信息可能已过期，不能自动投递" : job.warnings?.[0] ?? "与当前简历匹配度不高，建议人工确认"}</span>}</span>
+            <span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-800 dark:text-slate-100"><span className="truncate">{job.title}</span>{typeof job.match_score === "number" && <span className={`rounded-full px-2 py-0.5 text-[11px] ${lowMatch ? "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300" : "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"}`}>匹配 {Math.round(job.match_score)} 分</span>}</span><span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">{job.company ?? "公司未注明"} · {job.location ?? "地点未注明"} · {job.platform} · {job.salary_text}</span><span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">学历：{job.education ?? "不限"} · 经验：{job.experience ?? "不限"}</span><span className="mt-1 block text-[11px] text-slate-400 dark:text-slate-500">{expired || job.is_fresh === false ? "信息可能已过期" : "近 3 天采集"}{job.last_collected_at ? ` · ${formatMetadataDate(job.last_collected_at)}` : ""}</span>{(lowMatch || expired || (job.warnings?.length ?? 0) > 0) && <span className="mt-1 block text-xs leading-5 text-amber-700 dark:text-amber-300">{expired ? "信息可能已过期，不能自动投递" : job.warnings?.[0] ?? "与当前简历匹配度不高，建议人工确认"}</span>}<Link className="mt-2 inline-flex text-xs font-medium text-indigo-600 hover:text-indigo-800 dark:text-indigo-300" href={`/jobs/${job.id}`} onClick={(event) => event.stopPropagation()}>系统详情 →</Link></span>
             {job.source_url && <a className="self-start text-xs font-medium text-indigo-600 hover:text-indigo-800 dark:text-indigo-300" href={job.source_url} onClick={(event) => { event.preventDefault(); event.stopPropagation(); window.open(job.source_url ?? "", "_blank", "noopener,noreferrer"); }} rel="noreferrer" target="_blank">原页</a>}
           </label>;
         })}
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-indigo-600 dark:hover:text-indigo-300" onClick={() => setSelected(new Set(jobs.filter((job) => job.default_selected).map((job) => job.id)))} type="button">全选高匹配</button>
+        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-indigo-600 dark:hover:text-indigo-300" onClick={() => setSelected(new Set())} type="button">清空选择</button>
       </div>
       <div className="mt-4 flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-slate-500 dark:text-slate-400">低匹配岗位默认未选，可手动勾选。</span><button className="rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50" disabled={selected.size === 0 || submitting} onClick={() => void prepare()} type="button">{submitting ? "准备中…" : `准备投递 ${selected.size} 个岗位`}</button></div>
     </section>
@@ -503,8 +592,8 @@ function ApplicationConfirmationCard({
     }
   }
   return <section className="mt-4 rounded-2xl border border-amber-200 bg-amber-50/70 p-4 dark:border-amber-900/70 dark:bg-amber-950/25" aria-label="投递确认">
-    <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">确认投递岗位</h3><p className="mt-1 text-xs leading-5 text-slate-600 dark:text-slate-300">计划：{action.plan_name ?? "职业顾问投递计划"} · 使用当前简历</p></div><span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-amber-700 dark:bg-slate-900 dark:text-amber-300">二次确认</span></div>
-    <div className="mt-3 space-y-2">{jobs.map((job) => <label className="flex cursor-pointer gap-3 rounded-xl border border-amber-100 bg-white p-3 dark:border-amber-900/50 dark:bg-slate-900" key={job.id}><input className="mt-1 h-4 w-4 accent-indigo-600" checked={selected.has(job.id)} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(job.id)) next.delete(job.id); else next.add(job.id); return next; })} type="checkbox" /><span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-slate-800 dark:text-slate-100">{job.title}</span><span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">{job.company ?? "公司未注明"} · {job.location ?? "地点未注明"} · {job.salary_text}</span><span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">{typeof job.match_score === "number" ? `匹配 ${Math.round(job.match_score)} 分` : "匹配分待补充"} · {job.match_reason ?? "已通过状态校验"}</span></span></label>)}</div>
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">确认投递岗位</h3><p className="mt-1 text-xs leading-5 text-slate-600 dark:text-slate-300">计划：{action.plan_name ?? "职业顾问投递计划"} · 简历：{action.resume_name ?? "当前简历"}</p></div><span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-amber-700 dark:bg-slate-900 dark:text-amber-300">二次确认</span></div>
+    <div className="mt-3 space-y-2">{jobs.map((job) => <label className="flex cursor-pointer gap-3 rounded-xl border border-amber-100 bg-white p-3 dark:border-amber-900/50 dark:bg-slate-900" key={job.id}><input className="mt-1 h-4 w-4 accent-indigo-600" checked={selected.has(job.id)} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(job.id)) next.delete(job.id); else next.add(job.id); return next; })} type="checkbox" /><span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-slate-800 dark:text-slate-100">{job.title}</span><span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">{job.company ?? "公司未注明"} · {job.location ?? "地点未注明"} · {job.platform} · {job.salary_text}</span><span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">学历：{job.education ?? "不限"} · 经验：{job.experience ?? "不限"}</span><span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">{typeof job.match_score === "number" ? `匹配 ${Math.round(job.match_score)} 分` : "匹配分待补充"} · {job.match_reason ?? "已通过状态校验"}</span><span className="mt-1 block text-[11px] text-slate-400 dark:text-slate-500">{job.is_fresh === false ? "信息可能已过期" : "近 3 天采集"}{job.last_collected_at ? ` · ${formatMetadataDate(job.last_collected_at)}` : ""}</span><Link className="mt-2 inline-flex text-xs font-medium text-indigo-600 hover:text-indigo-800 dark:text-indigo-300" href={`/jobs/${job.id}`} onClick={(event) => event.stopPropagation()}>查看详情 →</Link></span></label>)}</div>
     {Array.isArray(action.warnings) && action.warnings.length > 0 && <div className="mt-3 rounded-xl border border-amber-200 bg-white/70 p-3 text-xs leading-5 text-amber-800 dark:border-amber-900/60 dark:bg-slate-900/60 dark:text-amber-200">{action.warnings.map((warning) => <p key={warning}>· {warning}</p>)}</div>}
     <div className="mt-4 flex flex-wrap justify-end gap-2"><button className="rounded-xl border border-slate-300 px-3 py-2.5 text-xs font-medium text-slate-600 hover:bg-white dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800" disabled={cancelling} onClick={() => void cancelDraft()} type="button">{cancelling ? "取消中…" : "取消"}</button><button className="rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50" disabled={!selected.size || submitting} onClick={() => void confirm()} type="button">{submitting ? "启动中…" : `确认并开始投递 ${selected.size} 个岗位`}</button></div>
   </section>;
@@ -566,6 +655,58 @@ function ApplicationProgressCard({
   return <section className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50/60 p-4 dark:border-emerald-900/70 dark:bg-emerald-950/25" aria-label="投递进度"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">{progressTitle}</h3><p className="mt-1 text-xs text-slate-600 dark:text-slate-300">已提交 {action.submitted_count ?? 0} · 需手动 {action.manual_count ?? 0} · 等待处理 {action.waiting_count ?? 0}</p></div><div className="flex gap-2"><button className="rounded-lg border border-emerald-300 px-3 py-2 text-xs font-medium text-emerald-700 hover:bg-white dark:border-emerald-800 dark:text-emerald-300 dark:hover:bg-slate-800" disabled={refreshing} onClick={() => void refresh()} type="button">刷新</button><button className="rounded-lg border border-rose-200 px-3 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-slate-800" disabled={refreshing || terminalProgress} onClick={() => void cancel()} type="button">停止投递</button></div></div><div className="mt-3 space-y-2">{items.map((item) => { const row = item as Record<string, unknown>; const status = metadataText(row.application_status, metadataText(row.task_status, "处理中")); const terminal = status === "SUBMITTED" ? "text-emerald-700 dark:text-emerald-300" : status === "MANUAL_REQUIRED" ? "text-amber-700 dark:text-amber-300" : status.includes("FAILED") || status.includes("RISK") ? "text-rose-700 dark:text-rose-300" : "text-slate-600 dark:text-slate-300"; return <div className="flex items-center justify-between gap-3 rounded-xl border border-emerald-100 bg-white p-3 text-xs dark:border-emerald-900/50 dark:bg-slate-900" key={String(row.task_id)}><span className="min-w-0 truncate font-medium text-slate-700 dark:text-slate-200">{metadataText(row.job_title, "岗位")}</span><span className={terminal}>{status}</span></div>; })}</div></section>;
 }
 
+function OnlineJobCollectionActionCard({
+  action,
+  sessionId,
+  messageId,
+  onError,
+  onCollectionCompleted,
+}: {
+  action: CareerAdvisorUiAction;
+  sessionId: string;
+  messageId: string;
+  onError: (message: string) => void;
+  onCollectionCompleted: (jobIds: string[], collectionKey?: string) => Promise<unknown> | void;
+}) {
+  const query = typeof action.query === "string" && action.query.trim() ? action.query.trim() : "相关岗位";
+  const city = typeof action.city === "string" && action.city.trim() ? action.city.trim() : "北京";
+  const maxJobs = typeof action.max_jobs === "number" ? Math.min(200, Math.max(1, Math.round(action.max_jobs))) : 20;
+  const threshold = typeof action.quick_score_threshold === "number" ? Math.min(100, Math.max(0, action.quick_score_threshold)) : 60;
+  const linkedJobIds = useRef(new Set<string>());
+  const bindPersistedJobs = useCallback(async (jobIds: string[]) => {
+    const pending = [...new Set(jobIds)].filter((id) => id && !linkedJobIds.current.has(id));
+    if (pending.length === 0) return;
+    pending.forEach((id) => linkedJobIds.current.add(id));
+    try {
+      await bindCareerAdvisorSessionJobs(sessionId, {
+        message_id: messageId,
+        job_ids: pending,
+        source_type: "automated_collection",
+        context: { query, platform: action.platform, city },
+      });
+    } catch (reason) {
+      pending.forEach((id) => linkedJobIds.current.delete(id));
+      onError(reason instanceof Error ? reason.message : "岗位已入库，但暂时无法关联到当前对话");
+    }
+  }, [action.platform, city, messageId, onError, query, sessionId]);
+  const common = {
+    initialCity: city,
+    initialMaxJobs: maxJobs,
+    initialQuickScoreThreshold: threshold,
+    initialResumeId: typeof action.resume_id === "string" ? action.resume_id : "",
+    autoStart: action.auto_start === true,
+    autoStartKey: action.action_id,
+    compact: true,
+    onJobsPersisted: bindPersistedJobs,
+    onCollectionCompleted,
+  };
+  return <div className="advisor-collection-action mt-4" aria-label="联网岗位采集流程">
+    {action.platform === "zhaopin"
+      ? <ZhaopinPluginWorkflow {...common} initialKeyword={query} />
+      : <BossPluginWorkflow {...common} initialRequirements={query} />}
+  </div>;
+}
+
 function CareerAdvisorActionCard({
   action,
   sessionId,
@@ -573,6 +714,7 @@ function CareerAdvisorActionCard({
   resumeId,
   onUpdate,
   onError,
+  onCollectionCompleted,
 }: {
   action: CareerAdvisorUiAction;
   sessionId: string;
@@ -580,8 +722,10 @@ function CareerAdvisorActionCard({
   resumeId: string | null;
   onUpdate: (action: CareerAdvisorUiAction) => void;
   onError: (message: string) => void;
+  onCollectionCompleted: (jobIds: string[], collectionKey?: string) => Promise<unknown> | void;
 }) {
-  if (action.type === "job_search_results") return <JobSearchActionCard action={action} sessionId={sessionId} messageId={messageId} resumeId={resumeId} onUpdate={onUpdate} onError={onError} />;
+  if (action.type === "job_search_results" && action.result_source === "knowledge_base" && (action.jobs?.length ?? 0) > 0) return <JobSearchActionCard action={action} sessionId={sessionId} messageId={messageId} resumeId={resumeId} onUpdate={onUpdate} onError={onError} />;
+  if (action.type === "job_collection_request" && action.result_source === "automated_collection") return <OnlineJobCollectionActionCard action={action} sessionId={sessionId} messageId={messageId} onError={onError} onCollectionCompleted={onCollectionCompleted} />;
   if (action.type === "application_confirmation") return <ApplicationConfirmationCard action={action} sessionId={sessionId} messageId={messageId} resumeId={resumeId} onUpdate={onUpdate} onError={onError} />;
   if (action.type === "application_progress") return <ApplicationProgressCard action={action} sessionId={sessionId} messageId={messageId} onUpdate={onUpdate} onError={onError} />;
   return null;
@@ -600,6 +744,8 @@ function MessageCard({
   onEvidence,
   onActionUpdate,
   onError,
+  onCollectionCompleted,
+  run,
 }: {
   message: CareerAdvisorMessage;
   sessionId: string;
@@ -613,6 +759,8 @@ function MessageCard({
   onEvidence: (message: CareerAdvisorMessage) => void;
   onActionUpdate: (messageId: string, action: CareerAdvisorUiAction) => void;
   onError: (message: string) => void;
+  onCollectionCompleted: (messageId: string, jobIds: string[], collectionKey?: string) => Promise<unknown> | void;
+  run?: AgentRunState;
 }) {
   const isUser = message.role === "user";
   if (isUser) {
@@ -627,10 +775,21 @@ function MessageCard({
   const sampleCount = metadataNumber(message.answer_metadata.sample_count);
   const factSource = metadataText(message.answer_metadata.fact_source);
   const adviceSource = metadataText(message.answer_metadata.advice_source);
+  const memory = message.answer_metadata.memory;
+  const memoryRecord = memory && typeof memory === "object" ? memory as Record<string, unknown> : null;
+  const memoryUsedCount = memoryRecord ? metadataNumber(memoryRecord.used_count ?? memoryRecord.retrieved_count) : 0;
   const displayContent = presentationMarkdown(message.content);
   const presentation = message.status === "COMPLETED" ? splitAdvisorAnswer(displayContent) : { answer: displayContent, evidence: "" };
   const canCollapse = message.status === "COMPLETED" && displayContent.length > 900;
   const uiAction = messageUiAction(message);
+  const visibleRun = run
+    ? {
+        ...run,
+        // The live event stream does not carry the final persisted duration;
+        // use the server measurement once the completed message is loaded.
+        latencyMs: run.latencyMs ?? (message.latency_ms > 0 ? message.latency_ms : null),
+      }
+    : agentRunFromMessage(message);
   return (
     <article className="advisor-answer py-4">
       <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
@@ -639,25 +798,24 @@ function MessageCard({
         </span>}
         {message.intent && <span>{intentLabels[message.intent] ?? message.intent}</span>}
         {sampleCount > 0 && <span>· {sampleCount} 个岗位样本</span>}
-        {factSource && <span>· {factSource === "database" ? "来自岗位知识库" : "无检索数据"}</span>}
+        {factSource && <span>· {factSource === "database" ? "来自岗位知识库" : factSource === "automated_collection" ? "联网采集工具" : "无检索数据"}</span>}
         {adviceSource && <span>· {adviceSource === "llm" ? "AI 整理" : "规则整理"}</span>}
+        {memoryUsedCount > 0 && <span>· 已结合 {memoryUsedCount} 条个人记忆</span>}
       </div>
+      <AgentRunStatus run={visibleRun} />
       {displayContent ? (
         <div className="relative">
           <div className={canCollapse && !expanded ? "max-h-[28rem] overflow-hidden" : ""}>
-            <MarkdownContent className="mt-3" value={presentation.answer} />
+            <StreamingAnswer value={presentation.answer} />
           </div>
           {canCollapse && !expanded && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-slate-50 to-transparent dark:from-slate-800" />}
         </div>
-      ) : (
-        <div className="advisor-thinking mt-4 flex items-center gap-3 rounded-xl px-3 py-3 text-sm text-slate-500">
-          <span className="relative flex h-3 w-3"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-40" /><span className="relative inline-flex h-3 w-3 rounded-full bg-indigo-500" /></span>
-          <span>正在理解目标并检索岗位知识库…</span>
-        </div>
-      )}
+      ) : message.status === "RUNNING" ? (
+        <div className="advisor-thinking mt-4 flex items-center gap-3 rounded-xl px-3 py-3 text-sm text-slate-500">回答正在准备中…</div>
+      ) : null}
       {message.error_message && <p className="mt-3 text-sm text-rose-600">{message.error_message}</p>}
       {presentation.evidence && <details className="mt-4 rounded-xl border border-slate-200 p-3"><summary className="cursor-pointer text-xs text-slate-500">数据分析与 JD 摘录（辅助依据）</summary><MarkdownContent value={presentation.evidence} className="mt-3" /></details>}
-      {uiAction && <CareerAdvisorActionCard action={uiAction} sessionId={sessionId} messageId={message.id} resumeId={resumeId} onUpdate={(action) => onActionUpdate(message.id, action)} onError={onError} />}
+      {uiAction && <CareerAdvisorActionCard action={uiAction} sessionId={sessionId} messageId={message.id} resumeId={resumeId} onUpdate={(action) => onActionUpdate(message.id, action)} onError={onError} onCollectionCompleted={(jobIds, collectionKey) => onCollectionCompleted(message.id, jobIds, collectionKey)} />}
       {message.status !== "RUNNING" && <button className="mt-3 rounded-full border border-slate-200 px-3 py-1.5 text-xs text-indigo-600" onClick={() => onEvidence(message)} type="button">参考岗位 · {message.citations.length} 条依据</button>}
       {message.status === "COMPLETED" && !message.id.startsWith("local-") && (
         <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 border-t border-slate-200 pt-3">
@@ -691,12 +849,7 @@ export default function CareerAdvisorPage() {
   const [awayFromBottom, setAwayFromBottom] = useState(false);
   const followMessages = useRef(true);
   const previousSessionId = useRef<string | null>(null);
-  const [generationStage, setGenerationStage] = useState("idle");
-  const [generationStatusLabel, setGenerationStatusLabel] = useState("");
-  const [retrievedSampleCount, setRetrievedSampleCount] = useState(0);
-  const [knowledgeRun, setKnowledgeRun] = useState<KnowledgeHealth["latest_run"]>(null);
-  const [knowledgeHealth, setKnowledgeHealth] = useState<KnowledgeHealth | null>(null);
-  const [startingKnowledge, setStartingKnowledge] = useState(false);
+  const [agentRuns, setAgentRuns] = useState<Record<string, AgentRunState>>({});
   const [loading, setLoading] = useState(true);
   const [loadingSession, setLoadingSession] = useState(false);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
@@ -715,14 +868,46 @@ export default function CareerAdvisorPage() {
   const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
+  const activeMessageIdRef = useRef<string | null>(null);
+  const provisionalMessageIdRef = useRef<string | null>(null);
+  const eventSequenceRef = useRef(0);
+  const deltaBufferRef = useRef<Record<string, string>>({});
+  const deltaFlushTimerRef = useRef<number | null>(null);
   const sendingRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const messagesViewportRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
-  const knowledgeRunId = knowledgeRun?.id;
-  const knowledgeRunStatus = knowledgeRun?.status;
   const messageCount = selectedSession?.messages.length ?? 0;
   const lastMessageContent = messageCount > 0 ? selectedSession?.messages[messageCount - 1]?.content ?? "" : "";
+
+  function flushAnswerDeltas() {
+    if (deltaFlushTimerRef.current !== null) {
+      window.clearTimeout(deltaFlushTimerRef.current);
+      deltaFlushTimerRef.current = null;
+    }
+    const pending = deltaBufferRef.current;
+    deltaBufferRef.current = {};
+    const entries = Object.entries(pending);
+    if (!entries.length) return;
+    setSelectedSession((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        messages: current.messages.map((message) => {
+          const delta = pending[message.id];
+          return delta ? { ...message, content: `${message.content}${delta}` } : message;
+        }),
+      };
+    });
+  }
+
+  function queueAnswerDelta(messageId: string, delta: string) {
+    if (!delta) return;
+    deltaBufferRef.current[messageId] = `${deltaBufferRef.current[messageId] ?? ""}${delta}`;
+    if (deltaFlushTimerRef.current === null) {
+      deltaFlushTimerRef.current = window.setTimeout(flushAnswerDeltas, 40);
+    }
+  }
 
   function syncSessionContext(session: CareerAdvisorSession) {
     setFilters(cloneFilters(session.context_filters ?? emptyFilters()));
@@ -748,14 +933,12 @@ export default function CareerAdvisorPage() {
 
   useEffect(() => {
     let disposed = false;
-    Promise.all([getCareerAdvisorSessions(), getResumes(), getKnowledgeHealth()])
-      .then(([sessionResponse, resumeResponse, knowledgeResponse]) => {
+    Promise.all([getCareerAdvisorSessions(), getResumes()])
+      .then(([sessionResponse, resumeResponse]) => {
         if (disposed) return;
         setSessions(sessionResponse.items);
         setSessionTotal(sessionResponse.total);
         setResumes(resumeResponse.items);
-        setKnowledgeHealth(knowledgeResponse);
-        setKnowledgeRun(knowledgeResponse.latest_run);
         const defaultResume = resumeResponse.items.find((resume) => resume.is_default) ?? resumeResponse.items[0] ?? null;
         setSelectedResumeId(defaultResume?.id ?? null);
         const firstSession = sessionResponse.items[0] ?? null;
@@ -776,21 +959,6 @@ export default function CareerAdvisorPage() {
       .finally(() => setLoading(false));
     return () => { disposed = true; };
   }, []);
-
-  useEffect(() => {
-    if (!knowledgeRunId || !knowledgeRunStatus || ["SUCCEEDED", "FAILED", "CANCELLED"].includes(knowledgeRunStatus)) return;
-    let current = true;
-    let pending = false;
-    const timer = window.setInterval(() => {
-      if (pending) return;
-      pending = true;
-      getKnowledgeHealth()
-        .then((response) => { if (current) { setKnowledgeHealth(response); setKnowledgeRun(response.latest_run); } })
-        .catch((reason) => { if (current) setError(reason instanceof Error ? reason.message : "无法刷新知识库进度"); })
-        .finally(() => { pending = false; });
-    }, 3000);
-    return () => { current = false; window.clearInterval(timer); };
-  }, [knowledgeRunId, knowledgeRunStatus]);
 
   useEffect(() => {
     const viewport = messagesViewportRef.current;
@@ -958,28 +1126,6 @@ export default function CareerAdvisorPage() {
     }
   }
 
-  async function handleStartKnowledgeIndex(mode: "incremental" | "backfill") {
-    if (startingKnowledge || (knowledgeRun && ["PENDING", "RUNNING"].includes(knowledgeRun.status))) return;
-    setStartingKnowledge(true);
-    setError(null);
-    try {
-      const run = await createKnowledgeIndexRun({ mode, auto_start: true });
-      setKnowledgeRun(run);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "无法启动知识库回填");
-    } finally {
-      setStartingKnowledge(false);
-    }
-  }
-
-  function handleStartBackfill() {
-    return handleStartKnowledgeIndex("backfill");
-  }
-
-  function handleStartIncremental() {
-    return handleStartKnowledgeIndex("incremental");
-  }
-
   async function handleSaveContext() {
     if (!selectedSession) return;
     setSavingContext(true);
@@ -1017,16 +1163,42 @@ export default function CareerAdvisorPage() {
     eventType: string,
     payload: Record<string, unknown>,
   ) {
+    const fallbackMessageId = metadataText(payload.message_id) || activeMessageIdRef.current || "";
+    const event = eventFromCareerAdvisor(eventType, payload, fallbackMessageId, ++eventSequenceRef.current);
+    const eventMessageId = event.runId || fallbackMessageId;
+    if (eventMessageId) {
+      setAgentRuns((current) => {
+        const previous = current[eventMessageId] ?? createAgentRun(eventMessageId, event.createdAt);
+        const next = reduceAgentRun(previous, event);
+        return next === previous ? current : { ...current, [eventMessageId]: next };
+      });
+    }
+    if (eventType !== "message_failed" && eventType !== "message_cancelled") updateRunConnection("connected");
     if (eventType === "message_started") {
       const messageId = metadataText(payload.message_id);
       if (!messageId) return;
+      const provisionalMessageId = provisionalMessageIdRef.current;
+      activeMessageIdRef.current = messageId;
+      provisionalMessageIdRef.current = null;
       setActiveMessageId(messageId);
-      setGenerationStage("understanding");
-      setGenerationStatusLabel("正在理解你的目标");
-      setRetrievedSampleCount(0);
-      setSelectedSession((current) => current && current.id === sessionId
-        ? { ...current, messages: [...current.messages, emptyAssistantMessage(sessionId, messageId)] }
-        : current);
+      setAgentRuns((current) => {
+        const provisional = provisionalMessageId ? current[provisionalMessageId] : undefined;
+        if (!provisional) return current;
+        const { [provisionalMessageId as string]: _removed, ...rest } = current;
+        return { ...rest, [messageId]: { ...provisional, runId: messageId } };
+      });
+      setSelectedSession((current) => {
+        if (!current || current.id !== sessionId) return current;
+        if (current.messages.some((message) => message.id === messageId)) {
+          return provisionalMessageId && current.messages.some((message) => message.id === provisionalMessageId)
+            ? { ...current, messages: current.messages.filter((message) => message.id !== provisionalMessageId) }
+            : current;
+        }
+        if (provisionalMessageId && current.messages.some((message) => message.id === provisionalMessageId)) {
+          return { ...current, messages: current.messages.map((message) => message.id === provisionalMessageId ? emptyAssistantMessage(sessionId, messageId) : message) };
+        }
+        return { ...current, messages: [...current.messages, emptyAssistantMessage(sessionId, messageId)] };
+      });
     } else if (eventType === "ui_action_created") {
       const messageId = metadataText(payload.message_id);
       const action = payload.ui_action;
@@ -1034,48 +1206,60 @@ export default function CareerAdvisorPage() {
       setSelectedSession((current) => current && current.id === sessionId
         ? { ...current, messages: current.messages.map((message) => message.id === messageId ? { ...message, answer_metadata: { ...message.answer_metadata, ui_action: action } } : message) }
         : current);
-    } else if (eventType === "stage_changed") {
-      setGenerationStage(metadataText(payload.stage, "understanding"));
-      setGenerationStatusLabel(metadataText(payload.label));
-    } else if (eventType === "retrieval_status") {
-      const stage = metadataText(payload.stage);
-      setGenerationStage(stage === "query_analysis" || stage === "retrieval_planning" ? "understanding" : "searching");
-      setGenerationStatusLabel(metadataText(payload.label, "正在检索岗位知识库"));
-    } else if (eventType === "evidence_status") {
-      setGenerationStage("analyzing");
-      setGenerationStatusLabel(metadataText(payload.label, "正在评估岗位证据"));
     } else if (eventType === "intent_detected") {
       const intent = metadataText(payload.intent) as CareerAdvisorIntent;
       setSelectedSession((current) => current && current.id === sessionId
         ? { ...current, messages: current.messages.map((message) => message.id === metadataText(payload.message_id) || (message.role === "assistant" && message.status === "RUNNING") ? { ...message, intent } : message) }
         : current);
-    } else if (eventType === "facts_ready") {
-      setRetrievedSampleCount(metadataNumber(payload.sample_count));
-      setGenerationStatusLabel("已整理岗位事实，正在生成建议");
     } else if (eventType === "delta") {
       const delta = metadataText(payload.content);
       const messageId = metadataText(payload.message_id);
-      setSelectedSession((current) => current && current.id === sessionId
-        ? { ...current, messages: current.messages.map((message) => message.id === messageId ? { ...message, content: `${message.content}${delta}` } : message) }
-        : current);
+      if (messageId) queueAnswerDelta(messageId, delta);
     } else if (eventType === "message_failed") {
-      const messageId = metadataText(payload.message_id);
-      setError(metadataText(payload.error, "职业顾问生成失败"));
+      flushAnswerDeltas();
+      const persistedMessageId = metadataText(payload.message_id);
+      const provisionalMessageId = provisionalMessageIdRef.current;
+      const messageId = persistedMessageId || activeMessageIdRef.current || provisionalMessageId || "";
+      const failureMessage = metadataText(payload.error, "职业顾问生成失败");
+      activeMessageIdRef.current = null;
+      provisionalMessageIdRef.current = null;
+      setActiveMessageId(null);
+      setGenerating(false);
+      setError(failureMessage);
       setSelectedSession((current) => current && current.id === sessionId
-        ? { ...current, messages: current.messages.map((message) => message.id === messageId ? { ...message, status: "FAILED", error_message: metadataText(payload.error) } : message) }
+        ? { ...current, messages: current.messages.map((message) => (
+          message.id === messageId || (provisionalMessageId && message.id === provisionalMessageId)
+            ? { ...message, id: persistedMessageId || message.id, status: "FAILED", error_message: failureMessage }
+            : message
+        )) }
         : current);
     } else if (eventType === "message_cancelled") {
+      flushAnswerDeltas();
+      activeMessageIdRef.current = null;
+      setActiveMessageId(null);
+      setGenerating(false);
       setSelectedSession((current) => current && current.id === sessionId
         ? { ...current, messages: current.messages.map((message) => message.id === metadataText(payload.message_id) ? { ...message, status: "CANCELLED" } : message) }
         : current);
     } else if (eventType === "message_state") {
+      flushAnswerDeltas();
       const message = payload as unknown as CareerAdvisorMessage;
+      activeMessageIdRef.current = null;
       setActiveMessageId(null);
-      setGenerationStatusLabel("");
       setSelectedSession((current) => current && current.id === sessionId
         ? { ...current, messages: current.messages.map((item) => item.id === message.id ? message : item) }
         : current);
     }
+  }
+
+  function updateRunConnection(state: AgentConnectionState, attempt = 0) {
+    const messageId = activeMessageIdRef.current;
+    if (!messageId) return;
+    setAgentRuns((current) => {
+      const run = current[messageId];
+      if (!run) return current;
+      return { ...current, [messageId]: { ...run, connection: state, reconnectAttempt: attempt } };
+    });
   }
 
   function handleActionUpdate(messageId: string, action: CareerAdvisorUiAction) {
@@ -1085,6 +1269,68 @@ export default function CareerAdvisorPage() {
         ? { ...message, ui_action: action, answer_metadata: { ...message.answer_metadata, ui_action: action } }
         : message),
     } : current);
+  }
+
+  async function handleCollectionCompleted(
+    messageId: string,
+    jobIds: string[],
+    collectionKey?: string,
+  ) {
+    const session = selectedSession;
+    const uniqueJobIds = [...new Set(jobIds.filter(Boolean))];
+    if (!session || !uniqueJobIds.length || generating || sendingRef.current) return;
+    const continuationKey = [
+      "careerpilot:advisor-collection-resume",
+      messageId,
+      collectionKey || uniqueJobIds.slice().sort().join(","),
+    ].join(":");
+    try {
+      if (window.localStorage.getItem(continuationKey)) return;
+      window.localStorage.setItem(continuationKey, "started");
+    } catch { /* Continue when browser storage is unavailable. */ }
+
+    const sessionId = session.id;
+    const controller = new AbortController();
+    const provisionalMessageId = `client-collection-resume-${Date.now()}`;
+    sendingRef.current = true;
+    streamAbortRef.current = controller;
+    provisionalMessageIdRef.current = provisionalMessageId;
+    activeMessageIdRef.current = null;
+    setAgentRuns((current) => ({
+      ...current,
+      [provisionalMessageId]: createAgentRun(provisionalMessageId),
+    }));
+    setSelectedSession((current) => current && current.id === sessionId
+      ? { ...current, messages: [...current.messages, emptyAssistantMessage(sessionId, provisionalMessageId)] }
+      : current);
+    setGenerating(true);
+    setStopping(false);
+    setError(null);
+    followMessages.current = true;
+    try {
+      await streamCareerAdvisorCollectionContinuation(
+        sessionId,
+        messageId,
+        { job_ids: uniqueJobIds, ...(collectionKey ? { collection_key: collectionKey } : {}) },
+        (eventType, payload) => applyStreamEvent(sessionId, eventType, payload),
+        controller.signal,
+        (state, attempt) => updateRunConnection(state, attempt ?? 0),
+      );
+      await loadSession(sessionId, false);
+    } catch (reason) {
+      if (!(reason instanceof DOMException && reason.name === "AbortError")) {
+        setError(reason instanceof Error ? reason.message : "采集完成后续答失败，请稍后重试");
+        try { window.localStorage.removeItem(continuationKey); } catch { /* Optional storage. */ }
+      }
+    } finally {
+      streamAbortRef.current = null;
+      sendingRef.current = false;
+      setGenerating(false);
+      setStopping(false);
+      setActiveMessageId(null);
+      activeMessageIdRef.current = null;
+      provisionalMessageIdRef.current = null;
+    }
   }
 
   async function handleSend(event?: FormEvent<HTMLFormElement>) {
@@ -1105,15 +1351,18 @@ export default function CareerAdvisorPage() {
       const sessionId = session.id;
       const controller = new AbortController();
       streamAbortRef.current = controller;
+      const provisionalMessageId = `client-run-${Date.now()}`;
+      provisionalMessageIdRef.current = provisionalMessageId;
+      setAgentRuns((current) => ({ ...current, [provisionalMessageId]: createAgentRun(provisionalMessageId) }));
+      activeMessageIdRef.current = null;
+      updateRunConnection("connected");
       setGenerating(true);
       setStopping(false);
-      setGenerationStage("understanding");
-      setRetrievedSampleCount(0);
       updateDraft("");
       followMessages.current = true;
       setAwayFromBottom(false);
       setSelectedSession((current) => current && current.id === sessionId
-        ? { ...current, messages: [...current.messages, localUserMessage(sessionId, content)] }
+        ? { ...current, messages: [...current.messages, localUserMessage(sessionId, content), emptyAssistantMessage(sessionId, provisionalMessageId)] }
         : current);
 
       await streamCareerAdvisorMessage(
@@ -1121,11 +1370,51 @@ export default function CareerAdvisorPage() {
         { content, resume_id: selectedResumeId, filters },
         (eventType, payload) => applyStreamEvent(sessionId, eventType, payload),
         controller.signal,
+        (state, attempt) => updateRunConnection(state, attempt ?? 0),
       );
       await loadSession(sessionId, false);
     } catch (reason) {
       if (!(reason instanceof DOMException && reason.name === "AbortError")) {
-        setError(reason instanceof Error ? reason.message : "职业顾问生成失败");
+        const recoverMessageId = activeMessageIdRef.current;
+        if (recoverMessageId) {
+          try {
+            updateRunConnection("reconnecting");
+            for (let attempt = 1; attempt <= 5; attempt += 1) {
+              updateRunConnection("reconnecting", attempt);
+              try {
+                await streamCareerAdvisorRecovery(
+                  recoverMessageId,
+                  (eventType, payload) => applyStreamEvent(session?.id ?? "", eventType, payload),
+                  streamAbortRef.current?.signal,
+                );
+                updateRunConnection("recovered", attempt);
+                await loadSession(session?.id ?? "", false);
+                break;
+              } catch (retryReason) {
+                if (attempt === 5) throw retryReason;
+                await new Promise((resolve) => window.setTimeout(resolve, Math.min(1500, attempt * 300)));
+              }
+            }
+          } catch (recoveryReason) {
+            updateRunConnection("offline", 5);
+            setError(recoveryReason instanceof Error ? recoveryReason.message : "连接中断，无法恢复本次回答");
+          }
+        } else {
+          const provisionalMessageId = provisionalMessageIdRef.current;
+          if (provisionalMessageId) {
+            const failureMessage = reason instanceof Error ? reason.message : "职业顾问生成失败";
+            setAgentRuns((current) => {
+              const run = current[provisionalMessageId];
+              if (!run) return current;
+              return { ...current, [provisionalMessageId]: { ...run, status: "failed", stage: "failed", label: "执行失败", detail: failureMessage, completedAt: new Date().toISOString() } };
+            });
+            setSelectedSession((current) => current && current.id === session?.id
+              ? { ...current, messages: current.messages.map((message) => message.id === provisionalMessageId ? { ...message, status: "FAILED", error_message: failureMessage } : message) }
+              : current);
+          }
+          updateRunConnection("offline");
+          setError(reason instanceof Error ? reason.message : "职业顾问生成失败");
+        }
       }
     } finally {
       sendingRef.current = false;
@@ -1133,12 +1422,13 @@ export default function CareerAdvisorPage() {
       setGenerating(false);
       setStopping(false);
       setActiveMessageId(null);
-      setGenerationStage("idle");
+      activeMessageIdRef.current = null;
+      provisionalMessageIdRef.current = null;
     }
   }
 
   async function handleStop() {
-    const messageId = activeMessageId;
+    const messageId = activeMessageIdRef.current ?? activeMessageId;
     const controller = streamAbortRef.current;
     if (!messageId) {
       controller?.abort();
@@ -1149,6 +1439,7 @@ export default function CareerAdvisorPage() {
       await cancelCareerAdvisorMessage(messageId);
       controller?.abort();
       if (selectedSession) await loadSession(selectedSession.id, false);
+      updateRunConnection("connected");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "停止生成失败");
     } finally {
@@ -1167,21 +1458,23 @@ export default function CareerAdvisorPage() {
     }
     const sessionId = session.id;
     const controller = new AbortController();
+    const provisionalMessageId = `client-regenerate-${Date.now()}`;
+    provisionalMessageIdRef.current = provisionalMessageId;
+    setAgentRuns((current) => ({ ...current, [provisionalMessageId]: createAgentRun(provisionalMessageId) }));
     setRegeneratingId(message.id);
     streamAbortRef.current = controller;
     setGenerating(true);
     setStopping(false);
-    setGenerationStage("understanding");
-    setRetrievedSampleCount(0);
     setError(null);
     try {
       setSelectedSession((current) => current && current.id === sessionId
-        ? { ...current, messages: [...current.messages, localUserMessage(sessionId, previousUser.content)] }
+        ? { ...current, messages: [...current.messages, localUserMessage(sessionId, previousUser.content), emptyAssistantMessage(sessionId, provisionalMessageId)] }
         : current);
       await streamRegenerateCareerAdvisorMessage(
         message.id,
         (eventType, payload) => applyStreamEvent(sessionId, eventType, payload),
         controller.signal,
+        (state, attempt) => updateRunConnection(state, attempt ?? 0),
       );
       await loadSession(sessionId, false);
     } catch (reason) {
@@ -1193,7 +1486,8 @@ export default function CareerAdvisorPage() {
       setGenerating(false);
       setStopping(false);
       setActiveMessageId(null);
-      setGenerationStage("idle");
+      activeMessageIdRef.current = null;
+      provisionalMessageIdRef.current = null;
       setRegeneratingId(null);
     }
   }
@@ -1213,14 +1507,6 @@ export default function CareerAdvisorPage() {
   const activeFilterCount = filterCount(filters);
   const selectedResumeName = resumes.find((resume) => resume.id === selectedResumeId)?.name ?? "未关联";
   const suggestedFollowUps = followUpPrompts(latestAssistantMessage);
-  const knowledgeStatus = knowledgeHealth?.status ?? (
-    knowledgeHealth?.ready
-      ? "ready"
-      : knowledgeHealth && (knowledgeHealth.document_count === 0 || knowledgeHealth.chunk_count === 0)
-        ? "not_built"
-        : "needs_update"
-  );
-
   return (
     <div className={`career-advisor-page advisor-workspace ${focusMode ? "advisor-focus" : ""}`}>
       <header className="advisor-toolbar">
@@ -1235,12 +1521,6 @@ export default function CareerAdvisorPage() {
       </header>
 
       {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
-      {loading && <div aria-label="正在加载岗位知识库状态" className="h-16 animate-pulse rounded-2xl border border-slate-200 bg-white" />}
-      {knowledgeStatus === "ready" && knowledgeHealth && <p className="text-xs text-slate-500">知识库已覆盖 {knowledgeHealth.indexed_jobs}/{knowledgeHealth.jobs_total} 个岗位 · {knowledgeHealth.chunk_count} 个知识片段 · {knowledgeHealth.embedded_chunk_count ?? knowledgeHealth.chunk_count} 个向量{knowledgeHealth.updated_at ? ` · 更新于 ${new Date(knowledgeHealth.updated_at).toLocaleString("zh-CN")}` : ""}。是否足以回答当前问题，以回答中的检索证据为准。</p>}
-      {!loading && knowledgeStatus === "not_built" && !["PENDING", "RUNNING", "FAILED"].includes(knowledgeRun?.status ?? "") && <div className="flex flex-col justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 sm:flex-row sm:items-center"><div><p className="font-semibold">岗位知识库尚未构建</p><p className="mt-1 text-xs leading-5">当前没有文档或知识片段，请先完成一次全量回填。</p></div><button className="shrink-0 rounded-lg bg-amber-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-amber-700 disabled:opacity-50" disabled={startingKnowledge} onClick={handleStartBackfill} type="button">{startingKnowledge ? "启动中…" : "开始全量回填"}</button></div>}
-      {!loading && knowledgeHealth && ["partial", "needs_update"].includes(knowledgeStatus) && !["PENDING", "RUNNING", "FAILED"].includes(knowledgeRun?.status ?? "") && <div className="flex flex-col justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 sm:flex-row sm:items-center"><div><p className="font-semibold">{knowledgeStatus === "needs_update" ? "岗位知识库需要更新" : "岗位知识库部分可用"}</p><p className="mt-1 text-xs leading-5">已有 {knowledgeHealth.compatible_jobs ?? knowledgeHealth.indexed_jobs}/{knowledgeHealth.jobs_total} 个岗位可检索，{knowledgeHealth.needs_update_jobs ?? Math.max(0, knowledgeHealth.jobs_total - knowledgeHealth.indexed_jobs)} 个岗位需要更新 embedding 或知识块。</p></div><button className="shrink-0 rounded-lg bg-amber-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-amber-700 disabled:opacity-50" disabled={startingKnowledge} onClick={handleStartIncremental} type="button">{startingKnowledge ? "启动中…" : `增量更新 ${knowledgeHealth.needs_update_jobs ?? Math.max(0, knowledgeHealth.jobs_total - knowledgeHealth.indexed_jobs)} 个岗位`}</button></div>}
-      {knowledgeRun && ["PENDING", "RUNNING"].includes(knowledgeRun.status) && <div className="rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-800"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-semibold">知识库正在增量更新，检索速度可能降低</span><span>{knowledgeRun.progress}% · {knowledgeRun.processed_jobs}/{knowledgeRun.total_jobs} 个岗位</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-indigo-100"><div className="h-full rounded-full bg-indigo-600 transition-all" style={{ width: `${knowledgeRun.progress}%` }} /></div></div>}
-      {knowledgeRun?.status === "FAILED" && <div className="flex flex-col justify-between gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 sm:flex-row sm:items-center"><div><p className="font-semibold">岗位知识库更新失败</p><p className="mt-1 text-xs leading-5">{knowledgeRun.error ?? "请重新启动索引任务。"}</p></div><button className="shrink-0 rounded-lg bg-rose-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-rose-700 disabled:opacity-50" disabled={startingKnowledge} onClick={knowledgeStatus === "not_built" ? handleStartBackfill : handleStartIncremental} type="button">{startingKnowledge ? "启动中…" : knowledgeStatus === "not_built" ? "重新全量回填" : `重试增量更新 ${knowledgeHealth?.needs_update_jobs ?? ""} 个岗位`}</button></div>}
 
       {mobileSessionsOpen && <AdvisorDialog title="咨询记录" onClose={() => setMobileSessionsOpen(false)}>
           <SessionList loading={loading} loadingMore={loadingMoreSessions} onLoadMore={() => void handleLoadMoreSessions()} onSelect={(id) => void handleSelectSession(id)} selectedSessionId={selectedSession?.id ?? null} sessionTotal={sessionTotal} sessions={sessions} />
@@ -1327,7 +1607,6 @@ export default function CareerAdvisorPage() {
             setAwayFromBottom(!followMessages.current);
           }}><div className="advisor-reading-column">
             {loadingSession && <div aria-label="正在加载会话" className="space-y-4 py-4"><div className="h-14 w-2/3 animate-pulse rounded-2xl bg-slate-100" /><div className="h-40 w-full animate-pulse rounded-2xl bg-slate-100" /></div>}
-            {generating && <GenerationProgress sampleCount={retrievedSampleCount} stage={generationStage} statusLabel={generationStatusLabel} />}
             {(!selectedSession || messages.length === 0) && !loading && !loadingSession && (
               <div className="flex flex-1 flex-col items-center justify-center py-12 text-center">
                 <div className="grid h-14 w-14 place-items-center rounded-2xl bg-indigo-50 text-2xl text-indigo-600">✦</div>
@@ -1340,7 +1619,7 @@ export default function CareerAdvisorPage() {
             )}
             {selectedSession && messages.length > 0 && !loadingSession && <div className="space-y-7">
               {selectedSession.message_has_more && <button className="mx-auto block rounded-full border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-500 transition hover:border-indigo-300 hover:text-indigo-700 disabled:opacity-50" disabled={loadingOlderMessages} onClick={() => void handleLoadOlderMessages()} type="button">{loadingOlderMessages ? "加载中…" : "加载更早消息"}</button>}
-              {messages.map((message) => <MessageCard copied={copiedMessageId === message.id} expanded={!collapsedMessages.has(message.id)} key={message.id} message={message} sessionId={selectedSession.id} resumeId={selectedResumeId} onActionUpdate={handleActionUpdate} onCopy={handleCopy} onError={setError} onRegenerate={handleRegenerate} onEvidence={setEvidenceMessage} onToggleExpanded={toggleMessageExpanded} regenerating={generating || regeneratingId === message.id} />)}
+              {messages.map((message) => <MessageCard copied={copiedMessageId === message.id} expanded={!collapsedMessages.has(message.id)} key={message.id} message={message} run={agentRuns[message.id]} sessionId={selectedSession.id} resumeId={selectedResumeId} onActionUpdate={handleActionUpdate} onCollectionCompleted={handleCollectionCompleted} onCopy={handleCopy} onError={setError} onRegenerate={handleRegenerate} onEvidence={setEvidenceMessage} onToggleExpanded={toggleMessageExpanded} regenerating={generating || regeneratingId === message.id} />)}
               {!generating && suggestedFollowUps.length > 0 && <div className="animate-[advisorMessageIn_180ms_ease-out] border-t border-slate-200 pt-4"><p className="text-xs font-semibold text-slate-500">你还可以继续问</p><div className="mt-2 flex flex-wrap gap-2">{suggestedFollowUps.map((prompt) => <button className="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 transition hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700" key={prompt} onClick={() => applyPrompt(prompt)} type="button">{prompt}</button>)}</div></div>}
               <div ref={messagesEndRef} />
             </div>}

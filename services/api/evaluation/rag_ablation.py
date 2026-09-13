@@ -17,8 +17,8 @@ from evaluation.schemas import RAGEvaluationCase, assert_gold_ready
 
 @dataclass(frozen=True)
 class RAGAblationConfig:
-    chunk_size: int = 256
-    chunk_overlap: int = 32
+    chunk_size: int = 160
+    chunk_overlap: int = 16
     dense_top_k: int = 30
     sparse_top_k: int = 30
     final_top_k: int = 10
@@ -59,8 +59,8 @@ def staged_configs(base: RAGAblationConfig | None = None) -> list[RAGAblationCon
     base = base or RAGAblationConfig()
     configs = [base]
     stages: list[tuple[str, list[Any]]] = [
-        ("chunk_size", [128, 256, 384, 512]),
-        ("chunk_overlap", [0, 32, 64, 96]),
+        ("chunk_size", [80, 110, 160, 256, 384]),
+        ("chunk_overlap", [0, 16, 32, 48]),
         ("rrf_k", [20, 60, 100]),
         ("final_top_k", [5, 8, 12, 20]),
         ("reranker_enabled", [False, True]),
@@ -92,9 +92,7 @@ def evaluate_recorded(
     enforce_config_id: bool = False,
 ) -> dict[str, Any]:
     if enforce_config_id:
-        observations = [
-            item for item in observations if str(item.get("config_id")) == config.key()
-        ]
+        observations = [item for item in observations if str(item.get("config_id")) == config.key()]
         if not observations:
             raise ValueError(
                 f"Missing retrieval observations for config {config.key()}; "

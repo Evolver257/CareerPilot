@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.llm.provider import MockLLMProvider
 from app.models.base import Base
-from app.models.entities import Job, JobSkill, Resume, ResumeChunk, User
+from app.models.entities import Job, JobSkill, KnowledgeIndexRun, Resume, ResumeChunk, User
 from app.schemas.knowledge import KnowledgeIndexRunCreate
 from app.schemas.knowledge_search import JobKnowledgeFilters, JobKnowledgeSearchRequest
 from app.services.job_knowledge import normalize_experience_requirement
@@ -18,6 +18,7 @@ from app.services.job_knowledge_rag import (
     KnowledgeEmbeddingUnavailableError,
     _query_terms,
     clear_knowledge_search_cache,
+    section_weights_for_query,
 )
 from app.services.knowledge_indexing import KnowledgeIndexService
 
@@ -130,6 +131,38 @@ async def test_query_embeddings_are_batched_and_cached(rag_session):
     assert provider.batch_calls == 1
 
 
+@pytest.mark.asyncio
+async def test_incremental_indexing_does_not_disable_stable_retrieval(rag_session):
+    rag_session.add(KnowledgeIndexRun(mode="incremental", status="RUNNING"))
+    await rag_session.commit()
+
+    rag = JobKnowledgeRAG(rag_session, MockLLMProvider())
+
+    assert await rag.knowledge_update_in_progress() is False
+
+
+@pytest.mark.asyncio
+async def test_full_rebuild_still_enables_temporary_fast_mode(rag_session):
+    rag_session.add(KnowledgeIndexRun(mode="backfill", status="PENDING"))
+    await rag_session.commit()
+
+    rag = JobKnowledgeRAG(rag_session, MockLLMProvider())
+
+    assert await rag.knowledge_update_in_progress() is True
+
+
+@pytest.mark.asyncio
+async def test_hybrid_search_only_falls_back_for_incompatible_query_dimensions(rag_session):
+    await _index(rag_session, _job("岗位职责：负责 RAG 检索服务。任职要求：熟悉 Python。"))
+
+    result = await JobKnowledgeRAG(rag_session, MockLLMProvider(dimensions=3)).search(
+        JobKnowledgeSearchRequest(query="RAG", force_refresh=True)
+    )
+
+    assert result.citations
+    assert any("维度不兼容" in warning for warning in result.warnings)
+
+
 async def test_requested_cross_encoder_failure_is_explicit(rag_session, monkeypatch):
     from app.services.job_knowledge_rag import KnowledgeRetrievalError
 
@@ -198,6 +231,17 @@ def test_query_terms_keep_domain_concepts_and_drop_prompt_filler() -> None:
     assert "agent" not in terms
     assert not {"学习", "需要", "哪些", "技术", "术栈"} & set(terms)
     assert _query_terms("还有其他建议吗？") == []
+
+
+def test_query_terms_expand_domain_paraphrases_and_section_weights_follow_intent() -> None:
+    assert {"Linux", "Shell", "Bash"} <= set(_query_terms("熟悉企鹅操作系统命令行的岗位"))
+    assert {"模型评测", "评测集", "评估体系"} <= set(_query_terms("哪些岗位需要验证生成答案质量"))
+
+    education = section_weights_for_query("这些岗位要求什么学历？")
+    salary = section_weights_for_query("岗位薪资待遇如何？")
+
+    assert education["education"] > education["responsibilities"]
+    assert salary["salary_benefits"] > salary["required_skills"]
 
 
 def test_experience_normalization_never_returns_free_form_requirements() -> None:

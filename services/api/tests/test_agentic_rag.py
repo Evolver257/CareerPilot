@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -13,14 +14,14 @@ from app.models.base import Base
 from app.models.entities import Job, JobSkill, KnowledgeIndexRun
 from app.schemas.knowledge import KnowledgeIndexRunCreate
 from app.schemas.knowledge_search import (
+    JobKnowledgeCitation,
     JobKnowledgeFilters,
     JobKnowledgeSearchRequest,
     RAGEvidence,
-    RAGEvidenceReflection,
     RAGEvidenceSource,
     RAGPlannerPlan,
-    RAGRepairAction,
     RAGRetrievalQuery,
+    RAGVerification,
 )
 from app.services.agentic_rag import (
     AgenticRAGPipeline,
@@ -30,13 +31,20 @@ from app.services.agentic_rag import (
     EvidenceEvaluator,
     QueryAnalyzer,
     QueryRewriter,
+    RAGBudgetLedger,
     Reranker,
+    RetrievalCandidate,
     RetrievalPlanner,
     _merge_similar_queries,
+    _select_job_diverse_candidates,
 )
 from app.services.job_knowledge_rag import JobKnowledgeRAG
 from app.services.knowledge_indexing import KnowledgeIndexService
-from app.services.rag_planning import RetrievalPlanValidator, clear_rag_planner_cache
+from app.services.rag_planning import (
+    AnswerReflectionService,
+    RetrievalPlanValidator,
+    clear_rag_planner_cache,
+)
 
 
 @pytest_asyncio.fixture
@@ -178,7 +186,21 @@ def test_query_analysis_and_rewrite_are_structured_and_bounded() -> None:
     assert "comparison_dimensions" in analysis.required_information
     assert len(analysis.entities) >= 2
     assert 1 <= len(rewrite.all_queries) <= 6
-    assert analysis.original_query not in rewrite.all_queries
+    assert rewrite.semantic_query == analysis.original_query
+    assert rewrite.all_queries[0] == analysis.original_query
+
+
+def test_procedural_rewrite_keeps_responsibility_query_within_first_round_budget() -> None:
+    settings = Settings(rag_max_queries=6)
+    analysis = QueryAnalyzer().analyze("AI Agent 岗位应该如何学习和准备？")
+
+    rewrite = QueryRewriter(settings).rewrite(analysis)
+
+    # The pipeline executes at most four queries in the first round so it can
+    # reserve budget for repair. Required dimensions must not be crowded out
+    # by broad exact/keyword rewrites.
+    first_round = rewrite.all_queries[:4]
+    assert any("岗位职责 工作内容" in query for query in first_round)
 
 
 def test_similar_query_rewrites_are_merged_before_embedding() -> None:
@@ -188,25 +210,76 @@ def test_similar_query_rewrites_are_merged_before_embedding() -> None:
     )
 
     assert len(queries) == 2
-    assert "AI Agent 岗位需要哪些技能" in queries[0]
-    assert "AI Agent 岗位的技能要求" in queries[0]
+    assert queries[0] == "AI Agent 岗位需要哪些技能"
+    assert "AI Agent 岗位的技能要求" not in queries
+
+
+def test_agentic_candidate_pool_keeps_distinct_jobs_before_supporting_chunks() -> None:
+    first_job = uuid4()
+    other_jobs = [uuid4(), uuid4()]
+
+    def candidate(job_id, rank):
+        return RetrievalCandidate(
+            citation=JobKnowledgeCitation(
+                citation_index=rank,
+                job_id=job_id,
+                chunk_id=uuid4(),
+                title=f"岗位 {rank}",
+                platform="test",
+                section_type="requirements",
+                evidence="任职要求",
+                lexical_score=0,
+                semantic_score=0,
+                fusion_score=0,
+                rank=rank,
+            ),
+            rerank_score=1 - rank / 10,
+        )
+
+    ranked = [
+        candidate(first_job, 1),
+        candidate(first_job, 2),
+        candidate(other_jobs[0], 3),
+        candidate(other_jobs[1], 4),
+    ]
+
+    selected = _select_job_diverse_candidates(ranked, 3)
+
+    assert [item.citation.job_id for item in selected] == [first_job, *other_jobs]
+
+
+def test_rag_budget_reserves_failed_attempts_before_execution() -> None:
+    budget = RAGBudgetLedger(
+        max_tool_calls=1,
+        max_search_calls=1,
+        max_llm_calls=1,
+        max_tokens=1000,
+    )
+
+    assert budget.reserve("search") is True
+    # No success/commit call is needed: the attempt has already consumed the
+    # budget and a retry cannot bypass the hard limit.
+    assert budget.reserve("search") is False
+    assert budget.snapshot()["tool_calls_used"] == 1
+    assert budget.snapshot()["exhausted_reason"] == "tool_call_budget_exhausted"
 
 
 @pytest.mark.asyncio
 async def test_indexing_run_switches_agentic_rag_to_one_full_text_query(
     agentic_session: AsyncSession,
 ) -> None:
-    agentic_session.add(KnowledgeIndexRun(status="RUNNING"))
+    agentic_session.add(KnowledgeIndexRun(mode="backfill", status="RUNNING"))
     await agentic_session.commit()
     pipeline = AgenticRAGPipeline(JobKnowledgeRAG(agentic_session, MockLLMProvider()))
 
-    result = await pipeline.run(
-        JobKnowledgeSearchRequest(query="AI Agent 岗位需要哪些技能？")
-    )
+    result = await pipeline.run(JobKnowledgeSearchRequest(query="AI Agent 岗位需要哪些技能？"))
 
     assert result.retrieval_plan.strategy == "full_text"
     assert result.retrieval_plan.max_iterations == 1
     assert result.trace.query_count == 1
+    assert result.trace.knowledge_execution_mode == "fast"
+    assert result.trace.agentic_capability_level == "fast"
+    assert result.trace.budget["search_calls_used"] == 1
     assert any("单次快速全文检索" in item for item in result.trace.degradations)
 
 
@@ -295,9 +368,7 @@ async def test_agentic_pipeline_builds_evidence_context_and_real_citations(
     assert result.evidence
     assert result.context.startswith("EVIDENCE_CONTEXT")
     assert result.search.citations
-    evidence_chunks = {
-        source.chunk_id for item in result.evidence for source in item.sources
-    }
+    evidence_chunks = {source.chunk_id for item in result.evidence for source in item.sources}
     assert {item.chunk_id for item in result.search.citations} <= evidence_chunks
     assert all(item.document_id and item.parent_id for item in result.search.citations)
     assert all("evidence_pipeline" in item.retrieval_sources for item in result.search.citations)
@@ -314,27 +385,19 @@ async def test_narrow_role_query_keeps_statistics_and_evidence_on_target(
         company="Agent Lab",
     )
     await _index(agentic_session, robot, unrelated)
-    pipeline = AgenticRAGPipeline(
-        JobKnowledgeRAG(agentic_session, MockLLMProvider())
-    )
+    pipeline = AgenticRAGPipeline(JobKnowledgeRAG(agentic_session, MockLLMProvider()))
 
     result = await pipeline.run(
-        JobKnowledgeSearchRequest(
-            query="机器人控制算法实习生需要哪些核心技能和学历要求？"
-        )
+        JobKnowledgeSearchRequest(query="机器人控制算法实习生需要哪些核心技能和学历要求？")
     )
 
     assert result.query_analysis.role_entities == ["机器人控制算法实习生"]
     assert result.query_analysis.question_type == "multi_hop"
     assert result.search.sample_count == 1
-    assert {item.title for item in result.search.citations} == {
-        "机器人控制算法实习生"
-    }
+    assert {item.title for item in result.search.citations} == {"机器人控制算法实习生"}
     assert result.evidence_evaluation.answerable is True
     assert "education" not in result.evidence_evaluation.missing_information
-    assert any(
-        "硕士" in f"{item.claim} {item.evidence_text}" for item in result.evidence
-    )
+    assert any("硕士" in f"{item.claim} {item.evidence_text}" for item in result.evidence)
 
 
 @pytest.mark.asyncio
@@ -349,14 +412,10 @@ async def test_narrow_role_query_does_not_substitute_generic_jobs(
             company="Agent Lab",
         ),
     )
-    pipeline = AgenticRAGPipeline(
-        JobKnowledgeRAG(agentic_session, MockLLMProvider())
-    )
+    pipeline = AgenticRAGPipeline(JobKnowledgeRAG(agentic_session, MockLLMProvider()))
 
     result = await pipeline.run(
-        JobKnowledgeSearchRequest(
-            query="量子交易算法实习生需要哪些核心技能和学历要求？"
-        )
+        JobKnowledgeSearchRequest(query="量子交易算法实习生需要哪些核心技能和学历要求？")
     )
 
     assert result.query_analysis.role_entities == ["量子交易算法实习生"]
@@ -387,13 +446,14 @@ async def test_insufficient_evidence_runs_bounded_iterative_retrieval(
     )
 
     result = await pipeline.run(
-        JobKnowledgeSearchRequest(
-            query="分析 Agent 岗位的薪资、学历、经验、技能和工作职责"
-        )
+        JobKnowledgeSearchRequest(query="分析 Agent 岗位的薪资、学历、经验、技能和工作职责")
     )
 
     assert result.trace.retrieval_iterations == 2
     assert result.trace.query_count <= 6
+    assert result.trace.knowledge_execution_mode == "agentic"
+    assert result.trace.agentic_capability_level == "retrieval_only"
+    assert result.trace.budget["tool_calls_used"] <= result.trace.budget["tool_calls_limit"]
     assert result.knowledge_status in {"partial", "insufficient"}
     assert result.evidence_evaluation.answerable is False
     assert result.evidence_evaluation.missing_information
@@ -422,9 +482,7 @@ def test_evidence_deduplication_merges_sources_and_detects_conflicts() -> None:
         source_rank=1,
         sources=[first_source],
     )
-    duplicate = first.model_copy(
-        update={"evidence_id": "ev_2", "sources": [second_source]}
-    )
+    duplicate = first.model_copy(update={"evidence_id": "ev_2", "sources": [second_source]})
     conflicting = RAGEvidence(
         evidence_id="ev_3",
         topic="requirements",
@@ -440,9 +498,7 @@ def test_evidence_deduplication_merges_sources_and_detects_conflicts() -> None:
     assert len(deduplicated[0].sources) == 2
 
     analysis = QueryAnalyzer().analyze("网络请求失败后最多重试几次")
-    evaluation = EvidenceEvaluator(Settings()).evaluate(
-        analysis, [first, conflicting]
-    )
+    evaluation = EvidenceEvaluator(Settings()).evaluate(analysis, [first, conflicting])
     assert evaluation.conflicts
 
 
@@ -480,6 +536,47 @@ def test_context_builder_prioritizes_evidence_and_honors_budget() -> None:
     assert context.index("必须掌握 Python") < context.index("团队使用敏捷流程")
 
 
+@pytest.mark.asyncio
+async def test_answer_reflection_uses_compact_model_contract() -> None:
+    class ReflectionProvider(MockLLMProvider):
+        provider_name = "openai"
+        supports_streaming = True
+        supports_agentic_rag_planning = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.schema_name = ""
+
+        async def generate_structured(self, prompt, schema, **kwargs):
+            del prompt, kwargs
+            self.schema_name = schema.__name__
+            return schema(
+                status="repairable",
+                repair_strategy="qualify_claim",
+                unsupported_claims=[
+                    {"claim": "市场覆盖率为 90%", "reason": "证据未提供该指标"}
+                ],
+                confidence=0.9,
+            )
+
+    provider = ReflectionProvider()
+    service = AnswerReflectionService(provider, Settings())
+    reflection, _, warning = await service.reflect(
+        "市场覆盖率为 90%",
+        RAGVerification(
+            groundedness="partially_supported",
+            completeness="partial",
+            citation_correctness="partial",
+            unsupported_claims=["市场覆盖率为 90%"],
+        ),
+        [],
+    )
+
+    assert provider.schema_name == "_LLMAnswerReflectionDecision"
+    assert reflection.unsupported_claims[0].claim == "市场覆盖率为 90%"
+    assert warning is None
+
+
 class FailingReranker(Reranker):
     async def rerank(self, query, candidates, limit):
         raise RuntimeError("reranker unavailable")
@@ -503,32 +600,28 @@ async def test_agentic_pipeline_uses_llm_plan_and_reflects_evidence_gap(
 
         async def generate_structured(self, prompt, schema, **kwargs):
             del prompt, kwargs
-            if schema is RAGPlannerPlan:
+            if schema.__name__ == "_LLMRetrievalPlannerDecision":
                 self.planner_calls += 1
                 return schema(
-                    normalized_question="分析 Agent 岗位市场要求",
-                    answer_dimensions=["薪资", "学历", "技能"],
                     queries=[
-                        RAGRetrievalQuery(
-                            query="Agent 岗位薪资 学历 技能要求",
-                            purpose="aggregation",
-                        )
+                        {
+                            "query": "Agent 岗位薪资 学历 技能要求",
+                            "purpose": "aggregation",
+                        }
                     ],
                     preferred_channels=["lexical", "dense"],
                     confidence=0.95,
                 )
-            if schema is RAGEvidenceReflection:
+            if schema.__name__ == "_LLMEvidenceReflectionDecision":
                 self.reflection_calls += 1
                 return schema(
                     status="repairable",
-                    failure_types=["coverage_gap"],
-                    missing_information=["salary"],
                     repair_actions=[
-                        RAGRepairAction(
-                            action="retrieve_statistics",
-                            query="Agent 岗位薪资统计",
-                            target_dimension="salary",
-                        )
+                        {
+                            "action": "retrieve_statistics",
+                            "query": "Agent 岗位薪资统计",
+                            "target_dimension": "salary",
+                        }
                     ],
                     confidence=0.95,
                 )
@@ -557,6 +650,10 @@ async def test_agentic_pipeline_uses_llm_plan_and_reflects_evidence_gap(
 
     assert provider.planner_calls == 1
     assert provider.reflection_calls == 1
+    assert result.trace.agentic_capability_level == "full"
+    assert result.trace.budget["calls_by_kind"]["planner"] == 1
+    assert result.trace.budget["calls_by_kind"]["evidence_reflection"] == 1
+    assert result.trace.budget["llm_calls_used"] == 2
     assert result.trace.planner_source == "llm"
     assert result.trace.reflection_iterations == 1
     assert "retrieve_statistics" in result.trace.repair_actions
@@ -568,7 +665,42 @@ async def test_agentic_pipeline_uses_llm_plan_and_reflects_evidence_gap(
     )
     assert cached_plan is not None
     assert cached_plan.planner_source == "llm_cache"
-    assert provider.planner_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_agentic_budget_counts_calls_before_execution_and_stops_repair(
+    agentic_session: AsyncSession,
+) -> None:
+    await _index(
+        agentic_session,
+        _job(
+            "Agent 工程实习生",
+            "负责 Agent 工具调用，要求熟悉 Python",
+            company="Budget Lab",
+            complete=False,
+        ),
+    )
+    settings = Settings(
+        rag_max_iterations=2,
+        rag_max_queries=6,
+        rag_max_tool_calls=1,
+        rag_max_search_calls=6,
+    )
+    pipeline = AgenticRAGPipeline(
+        JobKnowledgeRAG(agentic_session, MockLLMProvider(), settings),
+        settings=settings,
+    )
+
+    result = await pipeline.run(
+        JobKnowledgeSearchRequest(query="分析 Agent 岗位的薪资、学历、经验、技能和工作职责")
+    )
+
+    assert result.trace.query_count == 1
+    assert result.trace.budget["tool_calls_used"] == 1
+    assert result.trace.budget["search_calls_used"] == 1
+    assert result.trace.budget["exhausted"] is True
+    assert result.trace.budget["exhausted_reason"] == "tool_call_budget_exhausted"
+    assert result.trace.stop_reason == "tool_call_budget_exhausted"
 
 
 @pytest.mark.asyncio
@@ -621,9 +753,9 @@ async def test_empty_knowledge_base_and_agentic_api_are_explicitly_insufficient(
     agentic_session: AsyncSession,
     client: AsyncClient,
 ) -> None:
-    result = await AgenticRAGPipeline(
-        JobKnowledgeRAG(agentic_session, MockLLMProvider())
-    ).run(JobKnowledgeSearchRequest(query="量子计算岗位要求"))
+    result = await AgenticRAGPipeline(JobKnowledgeRAG(agentic_session, MockLLMProvider())).run(
+        JobKnowledgeSearchRequest(query="量子计算岗位要求")
+    )
 
     assert result.knowledge_status == "insufficient"
     assert result.confidence == "low"
@@ -646,9 +778,9 @@ async def test_answer_verifier_uses_only_pipeline_sources(
         agentic_session,
         _job("RAG 实习生", "负责 RAG 服务开发", company="Verify Lab"),
     )
-    result = await AgenticRAGPipeline(
-        JobKnowledgeRAG(agentic_session, MockLLMProvider())
-    ).run(JobKnowledgeSearchRequest(query="RAG 岗位需要哪些技能"))
+    result = await AgenticRAGPipeline(JobKnowledgeRAG(agentic_session, MockLLMProvider())).run(
+        JobKnowledgeSearchRequest(query="RAG 岗位需要哪些技能")
+    )
 
     verification = AnswerVerifier().verify(
         "## 数据事实\n- 岗位要求 Python 和 RAG。\n\n## AI 建议\n建议完成检索项目。",
@@ -658,3 +790,10 @@ async def test_answer_verifier_uses_only_pipeline_sources(
     assert verification.citation_correctness == "valid"
     assert verification.groundedness in {"supported", "partially_supported"}
     assert verification.confidence in {"high", "medium"}
+
+    internal_metric = f"{result.evidence_evaluation.coverage_score:.2f}"
+    metric_verification = AnswerVerifier().verify(
+        f"## 证据覆盖状态\n- 覆盖度：{internal_metric}\n\n## AI 建议\n继续验证。",
+        result,
+    )
+    assert metric_verification.unsupported_claims == []

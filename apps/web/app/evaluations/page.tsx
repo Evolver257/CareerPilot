@@ -9,6 +9,7 @@ import {
   getEvaluationRun,
   getEvaluationRuns,
   importToolEvaluationSeed,
+  importMemoryEvaluationSeed,
   updateEvaluationRun,
   type EvaluationDataset,
   type EvaluationRun,
@@ -72,11 +73,13 @@ export default function EvaluationsPage() {
   const [runs, setRuns] = useState<EvaluationRun[]>([]);
   const [datasetId, setDatasetId] = useState("");
   const [observations, setObservations] = useState("[]");
+  const [executionMode, setExecutionMode] = useState<"recorded" | "online">("recorded");
+  const [bootstrapMemories, setBootstrapMemories] = useState("[]");
   const [model, setModel] = useState("当前 Provider");
   const [promptVersion, setPromptVersion] = useState("career-advisor-v2");
   const [finalTopK, setFinalTopK] = useState(10);
-  const [chunkSize, setChunkSize] = useState(256);
-  const [chunkOverlap, setChunkOverlap] = useState(32);
+  const [chunkSize, setChunkSize] = useState(160);
+  const [chunkOverlap, setChunkOverlap] = useState(16);
   const [denseTopK, setDenseTopK] = useState(30);
   const [sparseTopK, setSparseTopK] = useState(30);
   const [rrfK, setRrfK] = useState(60);
@@ -121,11 +124,24 @@ export default function EvaluationsPage() {
     finally { setBusy(false); }
   }
 
+  async function importMemorySeed() {
+    setBusy(true); setError(null);
+    try { const item = await importMemoryEvaluationSeed(); await load(); setDatasetId(item.id); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "记忆种子集导入失败"); }
+    finally { setBusy(false); }
+  }
+
   async function start() {
     setBusy(true); setError(null);
     try {
-      const parsed = JSON.parse(observations) as Array<Record<string, unknown>>;
+      const parsed = executionMode === "recorded"
+        ? JSON.parse(observations) as Array<Record<string, unknown>>
+        : [];
       if (!Array.isArray(parsed)) throw new Error("Observations 必须是 JSON 数组");
+      const bootstrap = executionMode === "online"
+        ? JSON.parse(bootstrapMemories) as Array<Record<string, unknown>>
+        : [];
+      if (!Array.isArray(bootstrap)) throw new Error("隔离初始记忆必须是 JSON 数组");
       const run = await createEvaluationRun({
         dataset_id: datasetId,
         observations: parsed,
@@ -144,6 +160,8 @@ export default function EvaluationsPage() {
           reranker_enabled: rerankerEnabled,
           query_rewrite: queryRewrite,
           metadata_filter: metadataFilter,
+          execution_mode: executionMode,
+          bootstrap_memories: executionMode === "online" ? bootstrap : [],
           seed: 20260907,
         },
         require_gold: requireGold,
@@ -164,8 +182,8 @@ export default function EvaluationsPage() {
     <header><p className="eyebrow">开发 / 管理员</p><h1 className="mt-2 text-3xl font-semibold">Agent 评测控制台</h1><p className="mt-2 text-sm text-slate-500">该页面不进入普通求职导航。种子数据仅用于验证评测链路，不能作为人工金标质量结论。</p></header>
     {error && <p className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">{error}</p>}
     <section className="grid gap-5 lg:grid-cols-[1fr_1.2fr]">
-      <article className="panel space-y-4"><div className="flex items-center justify-between"><div><p className="eyebrow">新建运行</p><h2 className="mt-1 text-xl font-semibold">固定版本与配置</h2></div><button className="rounded-lg border border-indigo-200 px-3 py-2 text-sm text-indigo-700" disabled={busy} onClick={() => void importSeed()} type="button">导入待标注种子集</button></div>
-        <label className="block text-sm text-slate-700">数据集<select className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2.5" onChange={(event) => setDatasetId(event.target.value)} value={datasetId}><option value="">请选择</option>{datasets.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.version} · {item.case_count} cases</option>)}</select></label>
+      <article className="panel space-y-4"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="eyebrow">新建运行</p><h2 className="mt-1 text-xl font-semibold">固定版本与配置</h2></div><div className="flex flex-wrap gap-2"><button className="rounded-lg border border-indigo-200 px-3 py-2 text-sm text-indigo-700" disabled={busy} onClick={() => void importSeed()} type="button">导入工具种子</button><button className="rounded-lg border border-violet-200 px-3 py-2 text-sm text-violet-700" disabled={busy} onClick={() => void importMemorySeed()} type="button">导入记忆种子</button></div></div>
+        <label className="block text-sm text-slate-700">数据集<select className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2.5" onChange={(event) => setDatasetId(event.target.value)} value={datasetId}><option value="">请选择</option>{datasets.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.suite} · {item.version} · {item.case_count} cases</option>)}</select></label>
         <div className="grid gap-3 sm:grid-cols-2"><label className="text-sm text-slate-700">模型<input className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2.5" onChange={(event) => setModel(event.target.value)} value={model} /></label><label className="text-sm text-slate-700">Prompt 版本<input className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2.5" onChange={(event) => setPromptVersion(event.target.value)} value={promptVersion} /></label></div>
         <label className="block text-sm text-slate-700">Final Top-K<input className="mt-1 w-full" max={50} min={1} onChange={(event) => setFinalTopK(Number(event.target.value))} type="range" value={finalTopK} /><span className="text-xs text-slate-500">{finalTopK}</span></label>
         <details className="rounded-xl border border-slate-200 p-3">
@@ -182,7 +200,9 @@ export default function EvaluationsPage() {
           </div>
           <p className="mt-3 text-xs leading-5 text-amber-700">Chunk Size / Overlap 只有在使用对应独立索引快照采集 observations 时才构成有效消融，控制台不会把同一批检索结果伪装成不同切块实验。</p>
         </details>
-        <label className="block text-sm text-slate-700">Observations JSON<textarea className="mt-1 min-h-36 w-full rounded-xl border border-slate-200 p-3 font-mono text-xs" onChange={(event) => setObservations(event.target.value)} spellCheck={false} value={observations} /></label>
+        <label className="block text-sm text-slate-700">执行方式<select className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2.5" onChange={(event) => setExecutionMode(event.target.value as "recorded" | "online")} value={executionMode}><option value="recorded">离线记录评测（使用 Observations）</option><option value="online">在线链路评测（隔离用户）</option></select></label>
+        <label className="block text-sm text-slate-700">Observations JSON<textarea className="mt-1 min-h-36 w-full rounded-xl border border-slate-200 p-3 font-mono text-xs disabled:opacity-50" disabled={executionMode === "online"} onChange={(event) => setObservations(event.target.value)} spellCheck={false} value={observations} /></label>
+        {executionMode === "online" && <label className="block text-sm text-slate-700">隔离初始记忆 JSON（可选）<textarea className="mt-1 min-h-24 w-full rounded-xl border border-slate-200 p-3 font-mono text-xs" onChange={(event) => setBootstrapMemories(event.target.value)} placeholder={'[{"id":"memory-python","memory_type":"SKILL_BACKGROUND","content":"我会 Python"}]'} spellCheck={false} value={bootstrapMemories} /><span className="mt-1 block text-xs text-slate-500">在线模式会创建临时评测用户，任务完成后自动清理，不会污染真实用户记忆。</span></label>}
         <label className="flex items-center gap-2 text-sm text-slate-600"><input checked={requireGold} onChange={(event) => setRequireGold(event.target.checked)} type="checkbox" />只允许已完成双人标注与仲裁的数据</label>
         <button className="w-full rounded-xl bg-indigo-600 px-4 py-3 font-medium text-white disabled:opacity-50" disabled={busy || !datasetId} onClick={() => void start()} type="button">{busy ? "处理中…" : "后台启动评测"}</button>
       </article>

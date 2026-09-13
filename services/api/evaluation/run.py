@@ -24,12 +24,14 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from app.core.config import Settings
 from app.llm.local_semantic import MODEL_REVISIONS, LocalSemanticProvider
 from app.llm.provider import MockLLMProvider
 from app.models.base import Base
 from app.models.entities import Job, JobKnowledgeChunk, JobKnowledgeDocument
 from app.schemas.knowledge import KnowledgeIndexRunCreate
 from app.schemas.knowledge_search import JobKnowledgeSearchRequest
+from app.services.agentic_rag import AgenticRAGPipeline
 from app.services.job_knowledge import JOB_KNOWLEDGE_VERSION
 from app.services.job_knowledge_rag import JobKnowledgeRAG
 from app.services.knowledge_indexing import KnowledgeIndexService
@@ -89,6 +91,7 @@ async def main(args):
         save(output / "corpus.json", snapshot)
     corpus_hash = hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
     questions = cases()
+    labels_are_external = False
     for question in questions:
         labels = []
         for job in snapshot["jobs"]:
@@ -108,6 +111,10 @@ async def main(args):
         if reviewed["corpus_sha256"] != corpus_hash:
             raise ValueError("Reviewed labels belong to a different corpus snapshot")
         questions = reviewed["questions"]
+        labels_are_external = not all(
+            str(question.get("label_status", "")).startswith("silver")
+            for question in questions
+        )
     validate_labels(questions, {job["id"] for job in snapshot["jobs"]})
     save(output / "labels.json", {"corpus_sha256": corpus_hash, "questions": questions})
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -140,11 +147,23 @@ async def main(args):
         )
         docs = list((await session.scalars(select(JobKnowledgeDocument))).all())
         print(f"indexed {len(snapshot['jobs'])} jobs / {len(chunks)} chunks", flush=True)
-        modes = [("lexical", "full_text", "none", mock), ("hash_hybrid", "hybrid", "local", mock)]
+        modes = (
+            []
+            if args.only_agentic
+            else [
+                ("lexical", "full_text", "none", mock),
+                ("hash_hybrid", "hybrid", "local", mock),
+            ]
+        )
+        real = None
         if args.semantic:
             real = LocalSemanticProvider(cache=os.getenv("SEMANTIC_CACHE_DIR"))
             try:
-                embed_path = output / "embeddings.json"
+                embed_path = (
+                    Path(args.embedding_cache).resolve()
+                    if args.embedding_cache
+                    else output / "embeddings.json"
+                )
                 embed_key = hashlib.sha256(
                     (
                         corpus_hash
@@ -156,14 +175,46 @@ async def main(args):
                 if cache.get("key") == embed_key:
                     vectors = cache["vectors"]
                 else:
-                    vectors = await asyncio.to_thread(real.encode, [c.content for c in chunks])
+                    vectors = await asyncio.to_thread(
+                        real.encode,
+                        [
+                            "\n".join(
+                                part
+                                for part in (
+                                    str(
+                                        (chunk.chunk_metadata or {}).get("embedding_context")
+                                        or ""
+                                    ).strip(),
+                                    chunk.content,
+                                )
+                                if part
+                            )
+                            for chunk in chunks
+                        ],
+                    )
                     save(embed_path, {"key": embed_key, "vectors": vectors})
-                modes += [
-                    ("semantic_vector", "vector", "none", real),
-                    ("semantic_hybrid", "hybrid", "local", real),
-                ]
-                if args.rerank:
-                    modes.append(("semantic_hybrid_rerank", "hybrid", "cross_encoder", real))
+                if not args.only_agentic:
+                    modes += [
+                        ("semantic_vector", "vector", "none", real),
+                        ("semantic_hybrid", "hybrid", "local", real),
+                    ]
+                    if args.rerank:
+                        modes.append(
+                            ("semantic_hybrid_rerank", "hybrid", "cross_encoder", real)
+                        )
+                else:
+                    # The normal mode loop installs cached vectors immediately
+                    # before each semantic benchmark.  An agentic-only run skips
+                    # that loop, so install the same vectors here instead of
+                    # accidentally measuring a lexical-only fallback.
+                    for chunk, vector in zip(chunks, vectors, strict=True):
+                        chunk.embedding = vector
+                        chunk.embedding_signature = real.embedding_signature
+                        chunk.embedding_model = real.embedding_model
+                        chunk.embedding_provider = real.embedding_provider_name
+                    for doc in docs:
+                        doc.current_embedding_signature = real.embedding_signature
+                    await session.commit()
             except Exception as exc:
                 unavailable["semantic"] = f"{type(exc).__name__}: {exc}"
         for name, retrieval_mode, rerank_mode, provider in modes:
@@ -222,6 +273,58 @@ async def main(args):
                 )
             print(f"completed {name}", flush=True)
             save(output / "results.json", results)
+        if args.agentic and real is not None and "semantic" not in unavailable:
+            mode_name = "agentic_hybrid"
+            modes.append((mode_name, "hybrid", "local", real))
+            settings = Settings(
+                rag_reranker="local",
+                rag_llm_planner_enabled=False,
+                rag_reflection_enabled=False,
+                rag_workflow_timeout_seconds=180,
+                semantic_cache_dir=os.getenv("SEMANTIC_CACHE_DIR"),
+            )
+            pipeline = AgenticRAGPipeline(
+                JobKnowledgeRAG(session, real, settings),
+                settings=settings,
+            )
+            for question in questions:
+                tick = time.perf_counter()
+                result = await pipeline.run(
+                    JobKnowledgeSearchRequest(
+                        query=question["query"],
+                        top_k=20,
+                        full_text_top_k=100,
+                        vector_top_k=100,
+                        force_refresh=True,
+                    )
+                )
+                ids = list(
+                    dict.fromkeys(
+                        str(source.job_id)
+                        for evidence in result.evidence
+                        for source in evidence.sources
+                    )
+                )[:5]
+                relevant = [
+                    label["job_id"] for label in question["relevance"] if label["grade"] > 0
+                ]
+                results.append(
+                    {
+                        "mode": mode_name,
+                        "case_id": question["id"],
+                        "split": question["split"],
+                        "variant": question["variant"],
+                        "relevant_count": len(relevant),
+                        "job_ids": ids,
+                        "metrics": retrieval_metrics(ids, relevant),
+                        "latency_ms": round((time.perf_counter() - tick) * 1000, 2),
+                        "warnings": result.warnings,
+                        "query_count": result.trace.query_count,
+                        "evidence_count": len(result.evidence),
+                    }
+                )
+            print(f"completed {mode_name}", flush=True)
+            save(output / "results.json", results)
     await engine.dispose()
     summaries = []
     for name, *_ in modes:
@@ -257,9 +360,9 @@ async def main(args):
         "chunks": len(chunks),
         "knowledge_version": JOB_KNOWLEDGE_VERSION,
         "cases": len(questions),
-        "label_status": "silver_requires_human_review"
-        if not args.labels
-        else "external_labels_supplied",
+        "label_status": "external_labels_supplied"
+        if labels_are_external
+        else "silver_requires_human_review",
         "python": platform.python_version(),
         "platform": platform.platform(),
         "dependencies": {
@@ -338,8 +441,15 @@ if __name__ == "__main__":
     parser.add_argument("--corpus", help="Reuse an existing frozen corpus.json snapshot")
     parser.add_argument("--semantic", action="store_true")
     parser.add_argument("--rerank", action="store_true")
+    parser.add_argument("--agentic", action="store_true")
+    parser.add_argument("--only-agentic", action="store_true")
+    parser.add_argument("--embedding-cache", help="Reuse a compatible embeddings.json file")
     parser.add_argument("--labels")
     args = parser.parse_args()
     if args.rerank and not args.semantic:
         parser.error("--rerank requires --semantic for the semantic comparison")
+    if args.agentic and not args.semantic:
+        parser.error("--agentic requires --semantic")
+    if args.only_agentic and not args.agentic:
+        parser.error("--only-agentic requires --agentic")
     asyncio.run(main(args))

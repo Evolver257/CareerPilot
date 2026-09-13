@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 class EvaluationDatasetCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    suite: Literal["tool_calling", "rag_retrieval", "answer"]
+    suite: Literal["tool_calling", "rag_retrieval", "answer", "memory"]
     version: str = Field(min_length=1, max_length=80)
     label_status: Literal["seed_requires_dual_review", "adjudicated_gold"]
     cases: list[dict[str, Any]] = Field(min_length=1, max_length=1000)
@@ -52,4 +52,3 @@ class EvaluationCompareRead(BaseModel):
     left: EvaluationRunRead
     right: EvaluationRunRead
     metric_delta: dict[str, float]
-

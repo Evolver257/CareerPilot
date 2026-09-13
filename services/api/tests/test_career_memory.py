@@ -64,7 +64,7 @@ async def test_memory_rejects_sensitive_values(client) -> None:
     assert (await client.get("/api/career-memory/items")).json()["total"] == 0
 
 
-async def test_advisor_creates_confirmable_memory_candidate(client) -> None:
+async def test_advisor_auto_saves_source_grounded_memory(client) -> None:
     await client.patch("/api/career-memory/settings", json={"enabled": True})
     created = await client.post("/api/career-advisor/sessions", json={})
     session_id = created.json()["id"]
@@ -76,15 +76,13 @@ async def test_advisor_creates_confirmable_memory_candidate(client) -> None:
 
     candidates = await client.get("/api/career-memory/candidates")
     assert candidates.status_code == 200
-    assert candidates.json()["total"] == 1
-    candidate = candidates.json()["items"][0]
-    assert candidate["memory_type"] == "CAREER_GOAL"
-
-    accepted = await client.post(
-        f"/api/career-memory/candidates/{candidate['id']}/accept"
+    assert candidates.json()["total"] == 0
+    memories = await client.get("/api/career-memory/items")
+    saved = next(
+        item for item in memories.json()["items"] if item["memory_type"] == "CAREER_GOAL"
     )
-    assert accepted.status_code == 200
-    assert accepted.json()["user_confirmed"] is True
+    assert saved["user_confirmed"] is True
+    assert saved["provenance"]["source"] == "agent_managed"
 
 
 async def test_memory_retrieval_is_user_isolated_and_pause_is_effective() -> None:
@@ -117,7 +115,7 @@ async def test_memory_retrieval_is_user_isolated_and_pause_is_effective() -> Non
     await engine.dispose()
 
 
-async def test_memory_auto_save_is_limited_and_conflicts_still_require_confirmation(
+async def test_memory_auto_save_versions_conflicting_attributes_without_confirmation(
     client,
 ) -> None:
     await client.patch(
@@ -132,19 +130,30 @@ async def test_memory_auto_save_is_limited_and_conflicts_still_require_confirmat
     )
     memories = await client.get("/api/career-memory/items")
     assert memories.json()["total"] == 1
-    assert memories.json()["items"][0]["user_confirmed"] is False
+    assert memories.json()["items"][0]["user_confirmed"] is True
 
     await client.post(
         f"/api/career-advisor/sessions/{session_id}/messages",
         json={"content": "我做过社区志愿服务。"},
     )
     candidates = await client.get("/api/career-memory/candidates")
-    assert candidates.json()["total"] == 1
-    assert "冲突" in candidates.json()["items"][0]["reason"]
+    assert candidates.json()["total"] == 0
+    memories = await client.get("/api/career-memory/items")
+    skill_rows = [
+        item for item in memories.json()["items"] if item["memory_type"] == "SKILL_BACKGROUND"
+    ]
+    assert {item["status"] for item in skill_rows} == {"ACTIVE", "SUPERSEDED"}
+    current = next(item for item in skill_rows if item["status"] == "ACTIVE")
+    assert current["content"] == "我做过社区志愿服务"
 
     await client.post(
         f"/api/career-advisor/sessions/{session_id}/messages",
         json={"content": "我的职业目标是成为产品经理。"},
     )
     candidates = await client.get("/api/career-memory/candidates")
-    assert candidates.json()["total"] == 2
+    assert candidates.json()["total"] == 0
+    memories = await client.get("/api/career-memory/items")
+    assert any(
+        item["memory_type"] == "CAREER_GOAL" and item["status"] == "ACTIVE"
+        for item in memories.json()["items"]
+    )

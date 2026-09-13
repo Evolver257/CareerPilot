@@ -147,6 +147,8 @@ async function captureBossVisible(request: BossCaptureRequest): Promise<BossCapt
     const diagnostics = describeBossJobSurface();
     const error = pageState === "UNKNOWN_STATE"
       ? `BOSS 搜索结果仍在加载，或当前页面不是职位结果页。${diagnostics}`
+      : pageState === "TAB_HIDDEN"
+        ? `BOSS 搜索标签在职位卡片加载完成前进入了后台，任务已暂停。点击“继续采集”会重新打开该标签。${diagnostics}`
       : `BOSS 页面状态为 ${pageState}，需要人工处理。${diagnostics}`;
     return { type: "BOSS_CAPTURE_RESULT", success: false, page_url: window.location.href, jobs: [], page_state: pageState, error };
   }
@@ -199,7 +201,10 @@ async function captureBossVisible(request: BossCaptureRequest): Promise<BossCapt
   }
   const finalPageState = detectBossPageState();
   if (finalPageState !== "READY") {
-    return { type: "BOSS_CAPTURE_RESULT", success: false, page_url: window.location.href, jobs, page_state: finalPageState, error: `采集过程中 BOSS 页面状态变为 ${finalPageState}，需要人工处理。${describeBossJobSurface()}` };
+    const error = finalPageState === "TAB_HIDDEN"
+      ? `BOSS 搜索标签在下一批职位加载完成前进入了后台，已保留当前采集结果；点击“继续采集”即可恢复。${describeBossJobSurface()}`
+      : `采集过程中 BOSS 页面状态变为 ${finalPageState}，需要人工处理。${describeBossJobSurface()}`;
+    return { type: "BOSS_CAPTURE_RESULT", success: false, page_url: window.location.href, jobs, page_state: finalPageState, error };
   }
   if (jobs.length === 0) {
     const diagnostics = describeBossJobSurface();

@@ -105,3 +105,32 @@ async def test_agent_uses_safe_fallback_only_when_decision_is_unavailable() -> N
     assert calls == ["search", "market"]
     assert result.executed_tools == ("search", "market")
     assert result.stop_reason == "fallback_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_agent_completes_required_capability_before_answering() -> None:
+    calls: list[str] = []
+
+    async def execute(tool_name: str, _arguments: dict) -> None:
+        calls.append(tool_name)
+
+    async def decide(*_args) -> ReActDecision:
+        return ReActDecision(action="answer", decision_summary="尝试提前回答")
+
+    result = await CareerAdvisorReActWorkflow(
+        available_tools=["search_job_knowledge", "explain_skill_demand"],
+        fallback_tools=[],
+        required_tools=[],
+        required_capabilities={
+            "market_demand_evidence": (
+                "explain_skill_demand",
+                "search_job_knowledge",
+            )
+        },
+        execute_tool=execute,
+        decide_action=decide,
+    ).run()
+
+    assert calls == ["explain_skill_demand"]
+    assert result.executed_tools == ("explain_skill_demand",)
+    assert result.stop_reason == "agent_answer"

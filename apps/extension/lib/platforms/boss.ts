@@ -17,6 +17,7 @@ export type BossPageState =
   | "PLATFORM_LIMIT"
   | "RISK_CONTROL"
   | "DOM_CHANGED"
+  | "TAB_HIDDEN"
   | "UNKNOWN_STATE";
 
 const BOSS_HOSTS = new Set(["zhipin.com", "www.zhipin.com", "m.zhipin.com"]);
@@ -97,9 +98,7 @@ const MAX_STAGNANT_SCROLLS = 8;
 const CARD_PACING_MS = 450;
 const SCROLL_SETTLE_MS = 600;
 const FOREGROUND_NEW_CARD_CHECKS = 16;
-const BACKGROUND_NEW_CARD_CHECKS = 12;
 const FOREGROUND_NEW_CARD_INTERVAL_MS = 250;
-const BACKGROUND_NEW_CARD_INTERVAL_MS = 1_000;
 const LIST_VIEWPORT_SCROLL_RATIO = 0.82;
 const MIN_CARDS_PER_LIST_SCROLL = 3;
 const LIST_BOTTOM_GAP_PX = 24;
@@ -181,7 +180,12 @@ export function detectBossPageState(): BossPageState {
   if (["请先登录", "登录后继续", "登录后查看", "登录/注册", "登录注册", "扫码登录", "手机登录", "短信登录", "立即登录", "login required", "sign in"].some((marker) => content.includes(marker))) return "LOGIN_REQUIRED";
   if (["操作频繁", "访问频繁", "platform limit"].some((marker) => content.includes(marker))) return "PLATFORM_LIMIT";
   if (["安全验证", "风险验证", "请完成验证", "拖动滑块", "人机校验", "异常访问", "账号存在风险", "风险提示", "risk control verification", "security verification"].some((marker) => content.includes(marker))) return "RISK_CONTROL";
+  // A background tab can still expose a complete, parseable job surface.
+  // Treating document.hidden as a blocker before inspecting the DOM caused
+  // fully loaded pages (hundreds of parsed cards) to pause as TAB_HIDDEN.
+  // Real login/challenge blockers remain higher priority.
   if (hasJobSurface) return "READY";
+  if (document.hidden) return "TAB_HIDDEN";
   if (["职位搜索", "职位详情", "立即沟通", "立即投递", "立即网申", "薪资"].some((marker) => pageText.includes(marker))) return "READY";
   return "UNKNOWN_STATE";
 }
@@ -444,7 +448,7 @@ async function scrollJobList(target: HTMLElement | null, cards: HTMLElement[]): 
 
   setScrollTopImmediately(target, nextTop);
   notifyListScrolled(target);
-  await wait(document.hidden ? BACKGROUND_NEW_CARD_INTERVAL_MS : SCROLL_SETTLE_MS);
+  await wait(SCROLL_SETTLE_MS);
 
   const lastCard = cards.at(-1);
   if (lastCard?.isConnected) {
@@ -452,13 +456,14 @@ async function scrollJobList(target: HTMLElement | null, cards: HTMLElement[]): 
   }
 
   // BOSS loads the next batch only when the list reaches its current bottom.
-  // Recalculate synchronously so hidden tabs do not depend on animation frames.
+  // Keep this interaction visible and deterministic so the user can observe
+  // the page state while the extension is working.
   const refreshedViewportHeight = getScrollViewportHeight(target);
   const refreshedMaxTop = Math.max(0, target.scrollHeight - refreshedViewportHeight);
   setScrollTopImmediately(target, refreshedMaxTop);
   void target.getBoundingClientRect().height;
   notifyListScrolled(target);
-  await wait(document.hidden ? BACKGROUND_NEW_CARD_INTERVAL_MS : SCROLL_SETTLE_MS);
+  await wait(SCROLL_SETTLE_MS);
 }
 
 function setScrollTopImmediately(target: HTMLElement, top: number): void {
@@ -501,11 +506,8 @@ function wait(milliseconds: number): Promise<void> {
 }
 
 async function waitForNewJobCards(knownJobIds: Set<string>): Promise<boolean> {
-  const background = document.hidden;
-  const checks = background ? BACKGROUND_NEW_CARD_CHECKS : FOREGROUND_NEW_CARD_CHECKS;
-  const interval = background ? BACKGROUND_NEW_CARD_INTERVAL_MS : FOREGROUND_NEW_CARD_INTERVAL_MS;
-  for (let check = 0; check < checks; check += 1) {
-    await wait(interval);
+  for (let check = 0; check < FOREGROUND_NEW_CARD_CHECKS; check += 1) {
+    await wait(FOREGROUND_NEW_CARD_INTERVAL_MS);
     if (detectBossPageState() !== "READY") return false;
     const hasNewCard = visibleJobCards().some((card) => {
       const job = extractCard(card);
@@ -513,18 +515,6 @@ async function waitForNewJobCards(knownJobIds: Set<string>): Promise<boolean> {
     });
     if (hasNewCard) return true;
 
-    // Hidden tabs may defer BOSS' observer callback. Reassert the real list bottom
-    // periodically without relying on requestAnimationFrame or smooth scrolling.
-    if (background && check > 0 && check % 3 === 0) {
-      const cards = visibleJobCards();
-      const target = findJobListScrollTarget(cards);
-      if (target) {
-        const viewportHeight = getScrollViewportHeight(target);
-        setScrollTopImmediately(target, Math.max(0, target.scrollHeight - viewportHeight));
-        void target.getBoundingClientRect().height;
-        notifyListScrolled(target);
-      }
-    }
   }
   return false;
 }

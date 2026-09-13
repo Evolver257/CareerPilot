@@ -13,6 +13,8 @@ from evaluation.schemas import RAGEvaluationCase
 
 def test_staged_ablation_is_bounded_and_reproducible() -> None:
     configs = staged_configs()
+    assert RAGAblationConfig().chunk_size == 160
+    assert RAGAblationConfig().chunk_overlap == 16
     assert 10 < len(configs) < 40
     assert len({item.key() for item in configs}) == len(configs)
     assert RAGAblationConfig().key() == RAGAblationConfig().key()
@@ -28,9 +30,7 @@ def test_ablation_rejects_incomparable_or_invalid_retrieval_configuration() -> N
 
 
 def test_graded_metrics_penalize_hard_negative() -> None:
-    metrics = graded_retrieval_metrics(
-        ["gold", "hard"], {"gold": 3, "hard": 0}, ["hard"], k=2
-    )
+    metrics = graded_retrieval_metrics(["gold", "hard"], {"gold": 3, "hard": 0}, ["hard"], k=2)
     assert metrics["recall"] == 1.0
     assert metrics["hard_negative_rejection_rate"] == 0.0
     assert metrics["false_evidence_rate"] == 0.5

@@ -23,13 +23,39 @@ const STATUS: Record<Task["status"], string> = {
 const inputClass = "mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 font-normal outline-none focus:border-indigo-500 disabled:opacity-60";
 const actionClass = "rounded-xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-indigo-300 disabled:opacity-50";
 
-export function ZhaopinPluginWorkflow({ onCampaignCreated }: { onCampaignCreated?: () => Promise<unknown> | void }) {
-  const [keyword, setKeyword] = useState("AI Agent RAG 实习");
-  const [city, setCity] = useState("北京");
+type ZhaopinPluginWorkflowProps = {
+  onCampaignCreated?: () => Promise<unknown> | void;
+  onJobsPersisted?: (jobIds: string[]) => Promise<unknown> | void;
+  onCollectionCompleted?: (jobIds: string[], collectionKey?: string) => Promise<unknown> | void;
+  initialKeyword?: string;
+  initialCity?: string;
+  initialMaxJobs?: number;
+  initialQuickScoreThreshold?: number;
+  initialResumeId?: string;
+  autoStart?: boolean;
+  autoStartKey?: string;
+  compact?: boolean;
+};
+
+export function ZhaopinPluginWorkflow({
+  onCampaignCreated,
+  onJobsPersisted,
+  onCollectionCompleted,
+  initialKeyword = "AI Agent RAG 实习",
+  initialCity = "北京",
+  initialMaxJobs = 20,
+  initialQuickScoreThreshold = 50,
+  initialResumeId = "",
+  autoStart = false,
+  autoStartKey = "",
+  compact = false,
+}: ZhaopinPluginWorkflowProps) {
+  const [keyword, setKeyword] = useState(initialKeyword);
+  const [city, setCity] = useState(initialCity);
   const [searchOverride, setSearchOverride] = useState("");
-  const [maxJobs, setMaxJobs] = useState(20);
-  const [threshold, setThreshold] = useState(50);
-  const [resumeId, setResumeId] = useState("");
+  const [maxJobs, setMaxJobs] = useState(Math.min(200, Math.max(1, initialMaxJobs)));
+  const [threshold, setThreshold] = useState(Math.min(100, Math.max(0, initialQuickScoreThreshold)));
+  const [resumeId, setResumeId] = useState(initialResumeId);
   const [resumes, setResumes] = useState<Resume[]>([]);
   const [task, setTask] = useState<Task | null>(null);
   const [connected, setConnected] = useState(false);
@@ -43,13 +69,45 @@ export function ZhaopinPluginWorkflow({ onCampaignCreated }: { onCampaignCreated
   const selectionRequest = useRef<string | null>(null);
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const autoStarted = useRef(false);
   const expected = useRef<string | null>(null);
   const restored = useRef(false);
-  const edited = useRef(false);
+  const edited = useRef(compact);
   const timeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const linkedJobIds = useRef(new Set<string>());
+  const completionNotified = useRef(new Set<string>());
   const busy = pending || task?.status === "RUNNING";
   const cityCode = resolveZhaopinCityCode(city);
   const searchUrl = searchOverride.trim() || (cityCode ? `https://www.zhaopin.com/sou?jl=${cityCode}&kw=${encodeURIComponent(keyword.trim())}` : "");
+
+  useEffect(() => {
+    if (!onJobsPersisted || !task?.jobs.length) return;
+    const pending = task.jobs
+      .map((job) => job.id)
+      .filter((id) => id && !linkedJobIds.current.has(id));
+    if (pending.length === 0) return;
+    pending.forEach((id) => linkedJobIds.current.add(id));
+    Promise.resolve(onJobsPersisted(pending)).catch(() => {
+      pending.forEach((id) => linkedJobIds.current.delete(id));
+    });
+  }, [onJobsPersisted, task?.jobs]);
+
+  useEffect(() => {
+    if (
+      !onCollectionCompleted
+      || !task
+      || task.status !== "COMPLETED"
+      || completionNotified.current.has(task.request_id)
+      || task.jobs.length === 0
+    ) return;
+    completionNotified.current.add(task.request_id);
+    Promise.resolve(onCollectionCompleted(
+      [...new Set(task.jobs.map((job) => job.id).filter(Boolean))],
+      task.request_id,
+    )).catch((reason) => {
+      setError(reason instanceof Error ? reason.message : "采集完成，自动续答启动失败，请重新发送问题。");
+    });
+  }, [onCollectionCompleted, task]);
 
   useEffect(() => {
     let alive = true;
@@ -119,15 +177,33 @@ export function ZhaopinPluginWorkflow({ onCampaignCreated }: { onCampaignCreated
   function start() {
     if (!keyword.trim()) { setError("请填写岗位关键词"); return; }
     if (!searchOverride.trim() && !cityCode) { setError("请输入城市名称或智联城市编码；未收录城市可粘贴智联搜索结果链接"); return; }
-    restored.current = true; setNotice("正在请求扩展启动后台采集；连接成功后可离开本页，返回即可恢复进度。");
+    restored.current = true; setNotice("正在打开可见的智联采集标签页。采集期间请保持该标签页可见；切换到其他页面后任务会自动暂停，已保存岗位会保留。");
     send("ZHAOPIN_SEARCH_REQUEST", crypto.randomUUID(), {
       search_url: searchUrl, max_jobs: maxJobs, quick_score_threshold: threshold, resume_id: resumeId || undefined,
     });
   }
+  useEffect(() => {
+    if (!autoStart || autoStarted.current || !connected || !keyword.trim() || !resumeId) return;
+    const storageKey = `careerpilot:advisor-collection:${autoStartKey || keyword}`;
+    try {
+      if (window.localStorage.getItem(storageKey)) {
+        autoStarted.current = true;
+        return;
+      }
+      window.localStorage.setItem(storageKey, "started");
+    } catch { /* Continue when session storage is unavailable. */ }
+    autoStarted.current = true;
+    start();
+    // The action is immutable for one mounted chat message.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStart, autoStartKey, connected, resumeId]);
   const jobs = [...(task?.jobs ?? [])].sort((left, right) => {
     const group = (job: CollectedJob) => job.score === undefined ? 1 : job.score_status === "INSUFFICIENT_DATA" ? 1 : job.score < threshold ? 2 : 0;
     return group(left) - group(right) || (right.score ?? -1) - (left.score ?? -1);
   });
+  const displayedJobs = compact
+    ? jobs.filter((job) => job.score !== undefined && job.score_status !== "INSUFFICIENT_DATA" && job.score >= threshold)
+    : jobs;
   const selected = (job: CollectedJob) => choices[job.id] ?? (job.score !== undefined && (job.score_status === "INSUFFICIENT_DATA" || job.score >= threshold));
   const count = jobs.filter(selected).length;
   const selectionSignature = JSON.stringify([task?.request_id, resumeId, jobs.filter(selected).map((job) => job.id).sort()]);
@@ -172,14 +248,14 @@ export function ZhaopinPluginWorkflow({ onCampaignCreated }: { onCampaignCreated
   return <section className="panel overflow-hidden border-indigo-200">
     <div className="flex flex-wrap items-start justify-between gap-4">
       <div>
-        <p className="eyebrow">ZHAOPIN Extension Workflow</p>
-        <h2 className="mt-2 text-xl font-semibold">按要求采集并保存完整岗位</h2>
-        <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">扩展会在后台新建智联招聘标签页，自动翻页并逐个读取完整 JD、学历、经验、薪资和公司信息。每取得一个岗位就立即持久化并快速评分；登录、验证码、风控或平台限制会暂停等待人工处理。</p>
+        <p className="eyebrow">{compact ? "Agent Tool · 联网岗位检索" : "ZHAOPIN Extension Workflow"}</p>
+        <h2 className="mt-2 text-xl font-semibold">{compact ? `正在搜索：${keyword}` : "按要求采集并保存完整岗位"}</h2>
+        <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">扩展会打开可见的智联招聘标签页，自动翻页并逐个读取完整 JD、学历、经验、薪资和公司信息。采集期间请保持相关标签页可见；切换到其他页面会自动暂停。登录、验证码、风控或平台限制也会暂停等待人工处理。</p>
       </div>
       <span className={`rounded-full px-3 py-1 text-xs font-semibold ${connected ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{connected ? "插件已连接" : "等待新版扩展连接"}</span>
     </div>
 
-    <fieldset className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(180px,1fr)_140px_160px]" disabled={busy} onChange={() => { edited.current = true; }}>
+    {!compact && <fieldset className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(180px,1fr)_140px_160px]" disabled={busy} onChange={() => { edited.current = true; }}>
       <label className="text-sm font-medium text-slate-700">岗位要求
         <input className={inputClass} maxLength={200} placeholder="例如：AI Agent、RAG、Python 实习" value={keyword} onChange={(e) => { setKeyword(e.target.value); setSearchOverride(""); }} />
       </label>
@@ -193,24 +269,24 @@ export function ZhaopinPluginWorkflow({ onCampaignCreated }: { onCampaignCreated
       <label className="text-sm font-medium text-slate-700">快速评分阈值
         <input className={inputClass} type="number" min={0} max={100} value={threshold} onChange={(e) => setThreshold(Math.min(100, Math.max(0, Number(e.target.value) || 0)))} />
       </label>
-    </fieldset>
-    <details className="mt-4 text-sm text-slate-600">
+    </fieldset>}
+    {!compact && <details className="mt-4 text-sm text-slate-600">
       <summary className="cursor-pointer">使用智联上已筛选好的搜索链接</summary>
       <label className="mt-3 block">搜索结果页链接
         <input className={inputClass} disabled={busy} placeholder="https://www.zhaopin.com/sou/…" value={searchOverride} onChange={(e) => { edited.current = true; setSearchOverride(e.target.value); }} />
       </label>
       <p className="mt-2 text-xs text-slate-500">填写后优先使用此链接，保留智联网站上选择的城市、学历、经验等条件；也可直接输入城市名称或智联城市编码。</p>
-    </details>
+    </details>}
     {searchOverride && <p className="mt-2 text-sm text-indigo-700">已启用自定义搜索链接；修改关键词或城市可返回普通搜索。</p>}
     {!searchOverride && city.trim() && !cityCode && <p id="zhaopin-city-help" className="mt-2 text-sm text-amber-700">暂未识别“{city}”的智联编码，请改输入城市名/编码，或粘贴已筛选的智联搜索链接。</p>}
 
-    <div className="mt-5 max-w-xl">
+    {!compact && <div className="mt-5 max-w-xl">
       <label className="text-sm font-medium text-slate-700">用于快速评分的简历
         <select className={inputClass} disabled={busy} value={resumeId} onChange={(e) => { edited.current = true; setResumeId(e.target.value); }}>
           <option value="">仅采集，暂不评分</option>{resumes.map((resume) => <option value={resume.id} key={resume.id}>{resume.name}{resume.is_default ? " · 默认" : ""}</option>)}
         </select>
       </label>
-    </div>
+    </div>}
 
     <div className="mt-5 flex flex-wrap items-center gap-3">
       <button className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50" type="button" disabled={busy || !connected || task?.status === "WAITING_FOR_USER" || task?.status === "INTERRUPTED"} onClick={start}>{busy ? "插件采集中…" : resumable ? "放弃续采并重新检索" : jobs.length > 0 ? "重新检索智联" : "调动插件搜索智联"}</button>
@@ -221,6 +297,7 @@ export function ZhaopinPluginWorkflow({ onCampaignCreated }: { onCampaignCreated
     </div>
 
     {!connected && <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-800">请在浏览器扩展管理页重新加载 CareerPilot 扩展并刷新此页面。新版支持智联完整详情、自动翻页和断点继续。</p>}
+    {compact && resumes.length === 0 && <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-200">联网采集需要一份简历用于快速评分。请先到简历管理上传简历，再返回本消息启动采集。</p>}
     {notice && <p className="mt-4 rounded-xl bg-indigo-50 p-4 text-sm leading-6 text-indigo-700">{notice}</p>}
     {error && <p role="alert" className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm leading-6 text-rose-800">{error}</p>}
 
@@ -233,9 +310,10 @@ export function ZhaopinPluginWorkflow({ onCampaignCreated }: { onCampaignCreated
         {task.status === "WAITING_FOR_USER" && <p className="mt-2 text-sm text-slate-600">请在扩展已打开的智联采集标签页处理提示，再点击“继续采集”。已完成岗位会保留。</p>}
         {task.end_reason && <p className="mt-2 text-sm text-slate-500">{task.end_reason}</p>}
       </div>
-      <div className="flex flex-wrap items-end justify-between gap-3"><div><p className="eyebrow">Imported Jobs</p><h3 className="mt-2 font-semibold">确认本次采集岗位</h3></div><span className="text-sm text-slate-500">已选 {count}/{jobs.length} · 低于阈值 {low} 个</span></div>
+      <div className="flex flex-wrap items-end justify-between gap-3"><div><p className="eyebrow">Imported Jobs</p><h3 className="mt-2 font-semibold">{compact ? "达到阈值的高匹配岗位" : "确认本次采集岗位"}</h3></div><span className="text-sm text-slate-500">{compact ? `高分 ${displayedJobs.length} · 已采集 ${jobs.length}` : `已选 ${count}/${jobs.length} · 低于阈值 ${low} 个`}</span></div>
+      {compact && displayedJobs.length === 0 && <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-500 dark:bg-slate-900 dark:text-slate-400">岗位正在评分，或暂时没有达到 {threshold} 分的岗位。低分岗位不会在聊天推荐卡片中展示。</p>}
       <div className="divide-y divide-slate-100 rounded-2xl border border-slate-200">
-        {jobs.map((job) => {
+        {displayedJobs.map((job) => {
           const insufficient = job.score_status === "INSUFFICIENT_DATA";
           const lowScore = job.score !== undefined && !insufficient && job.score < threshold;
           return <label className={`flex cursor-pointer items-start gap-4 p-4 ${lowScore ? "cp-low-match-surface" : ""}`} key={job.id}>

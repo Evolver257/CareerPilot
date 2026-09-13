@@ -356,10 +356,17 @@ async def load_chunks(snapshot: dict) -> list[dict]:
         # Keep ORM objects usable after the session closes; only these fields are consumed.
         detached = []
         for chunk in chunks:
+            embedding_context = str(
+                (chunk.chunk_metadata or {}).get("embedding_context") or ""
+            ).strip()
             detached.append(
                 {
                     "job_id": str(chunk.job_id),
-                    "content": chunk.content,
+                    "content": (
+                        f"{embedding_context}\n{chunk.content}".strip()
+                        if embedding_context
+                        else chunk.content
+                    ),
                     "content_hash": chunk.content_hash,
                     "section_type": chunk.section_type,
                 }

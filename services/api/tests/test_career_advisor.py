@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from unittest.mock import AsyncMock
 
@@ -9,21 +11,29 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core.config import Settings
 from app.llm.provider import LLMProviderError, MockLLMProvider
 from app.models.base import Base
 from app.models.entities import BrowserTask, Job, JobSkill, Resume, ResumeChunk
 from app.schemas.career_advisor import (
     CareerAdvisorAgentDecision,
     CareerAdvisorCancelApplicationRequest,
+    CareerAdvisorCollectionCompletedRequest,
     CareerAdvisorConfirmApplicationRequest,
+    CareerAdvisorLLMOutput,
     CareerAdvisorMessageCreate,
+    CareerAdvisorOnlineSearchQuery,
     CareerAdvisorPrepareApplicationRequest,
     CareerAdvisorSessionCreate,
+    CareerAdvisorSessionJobsBindRequest,
     CareerAdvisorToolPlan,
 )
+from app.schemas.career_advisor_tools import CollectJobsOnlineToolOutput
 from app.schemas.knowledge import KnowledgeIndexRunCreate
 from app.schemas.knowledge_search import JobKnowledgeFilters
+from app.schemas.memory import MemoryCreate
 from app.schemas.tool_protocol import (
+    AgentMessage,
     AgentToolCall,
     AgentToolResult,
     NativeToolResponse,
@@ -37,6 +47,7 @@ from app.services.career_advisor import (
     CareerAdvisorToolService,
     classify_career_intent,
     clear_career_planner_cache,
+    _minimum_fresh_job_samples,
 )
 from app.services.knowledge_indexing import KnowledgeIndexService
 
@@ -86,6 +97,36 @@ class FlakyStructuredProvider(MockLLMProvider):
             advice_markdown="优先完成一个可演示的 Agent 项目。",
             next_actions=["实现 RAG 检索", "补充自动化测试"],
         )
+
+
+def test_prompt_data_preserves_resume_context_without_job_search() -> None:
+    prompt_data = json.loads(
+        CareerAdvisorService._prompt_data(
+            {
+                "resume_context": {
+                    "available": True,
+                    "resume_id": "resume-1",
+                    "resume_name": "测试简历",
+                    "target_roles": ["后端开发"],
+                    "skills": ["Python", "RAG"],
+                    "education": [{"degree": "本科", "field": "计算机"}],
+                    "experience_roles": ["实习生"],
+                    "projects": [{"name": "CareerPilot", "technologies": ["FastAPI"]}],
+                },
+                "react_runtime": {
+                    "decision_summary": "已完成简历差距分析",
+                },
+            }
+        )
+    )
+
+    assert prompt_data["resume_analysis"]["resume_name"] == "测试简历"
+    assert prompt_data["resume_analysis"]["profile"]["skills"] == ["Python", "RAG"]
+    assert prompt_data["runtime_decision"]["decision_summary"] == "已完成简历差距分析"
+    assert CareerAdvisorService._resume_claim_conflicts(
+        "我还没看到你的简历，请把简历贴过来。",
+        {"resume_context": {"available": True}},
+    )
 
 
 @pytest.mark.asyncio
@@ -198,6 +239,214 @@ async def test_conversational_agent_can_override_planner_suggestion(advisor_sess
 
 
 @pytest.mark.asyncio
+async def test_llm_plan_is_not_rewritten_by_keyword_routes(advisor_session) -> None:
+    clear_career_planner_cache()
+
+    class AutonomousPlannerProvider(MockLLMProvider):
+        provider_name = "anthropic"
+
+        async def generate_structured(self, prompt, schema, **kwargs):
+            del prompt, kwargs
+            if schema is CareerAdvisorToolPlan:
+                return schema(
+                    intent="resume_gap",
+                    normalized_question="概括当前简历的工程特点",
+                    rewritten_query="简历工程特点",
+                    needs_knowledge=False,
+                    tool_names=[],
+                    confidence=0.97,
+                    deep_dive=False,
+                    needs_memory=False,
+                )
+            return await super().generate_structured("", schema)
+
+    service = CareerAdvisorService(advisor_session, AutonomousPlannerProvider())
+    user = await service._default_user()
+    resume = Resume(
+        user_id=user.id,
+        name="后端简历",
+        raw_text="Python FastAPI 项目经验",
+        structured_profile={"skills": ["Python", "FastAPI"]},
+    )
+    advisor_session.add(resume)
+    await advisor_session.commit()
+    conversation = await service.create_session(CareerAdvisorSessionCreate(resume_id=resume.id))
+
+    intent = await service._plan_intent(
+        "请概括我的简历，不需要查岗位库",
+        conversation,
+        resume_context={"available": True, "skills": ["Python", "FastAPI"]},
+    )
+
+    assert intent.planner_source == "llm"
+    assert intent.tools == ()
+    assert intent.deep_dive is False
+    assert intent.needs_memory is False
+    assert intent.memory_types == ()
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_llm_plan_reaches_react_instead_of_keyword_fallback(
+    advisor_session,
+) -> None:
+    clear_career_planner_cache()
+
+    class UncertainPlannerProvider(MockLLMProvider):
+        provider_name = "anthropic"
+
+        async def generate_structured(self, prompt, schema, **kwargs):
+            del prompt, kwargs
+            if schema is CareerAdvisorToolPlan:
+                return schema(
+                    intent="skill_analysis",
+                    normalized_question="澄清用户所说的工程能力",
+                    rewritten_query="工程能力",
+                    needs_knowledge=True,
+                    tool_names=[],
+                    confidence=0.42,
+                    decision_summary="方向有歧义，交给对话运行时继续判断",
+                )
+            return await super().generate_structured("", schema)
+
+    service = CareerAdvisorService(advisor_session, UncertainPlannerProvider())
+    conversation = await service.create_session(CareerAdvisorSessionCreate())
+    intent = await service._plan_intent(
+        "这个方向需要什么工程能力？",
+        conversation,
+        resume_context={"available": False},
+    )
+
+    assert intent.planner_source == "llm"
+    assert intent.planner_confidence == 0.42
+    assert intent.tools == ()
+
+
+@pytest.mark.asyncio
+async def test_collected_jobs_are_bound_and_loaded_as_conversation_context(
+    advisor_session,
+) -> None:
+    clear_career_planner_cache()
+    job = await _index_job(advisor_session)
+
+    class ConversationJobProvider(MockLLMProvider):
+        provider_name = "anthropic"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.prompts: list[str] = []
+
+        async def generate_structured(self, prompt, schema, **kwargs):
+            del kwargs
+            self.prompts.append(prompt)
+            if schema is CareerAdvisorToolPlan:
+                return schema(
+                    intent="job_recommendation",
+                    normalized_question="解释刚采集岗位的要求",
+                    rewritten_query=job.title,
+                    needs_knowledge=False,
+                    tool_names=[],
+                    confidence=0.98,
+                )
+            if schema is CareerAdvisorAgentDecision:
+                return schema(
+                    action="answer",
+                    decision_summary="对话已绑定岗位包含足够的 JD 信息",
+                )
+            if schema is CareerAdvisorLLMOutput:
+                return schema(advice_markdown="该岗位要求可直接根据已采集 JD 解释。")
+            return await super().generate_structured(prompt, schema)
+
+    provider = ConversationJobProvider()
+    service = CareerAdvisorService(advisor_session, provider, embedding_provider=provider)
+    conversation = await service.create_session(CareerAdvisorSessionCreate())
+    source = await service.send_message(
+        conversation.id,
+        CareerAdvisorMessageCreate(content="你好"),
+    )
+    bound = await service.bind_session_jobs(
+        conversation.id,
+        CareerAdvisorSessionJobsBindRequest(
+            message_id=source.id,
+            job_ids=[job.id, job.id],
+            context={"query": "AI Agent 实习", "platform": "boss"},
+        ),
+    )
+    assert bound.linked_count == 1
+    assert bound.total_count == 1
+
+    answer = await service.send_message(
+        conversation.id,
+        CareerAdvisorMessageCreate(content="刚才采集的这个岗位具体要求什么？"),
+    )
+
+    assert answer.status == "COMPLETED"
+    planner_prompt = next(
+        prompt
+        for prompt in provider.prompts
+        if "TOOL_CATALOG=" in prompt and "conversation_jobs" in prompt and job.title in prompt
+    )
+    react_prompt = next(
+        prompt
+        for prompt in provider.prompts
+        if "available_tools" in prompt and "conversation_jobs" in prompt and job.title in prompt
+    )
+    answer_prompt = next(
+        prompt
+        for prompt in provider.prompts
+        if "DATA/EVIDENCE_START" in prompt and "conversation_jobs" in prompt and job.title in prompt
+    )
+    for prompt in (planner_prompt, react_prompt, answer_prompt):
+        assert job.title in prompt
+        assert "conversation_jobs" in prompt
+    context = await service._conversation_job_context(
+        conversation.id,
+        job.title,
+    )
+    assert context[0]["job_id"] == str(job.id)
+    assert context[0]["jd_excerpt"]
+
+
+@pytest.mark.asyncio
+async def test_react_can_answer_without_forced_skill_evidence_tool(advisor_session) -> None:
+    clear_career_planner_cache()
+
+    class AutonomousReActProvider(MockLLMProvider):
+        provider_name = "anthropic"
+
+        async def generate_structured(self, prompt, schema, **kwargs):
+            del kwargs
+            if schema is CareerAdvisorToolPlan:
+                return schema(
+                    intent="skill_analysis",
+                    normalized_question="解释 Python 装饰器概念",
+                    rewritten_query="Python 装饰器",
+                    needs_knowledge=True,
+                    tool_names=["explain_skill_demand"],
+                    confidence=0.98,
+                )
+            if schema is CareerAdvisorAgentDecision:
+                return schema(
+                    action="answer",
+                    decision_summary="这是通用概念解释，现有知识足够",
+                )
+            if schema is CareerAdvisorLLMOutput:
+                return schema(advice_markdown="装饰器用于在不改动函数主体时扩展行为。")
+            return await super().generate_structured(prompt, schema)
+
+    service = CareerAdvisorService(advisor_session, AutonomousReActProvider())
+    conversation = await service.create_session(CareerAdvisorSessionCreate())
+    answer = await service.send_message(
+        conversation.id,
+        CareerAdvisorMessageCreate(content="简单解释一下 Python 装饰器，不用查岗位数据"),
+    )
+
+    executed = [item["tool"] for item in answer.tool_trace if "governance" in item]
+    assert executed == []
+    assert answer.answer_metadata["suggested_tools"] == ["explain_skill_demand"]
+    assert answer.answer_metadata["routing_mode"] == "model_driven"
+
+
+@pytest.mark.asyncio
 async def test_career_advisor_prefers_native_tool_calling_and_records_protocol(
     advisor_session,
 ) -> None:
@@ -212,6 +461,8 @@ async def test_career_advisor_prefers_native_tool_calling_and_records_protocol(
         def __init__(self):
             super().__init__()
             self.decisions = 0
+            self.native_histories: list[list[AgentMessage]] = []
+            self.native_definitions: list[list[ToolDefinition]] = []
 
         async def generate_structured(self, prompt, schema, **kwargs):
             if schema is CareerAdvisorToolPlan:
@@ -228,6 +479,8 @@ async def test_career_advisor_prefers_native_tool_calling_and_records_protocol(
         async def decide_with_tools(self, prompt, tools, **kwargs):
             self.decisions += 1
             assert all(item.name in CAREER_ADVISOR_TOOL_MANIFESTS for item in tools)
+            self.native_histories.append(list(kwargs.get("messages") or []))
+            self.native_definitions.append(tools)
             if self.decisions == 1:
                 return NativeToolResponse(
                     provider="openai",
@@ -265,6 +518,85 @@ async def test_career_advisor_prefers_native_tool_calling_and_records_protocol(
     assert decisions[0]["output"]["protocol"] == "openai_chat_completions_tools"
     assert decisions[0]["output"]["tool_calls"][0]["call_id"] == "call-1"
     assert not any(item["tool"] == "react_decision" for item in answer.tool_trace)
+    search_definition = next(
+        item
+        for item in provider.native_definitions[0]
+        if item.name == "search_job_knowledge"
+    )
+    assert search_definition.input_schema["required"] == ["query"]
+    assert search_definition.output_schema["required"] == [
+        "sample_count",
+        "citation_count",
+    ]
+    assert len(provider.native_histories[0]) == 1
+    second_history = provider.native_histories[1]
+    assert [item.role for item in second_history] == ["user", "assistant", "tool"]
+    assert second_history[-1].tool_result is not None
+    assert second_history[-1].tool_result.call_id == "call-1"
+    assert second_history[-1].tool_result.status == ToolCallStatus.SUCCESS
+    workflow_trace = next(
+        item for item in answer.tool_trace if item["tool"] == "llamaindex_react_workflow"
+    )
+    assert workflow_trace["output"]["stop_reason"] == "agent_answer"
+
+
+@pytest.mark.asyncio
+async def test_native_tool_protocol_failure_falls_back_to_structured_decision(
+    advisor_session,
+) -> None:
+    clear_career_planner_cache()
+    await _index_job(advisor_session)
+
+    class NativeFailureProvider(MockLLMProvider):
+        provider_name = "openai"
+        supports_native_tools = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.native_attempts = 0
+
+        async def decide_with_tools(self, prompt, tools, **kwargs):
+            del prompt, tools, kwargs
+            self.native_attempts += 1
+            raise LLMProviderError("native tools unavailable", retryable=True)
+
+        async def generate_structured(self, prompt, schema, **kwargs):
+            del kwargs
+            if schema is CareerAdvisorToolPlan:
+                return schema(
+                    intent="market_research",
+                    normalized_question="RAG 岗位需求",
+                    rewritten_query="RAG 岗位需求",
+                    needs_knowledge=True,
+                    tool_names=["search_job_knowledge"],
+                    confidence=0.95,
+                )
+            if schema is CareerAdvisorAgentDecision:
+                if '"executed_tools": []' in prompt:
+                    return schema(
+                        action="tool",
+                        tool_name="search_job_knowledge",
+                        query="RAG 岗位需求",
+                        decision_summary="使用结构化降级检索证据",
+                    )
+                return schema(action="answer", decision_summary="证据已经足够")
+            return schema(advice_markdown="RAG 岗位需要检索与工程能力。")
+
+    provider = NativeFailureProvider()
+    service = CareerAdvisorService(advisor_session, provider, embedding_provider=provider)
+    conversation = await service.create_session(CareerAdvisorSessionCreate())
+    answer = await service.send_message(
+        conversation.id,
+        CareerAdvisorMessageCreate(content="RAG 岗位市场需要什么能力？"),
+    )
+
+    assert answer.status == "COMPLETED"
+    assert provider.native_attempts == 1
+    native_trace = next(
+        item for item in answer.tool_trace if item["tool"] == "react_native_decision"
+    )
+    assert native_trace["output"]["fallback"] == "structured_json"
+    assert any(item["tool"] == "react_decision" for item in answer.tool_trace)
 
 
 @pytest.mark.asyncio
@@ -520,6 +852,113 @@ def test_career_advisor_intent_classifier() -> None:
     assert classify_career_intent("我想学Agent") == "learning_roadmap"
 
 
+def test_job_sample_policy_distinguishes_single_job_and_market_analysis() -> None:
+    conversation_jobs = [{"job_id": "job-1", "title": "AI Agent 实习"}]
+    assert _minimum_fresh_job_samples(
+        "刚才那个岗位的任职条件是什么？",
+        "follow_up",
+        conversation_jobs,
+    ) == 1
+    assert _minimum_fresh_job_samples(
+        "分析 AI Agent 岗位的薪资和技能需求",
+        "market_research",
+        conversation_jobs,
+    ) == 5
+    assert _minimum_fresh_job_samples(
+        "有哪些适合我的岗位？",
+        "job_recommendation",
+        [],
+    ) == 3
+    assert _minimum_fresh_job_samples(
+        "机器人控制算法实习生的任职条件是什么？",
+        "skill_analysis",
+        [],
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_collection_continuation_is_idempotent_and_keeps_original_question(
+    advisor_session: AsyncSession,
+) -> None:
+    job = _job()
+    job.last_collected_at = datetime.now(UTC)
+    advisor_session.add(job)
+    await advisor_session.flush()
+    job_id = job.id
+    await advisor_session.commit()
+    service = CareerAdvisorService(advisor_session, MockLLMProvider())
+    conversation = await service.create_session(CareerAdvisorSessionCreate())
+    conversation_id = conversation.id
+    source = await service.send_message(
+        conversation_id,
+        CareerAdvisorMessageCreate(content="帮我在智联招聘网上搜 35 个上海 RAG 实习岗位"),
+    )
+    payload = CareerAdvisorCollectionCompletedRequest(
+        job_ids=[job_id],
+        collection_key="collection-1",
+    )
+
+    pending = await service.create_collection_continuation_pending(
+        conversation_id,
+        source.id,
+        payload,
+    )
+    repeated = await service.create_collection_continuation_pending(
+        conversation_id,
+        source.id,
+        payload,
+    )
+
+    assert pending.id == repeated.id
+    assert pending.status == "RUNNING"
+    assert pending.answer_metadata["collection_continuation"]["job_ids"] == [str(job_id)]
+    assert source.answer_metadata["ui_action"]["type"] == "job_collection_request"
+
+
+@pytest.mark.asyncio
+async def test_failed_collection_continuation_preserves_state_and_can_retry(
+    advisor_session: AsyncSession,
+) -> None:
+    job = _job()
+    job.last_collected_at = datetime.now(UTC)
+    advisor_session.add(job)
+    await advisor_session.flush()
+    job_id = job.id
+    await advisor_session.commit()
+    service = CareerAdvisorService(advisor_session, MockLLMProvider())
+    conversation = await service.create_session(CareerAdvisorSessionCreate())
+    conversation_id = conversation.id
+    source = await service.send_message(
+        conversation_id,
+        CareerAdvisorMessageCreate(content="帮我在智联招聘网上搜 35 个上海 RAG 实习岗位"),
+    )
+    payload = CareerAdvisorCollectionCompletedRequest(
+        job_ids=[job_id],
+        collection_key="collection-retry",
+    )
+    pending = await service.create_collection_continuation_pending(
+        conversation_id,
+        source.id,
+        payload,
+    )
+
+    service._plan_intent = AsyncMock(side_effect=RuntimeError("forced continuation failure"))
+    failed = await service.process_message(pending.id)
+
+    assert failed.status == "FAILED"
+    assert "collection_continuation" in failed.answer_metadata
+    source_after = await service.get_message(source.id)
+    assert source_after.answer_metadata["collection_continuation_status"] == "FAILED"
+
+    retry = await service.create_collection_continuation_pending(
+        source_after.session_id,
+        source_after.id,
+        payload,
+    )
+    assert retry.id != pending.id
+    assert retry.status == "RUNNING"
+
+
 @pytest.mark.asyncio
 async def test_career_advisor_persists_answer_and_citations(
     advisor_session: AsyncSession,
@@ -567,6 +1006,41 @@ async def test_career_advisor_persists_answer_and_citations(
 
 
 @pytest.mark.asyncio
+async def test_career_memory_read_is_governed_and_persisted_in_trace(
+    advisor_session: AsyncSession,
+) -> None:
+    await _index_job(advisor_session)
+    provider = MockLLMProvider()
+    service = CareerAdvisorService(advisor_session, provider, embedding_provider=provider)
+    session = await service.create_session(CareerAdvisorSessionCreate())
+    settings = await service.memory.get_settings(session.user_id)
+    settings.enabled = True
+    await advisor_session.commit()
+    await service.memory.create(
+        MemoryCreate(
+            memory_type="CAREER_GOAL",
+            content="目标是 AI Agent 工程师",
+            memory_key="career.target_role",
+        ),
+        user_id=session.user_id,
+    )
+
+    answer = await service.send_message(
+        session.id,
+        CareerAdvisorMessageCreate(content="我想学习 AI Agent，应该怎么准备？"),
+    )
+
+    memory_trace = next(
+        item for item in answer.tool_trace if item["tool"] == "retrieve_career_memory"
+    )
+    assert memory_trace["governance"]["agent_state"] == "RETRIEVE"
+    assert memory_trace["governance"]["execution"]["execution_status"] == "SUCCESS"
+    assert "result_verification" in memory_trace["governance"]
+    assert answer.answer_metadata["tool_governance"]["verified_count"] >= 1
+    assert answer.answer_metadata["memory"]["enabled"] is True
+
+
+@pytest.mark.asyncio
 async def test_career_advisor_streams_facts_before_detailed_advice(
     advisor_session: AsyncSession,
 ) -> None:
@@ -593,6 +1067,10 @@ async def test_career_advisor_streams_facts_before_detailed_advice(
     assert "evidence_status" in event_names
     assert streamed == completed.content
     assert completed.answer_metadata["rag_mode"] == "agentic"
+    assert completed.answer_metadata["knowledge_execution_mode"] == "agentic"
+    assert completed.answer_metadata["agentic_capability_level"] == "retrieval_only"
+    assert completed.answer_metadata["retrieval_trigger"] == "learning_roadmap"
+    assert completed.answer_metadata["rag_budget"]["tool_calls_used"] >= 1
     assert completed.answer_metadata["rag_evidence_count"] >= 1
     assert "岗位技能需求拆解" in completed.content
     assert "重点技能能力要求（JD 二次检索）" in completed.content
@@ -600,6 +1078,377 @@ async def test_career_advisor_streams_facts_before_detailed_advice(
     assert "12 周（0-90 天）学习顺序" in completed.content
     assert "作品集项目标准" in completed.content
     assert len(completed.content) > 1200
+
+
+@pytest.mark.asyncio
+async def test_career_advisor_marks_direct_and_no_knowledge_boundaries(
+    advisor_session: AsyncSession,
+) -> None:
+    await _index_job(advisor_session)
+    service = CareerAdvisorService(
+        advisor_session,
+        MockLLMProvider(),
+        embedding_provider=MockLLMProvider(),
+        settings=Settings(rag_agentic_enabled=False),
+    )
+    session = await service.create_session(CareerAdvisorSessionCreate())
+    pure_search = service._rule_intent("帮我找北京 AI Agent 实习岗位", session)
+    explained_search = service._rule_intent(
+        "帮我找北京 AI Agent 实习岗位，并分析这些岗位", session
+    )
+    assert pure_search.tools == ("search_jobs",)
+    assert explained_search.tools == ("search_jobs", "search_job_knowledge")
+
+    direct = await service.send_message(
+        session.id,
+        CareerAdvisorMessageCreate(content="北京 AI Agent 岗位需要哪些技能？"),
+    )
+    assert direct.answer_metadata["knowledge_execution_mode"] == "direct"
+    assert direct.answer_metadata["agentic_capability_level"] == "retrieval_only"
+
+    general = await service.send_message(
+        session.id,
+        CareerAdvisorMessageCreate(content="你好，今天状态怎么样？"),
+    )
+    assert general.answer_metadata["knowledge_execution_mode"] == "none"
+    assert general.answer_metadata["agentic_capability_level"] == "unavailable"
+    assert "学习路线" not in general.content
+    assert "作品集" not in general.content
+    assert "##" not in general.content
+
+
+@pytest.mark.asyncio
+async def test_general_greeting_uses_adaptive_conversation_response(
+    advisor_session: AsyncSession,
+) -> None:
+    clear_career_planner_cache()
+
+    class ConversationalProvider(MockLLMProvider):
+        provider_name = "anthropic"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.answer_prompt = ""
+
+        async def generate_structured(self, prompt, schema, **kwargs):
+            del kwargs
+            if schema is CareerAdvisorToolPlan:
+                return schema(
+                    intent="general_career_chat",
+                    normalized_question="用户在打招呼",
+                    rewritten_query="你好",
+                    needs_knowledge=False,
+                    tool_names=[],
+                    confidence=0.99,
+                )
+            if schema is CareerAdvisorAgentDecision:
+                return schema(action="answer", decision_summary="普通寒暄无需工具")
+            if schema is CareerAdvisorLLMOutput:
+                self.answer_prompt = prompt
+                return schema(advice_markdown="你好！今天想聊聊哪方面的求职问题？")
+            return await super().generate_structured(prompt, schema)
+
+    provider = ConversationalProvider()
+    service = CareerAdvisorService(advisor_session, provider)
+    session = await service.create_session(CareerAdvisorSessionCreate())
+    pending = await service.create_pending_message(
+        session.id,
+        CareerAdvisorMessageCreate(content="你好"),
+    )
+    events: list[tuple[str, dict]] = []
+
+    async def capture(event_type: str, payload: dict) -> None:
+        events.append((event_type, payload))
+
+    answer = await service.process_message(pending.id, capture)
+
+    assert answer.content == "你好！今天想聊聊哪方面的求职问题？"
+    assert "寒暄或普通交流" in provider.answer_prompt
+    assert "学习路线" not in answer.content
+    assert "##" not in answer.content
+    stages = [
+        payload.get("stage")
+        for event_type, payload in events
+        if event_type == "stage_changed"
+    ]
+    assert "searching" not in stages
+    assert "analyzing" not in stages
+
+
+@pytest.mark.asyncio
+async def test_career_advisor_explicit_online_search_creates_collection_action_only(
+    advisor_session: AsyncSession,
+) -> None:
+    service = CareerAdvisorService(advisor_session, MockLLMProvider())
+    session = await service.create_session(CareerAdvisorSessionCreate())
+
+    intent = service._rule_intent("帮我在智联招聘网上搜 35 个上海 RAG 实习岗位", session)
+    assert intent.tools == ("collect_jobs_online",)
+
+    answer = await service.send_message(
+        session.id,
+        CareerAdvisorMessageCreate(content="帮我在智联招聘网上搜 35 个上海 RAG 实习岗位"),
+    )
+    action = answer.answer_metadata["ui_action"]
+    assert action["type"] == "job_collection_request"
+    assert action["result_source"] == "automated_collection"
+    assert action["platform"] == "zhaopin"
+    assert action["city"] == "上海"
+    assert action["max_jobs"] == 35
+    assert action["query"] == "RAG 实习岗位"
+    assert action["high_score_only"] is True
+    assert "jobs" not in action
+
+
+@pytest.mark.asyncio
+async def test_online_collection_auto_platform_resolves_before_output_validation(
+    advisor_session: AsyncSession,
+) -> None:
+    service = CareerAdvisorService(advisor_session, MockLLMProvider())
+
+    output = await service.tools.collect_jobs_online(
+        "Python FastAPI AI 后端实习",
+        JobKnowledgeFilters(),
+        platform="auto",
+    )
+    compact_output = service._trace_output(output)
+
+    assert output["ui_action"]["platform"] == "boss"
+    assert compact_output["platform"] == "boss"
+    assert CollectJobsOnlineToolOutput.model_validate(compact_output).platform == "boss"
+
+
+@pytest.mark.asyncio
+async def test_online_collection_explicit_platform_overrides_auto_default(
+    advisor_session: AsyncSession,
+) -> None:
+    service = CareerAdvisorService(advisor_session, MockLLMProvider())
+
+    output = await service.tools.collect_jobs_online(
+        "Java 开发实习",
+        JobKnowledgeFilters(),
+        platform="zhaopin",
+    )
+
+    assert output["ui_action"]["platform"] == "zhaopin"
+
+
+@pytest.mark.asyncio
+async def test_career_advisor_excludes_stale_jobs_from_cards_rag_and_context(
+    advisor_session: AsyncSession,
+) -> None:
+    stale_job = _job()
+    stale_job.last_collected_at = datetime.now(UTC) - timedelta(days=4)
+    advisor_session.add(stale_job)
+    await advisor_session.commit()
+    index_service = KnowledgeIndexService(advisor_session, MockLLMProvider())
+    run = await index_service.create(KnowledgeIndexRunCreate(mode="backfill", auto_start=False))
+    assert (await index_service.execute(run.id, MockLLMProvider())).status == "SUCCEEDED"
+
+    service = CareerAdvisorService(advisor_session, MockLLMProvider())
+    conversation = await service.create_session(CareerAdvisorSessionCreate())
+    source_message = await service.create_pending_message(
+        conversation.id,
+        CareerAdvisorMessageCreate(content="帮我找一些岗位"),
+    )
+    await service.bind_session_jobs(
+        conversation.id,
+        CareerAdvisorSessionJobsBindRequest(
+            message_id=source_message.id,
+            job_ids=[stale_job.id],
+        ),
+    )
+
+    cards = await service.tools.search_jobs("AI Agent RAG 实习", JobKnowledgeFilters())
+    knowledge = await service.tools.search_job_knowledge(
+        "AI Agent RAG 实习需要哪些技能",
+        JobKnowledgeFilters(),
+    )
+    context = await service._conversation_job_context(
+        conversation.id,
+        "刚才那个 AI Agent 岗位需要什么技能？",
+    )
+
+    assert cards["count"] == 0
+    assert cards["stale_excluded_count"] == 1
+    assert knowledge.sample_count == 0
+    assert knowledge.citations == []
+    assert context == []
+
+
+@pytest.mark.asyncio
+async def test_llm_selects_online_collection_and_designs_query_from_resume_context(
+    advisor_session: AsyncSession,
+) -> None:
+    clear_career_planner_cache()
+
+    class ContextAwareProvider(MockLLMProvider):
+        provider_name = "anthropic"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.prompts: list[str] = []
+            self.decisions = 0
+
+        async def generate_structured(self, prompt, schema, **kwargs):
+            del kwargs
+            self.prompts.append(prompt)
+            if schema is CareerAdvisorToolPlan:
+                return schema(
+                    intent="job_recommendation",
+                    normalized_question="结合简历在线寻找适合的后端实习岗位",
+                    rewritten_query="后端",
+                    needs_knowledge=False,
+                    tool_names=["collect_jobs_online"],
+                    confidence=0.98,
+                )
+            if schema is CareerAdvisorOnlineSearchQuery:
+                assert "FastAPI" in prompt
+                assert "CareerPilot Agent" in prompt
+                assert '"candidate_query": "后端"' in prompt
+                return schema(
+                    query="Python FastAPI AI 应用后端实习",
+                    rationale="结合目标岗位、后端技能和 Agent 项目经历细化",
+                    evidence_sources=[
+                        "user_request",
+                        "resume_target_roles",
+                        "resume_skills",
+                        "resume_projects",
+                    ],
+                )
+            if schema is CareerAdvisorAgentDecision:
+                self.decisions += 1
+                assert "FastAPI" in prompt
+                assert "CareerPilot Agent" in prompt
+                if self.decisions == 1:
+                    return schema(
+                        action="tool",
+                        tool_name="collect_jobs_online",
+                        query="后端",
+                        platform="boss",
+                        city="北京",
+                        max_jobs=30,
+                        quick_score_threshold=65,
+                        decision_summary="用户需要实时岗位，结合简历生成具体搜索方向",
+                    )
+                return schema(action="answer", decision_summary="采集工作流已创建")
+            if schema is CareerAdvisorLLMOutput:
+                return schema(
+                    advice_markdown="已根据你的 Python、FastAPI 与 Agent 项目背景发起岗位采集。",
+                    next_actions=[],
+                )
+            return await super().generate_structured(prompt, schema)
+
+    provider = ContextAwareProvider()
+    service = CareerAdvisorService(advisor_session, provider)
+    user = await service._default_user()
+    resume = Resume(
+        user_id=user.id,
+        name="AI 后端实习简历",
+        raw_text="Python FastAPI RAG Agent 项目",
+        structured_profile={
+            "target_roles": ["AI 应用后端开发实习生"],
+            "skills": ["Python", "FastAPI", "RAG", "PostgreSQL"],
+            "projects": [
+                {
+                    "name": "CareerPilot Agent",
+                    "description": "实现 Agentic RAG 和工具调用",
+                    "technologies": ["Python", "FastAPI", "LlamaIndex"],
+                }
+            ],
+        },
+    )
+    advisor_session.add(resume)
+    await advisor_session.commit()
+    session = await service.create_session(CareerAdvisorSessionCreate(resume_id=resume.id))
+
+    answer = await service.send_message(
+        session.id,
+        CareerAdvisorMessageCreate(content="结合我的情况，帮我在 BOSS 上找一些后端实习"),
+    )
+
+    action = answer.answer_metadata["ui_action"]
+    executed = [item["tool"] for item in answer.tool_trace if "governance" in item]
+    assert executed == ["collect_jobs_online"]
+    assert action["type"] == "job_collection_request"
+    assert action["platform"] == "boss"
+    assert action["max_jobs"] == 30
+    assert action["quick_score_threshold"] == 65
+    assert action["query"] == "Python FastAPI AI 应用后端实习"
+    assert action["query_strategy"] == "llm_refined_from_context"
+    assert answer.answer_metadata["planner_source"] == "llm"
+    planner_prompt = next(prompt for prompt in provider.prompts if "TOOL_CATALOG=" in prompt)
+    designer_prompt = next(prompt for prompt in provider.prompts if '"candidate_query"' in prompt)
+    assert '"resume_signals"' in planner_prompt and "FastAPI" in planner_prompt
+    assert "实现 Agentic RAG 和工具调用" not in planner_prompt
+    assert len(planner_prompt) < 5000
+    assert '"candidate_query": "后端"' in designer_prompt
+    designer_trace = next(
+        item for item in answer.tool_trace if item["tool"] == "online_search_query_designer"
+    )
+    assert designer_trace["output"]["evidence_sources"] == [
+        "user_request",
+        "resume_target_roles",
+        "resume_skills",
+        "resume_projects",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_llm_can_decline_online_collection_despite_online_search_words(
+    advisor_session: AsyncSession,
+) -> None:
+    clear_career_planner_cache()
+
+    class AdvisoryOnlyProvider(MockLLMProvider):
+        provider_name = "anthropic"
+
+        async def generate_structured(self, prompt, schema, **kwargs):
+            del prompt, kwargs
+            if schema is CareerAdvisorToolPlan:
+                return schema(
+                    intent="general_career_chat",
+                    normalized_question="解释在线后端岗位信息通常包含哪些内容",
+                    rewritten_query="在线后端岗位信息构成",
+                    needs_knowledge=False,
+                    tool_names=[],
+                    confidence=0.96,
+                    decision_summary="用户是在询问信息构成，并未要求启动实时岗位采集",
+                )
+            return await super().generate_structured("", schema)
+
+    service = CareerAdvisorService(advisor_session, AdvisoryOnlyProvider())
+    session = await service.create_session(CareerAdvisorSessionCreate())
+
+    intent = await service._plan_intent(
+        "网上后端岗位通常会展示哪些信息？先解释，不需要帮我采集",
+        session,
+        resume_context={"available": False},
+    )
+
+    assert intent.planner_source == "llm"
+    assert intent.tools == ()
+    assert intent.intent == "general_career_chat"
+
+
+@pytest.mark.asyncio
+async def test_simple_fact_lookup_uses_fast_hybrid_route_when_agentic_is_enabled(
+    advisor_session: AsyncSession,
+) -> None:
+    await _index_job(advisor_session)
+    service = CareerAdvisorService(
+        advisor_session,
+        MockLLMProvider(),
+        embedding_provider=MockLLMProvider(),
+    )
+
+    result = await service.tools.search_job_knowledge(
+        "哪些岗位需要 RAG？",
+        JobKnowledgeFilters(),
+    )
+
+    assert result.citations
+    assert service.tools._agentic_runs == []
 
 
 @pytest.mark.asyncio
@@ -798,7 +1647,7 @@ async def test_deepseek_anthropic_advice_uses_plain_markdown_output(
     assert "".join(deltas) == answer.content
     assert answer.answer_metadata["advice_source"] == "llm"
     assert answer.answer_metadata["data_sufficient"] is False
-    assert "给我一份 AI Agent 学习路线" in answer.content
+    assert "#### 2. 重点技能能力地图" not in answer.content
     assert "大模型应用开发学习路线”方向" not in answer.content
     assert "机器人控制闭环项目" in answer.content
 
@@ -873,6 +1722,14 @@ async def test_career_advisor_api_session_and_stream(client: AsyncClient) -> Non
     assert stream.status_code == 200
     assert "message_started" in stream.text
     assert "message_state" in stream.text
+    assert '"event_id"' in stream.text
+
+    recovered = await client.get(
+        f"/api/career-advisor/messages/{message.json()['id']}/stream"
+    )
+    assert recovered.status_code == 200
+    assert "message_started" in recovered.text
+    assert "message_state" in recovered.text
 
     paged = await client.get(f"/api/career-advisor/sessions/{session_id}?limit=2&offset=0")
     assert paged.status_code == 200
@@ -963,6 +1820,7 @@ async def test_career_advisor_job_card_requires_confirmation_and_is_idempotent(
     )
     action = answer.answer_metadata["ui_action"]
     assert action["type"] == "job_search_results"
+    assert action["result_source"] == "knowledge_base"
     assert action["default_selected_job_ids"] == [str(job.id)]
 
     prepared = await service.prepare_application(

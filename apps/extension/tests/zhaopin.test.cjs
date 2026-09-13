@@ -43,6 +43,12 @@ test("visible verification pauses while hidden dialogs and header login links do
   assert.equal(module.detectZhaopinPageState(), "LOGIN_REQUIRED");
   dom.window.close();
 });
+test("hidden recruitment tabs are paused instead of being scraped", () => {
+  const { module, dom } = parser(detailHtml, detailUrl("CC123"));
+  Object.defineProperty(dom.window.document, "hidden", { configurable: true, value: true });
+  assert.equal(module.detectZhaopinPageState(), "TAB_HIDDEN");
+  dom.window.close();
+});
 
 function harness(count = 20, existing) {
   let stored = existing ? structuredClone(existing) : null;
@@ -61,7 +67,7 @@ function harness(count = 20, existing) {
     browser: {
       storage: { local: { get: async () => ({ careerpilot_zhaopin_background_search: structuredClone(stored) }), set: async (value) => { stored = structuredClone(value.careerpilot_zhaopin_background_search); } } },
       tabs: {
-        create: async ({ url, active }) => { assert.equal(active, false); const tab = { id: nextTab++, url, status: "complete" }; tabs.set(tab.id, tab); return tab; },
+        create: async ({ url, active }) => { assert.equal(active, true); const tab = { id: nextTab++, url, status: "complete" }; tabs.set(tab.id, tab); return tab; },
         get: async (id) => { if (!tabs.has(id)) throw new Error("tab missing"); return tabs.get(id); },
         update: async (id, value) => { Object.assign(tabs.get(id), value); return tabs.get(id); },
         sendMessage: async (id, message) => {

@@ -5,7 +5,7 @@ export type ZhaopinVisibleJob = {
   requirements: string[]; skills: string[]; benefits: string[];
   raw_data: Record<string, unknown>;
 };
-export type ZhaopinPageState = "READY" | "CAPTCHA" | "LOGIN_REQUIRED" | "PLATFORM_LIMIT" | "RISK_CONTROL" | "DOM_CHANGED" | "UNKNOWN_STATE";
+export type ZhaopinPageState = "READY" | "CAPTCHA" | "LOGIN_REQUIRED" | "PLATFORM_LIMIT" | "RISK_CONTROL" | "DOM_CHANGED" | "TAB_HIDDEN" | "UNKNOWN_STATE";
 const HOSTS = new Set(["zhaopin.com", "www.zhaopin.com", "sou.zhaopin.com", "m.zhaopin.com"]);
 // Verified against the public /sou/ and /jobdetail/*.htm DOM on 2026-09-04.
 const CARDS = ".joblist-box__item, .job-list-item, .job-card, .job-item, .position-item, [data-job-id], [data-position-id], [data-zwid]";
@@ -59,6 +59,7 @@ function cards(): HTMLElement[] {
 }
 export function detectZhaopinPageState(): ZhaopinPageState {
   if (!isZhaopinPageUrl()) return "UNKNOWN_STATE";
+  if (document.hidden) return "TAB_HIDDEN";
   const hasJob = Boolean(document.querySelector(".summary-planes__title")) || cards().length > 0;
   const overlays = [...document.querySelectorAll("[role='dialog'], .geetest_panel, .geetest_panel_box, .captcha-container, .verify-dialog, .login-dialog, .login-modal")].filter(visible);
   const signal = overlays.map(text).join("\n") + (hasJob ? "" : document.title + "\n" + text(document.body));

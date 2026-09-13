@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -69,6 +69,7 @@ class CareerAdvisorReActWorkflow(Workflow):
         available_tools: Sequence[str],
         fallback_tools: Sequence[str],
         required_tools: Sequence[str],
+        required_capabilities: Mapping[str, Sequence[str]] | None = None,
         execute_tool: ExecuteTool,
         decide_action: DecideAction,
         max_iterations: int = 5,
@@ -77,6 +78,15 @@ class CareerAdvisorReActWorkflow(Workflow):
         self._available_tools = set(_unique_tools(available_tools))
         self._fallback_tools = _unique_tools(fallback_tools)
         self._required_tools = _unique_tools(required_tools)
+        self._required_capabilities = {
+            capability: tuple(
+                name
+                for name in _unique_tools(tool_names)
+                if name in self._available_tools
+            )
+            for capability, tool_names in (required_capabilities or {}).items()
+            if capability and _unique_tools(tool_names)
+        }
         self._execute_tool = execute_tool
         self._decide_action = decide_action
         self._max_iterations = max(1, max_iterations)
@@ -97,11 +107,26 @@ class CareerAdvisorReActWorkflow(Workflow):
         )
 
     def _fallback_action(self, executed: Sequence[str]) -> str | None:
+        missing_capabilities = self._missing_capabilities(executed)
+        capability_tools = [
+            tool_name
+            for capability, tool_names in self._required_capabilities.items()
+            if capability in missing_capabilities
+            for tool_name in tool_names
+        ]
         pending = _unique_tools(
-            [*self._required_tools, *self._fallback_tools],
+            [*self._required_tools, *capability_tools, *self._fallback_tools],
             excluding=executed,
         )
         return pending[0] if pending else None
+
+    def _missing_capabilities(self, executed: Sequence[str]) -> tuple[str, ...]:
+        executed_set = set(executed)
+        return tuple(
+            capability
+            for capability, tool_names in self._required_capabilities.items()
+            if not executed_set.intersection(tool_names)
+        )
 
     @step
     async def start(self, event: StartEvent) -> _DecisionEvent:
@@ -119,7 +144,13 @@ class CareerAdvisorReActWorkflow(Workflow):
             event.iterations,
         )
         missing_required = _unique_tools(self._required_tools, excluding=event.executed)
-        if decision is not None and decision.action == "answer" and not missing_required:
+        missing_capabilities = self._missing_capabilities(event.executed)
+        if (
+            decision is not None
+            and decision.action == "answer"
+            and not missing_required
+            and not missing_capabilities
+        ):
             return self._result(event, "agent_answer", decision.decision_summary)
 
         if (
@@ -146,7 +177,11 @@ class CareerAdvisorReActWorkflow(Workflow):
             arguments={},
             executed=list(event.executed),
             iterations=event.iterations,
-            decision_summary="使用安全兜底动作",
+            decision_summary=(
+                "补齐必需能力：" + "、".join(missing_capabilities)
+                if missing_capabilities
+                else "使用安全兜底动作"
+            ),
         )
 
     @step

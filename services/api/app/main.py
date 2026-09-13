@@ -23,6 +23,7 @@ from app.api import (
     mcp,
     memory,
     platforms,
+    rag_evaluation_v2,
     resumes,
 )
 from app.core.config import get_settings
@@ -37,6 +38,11 @@ from app.services.market_insights import (
     recover_interrupted_market_insights,
     schedule_market_insight,
     shutdown_market_insight_tasks,
+)
+from app.services.memory_embeddings import (
+    recover_interrupted_memory_embeddings,
+    schedule_memory_embedding,
+    shutdown_memory_embedding_tasks,
 )
 from app.services.ranking_runs import (
     recover_interrupted_ranking_runs,
@@ -67,12 +73,16 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     recovered_knowledge_run_ids = await recover_interrupted_knowledge_indexes()
     for run_id in recovered_knowledge_run_ids:
         schedule_knowledge_index(run_id)
+    recovered_memory_embedding_ids = await recover_interrupted_memory_embeddings()
+    for run_id in recovered_memory_embedding_ids:
+        schedule_memory_embedding(run_id)
     try:
         yield
     finally:
         await shutdown_ranking_tasks()
         await shutdown_market_insight_tasks()
         await shutdown_knowledge_index_tasks()
+        await shutdown_memory_embedding_tasks()
         await shutdown_career_advisor_tasks()
 
 
@@ -160,3 +170,4 @@ app.include_router(career_advisor.router)
 app.include_router(memory.router)
 app.include_router(mcp.router)
 app.include_router(evaluations.router)
+app.include_router(rag_evaluation_v2.router)

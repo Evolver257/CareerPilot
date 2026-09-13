@@ -1,6 +1,7 @@
 import json
 
 from app.schemas.tool_protocol import (
+    AgentMessage,
     AgentToolCall,
     AgentToolResult,
     JsonContentBlock,
@@ -14,7 +15,9 @@ from app.services.tool_protocol import (
     openai_tool_result_message,
     parse_anthropic_tool_calls,
     parse_openai_tool_calls,
+    to_anthropic_messages,
     to_anthropic_tools,
+    to_openai_messages,
     to_openai_tools,
     with_idempotency_key,
 )
@@ -96,3 +99,34 @@ def test_provider_result_messages_keep_status_content_and_errors():
     assert json.loads(openai["content"])["status"] == "FAILED"
     assert anthropic["type"] == "tool_result"
     assert anthropic["is_error"] is True
+
+
+def test_native_message_history_preserves_assistant_call_and_tool_result():
+    call = AgentToolCall(
+        call_id="call-1",
+        tool_name="search_jobs",
+        arguments={"query": "RAG"},
+    )
+    result = AgentToolResult(
+        call_id="call-1",
+        tool_name="search_jobs",
+        status=ToolCallStatus.SUCCESS,
+        content=[JsonContentBlock(data={"count": 3})],
+    )
+    history = [
+        AgentMessage(role="user", content="帮我找岗位"),
+        AgentMessage(role="assistant", tool_calls=[call]),
+        AgentMessage(role="tool", tool_result=result),
+    ]
+
+    openai = to_openai_messages(history)
+    assert [item["role"] for item in openai] == ["user", "assistant", "tool"]
+    assert openai[1]["tool_calls"][0]["function"]["name"] == "search_jobs"
+    assert openai[2]["tool_call_id"] == "call-1"
+    assert json.loads(openai[2]["content"])["content"][0]["data"]["count"] == 3
+
+    anthropic = to_anthropic_messages(history)
+    assert [item["role"] for item in anthropic] == ["user", "assistant", "user"]
+    assert anthropic[1]["content"][0]["type"] == "tool_use"
+    assert anthropic[2]["content"][0]["type"] == "tool_result"
+    assert anthropic[2]["content"][0]["tool_use_id"] == "call-1"

@@ -820,7 +820,7 @@ export type MarketInsight = {
 };
 export type MarketInsightListResponse = { items: MarketInsight[]; total: number };
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8010";
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8010";
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
@@ -1391,6 +1391,7 @@ export type JobKnowledgeFilters = {
   salary_ceiling: number | null;
   published_after: string | null;
   published_before: string | null;
+  collected_after?: string | null;
 };
 
 export type CareerAdvisorCitation = {
@@ -1430,6 +1431,7 @@ export type CareerAdvisorJobCandidate = {
   company: string | null;
   location: string | null;
   platform: string;
+  result_source?: "knowledge_base" | "automated_collection";
   salary_text: string;
   education?: string | null;
   experience?: string | null;
@@ -1444,7 +1446,7 @@ export type CareerAdvisorJobCandidate = {
 };
 
 export type CareerAdvisorUiAction = {
-  type: "job_search_results" | "application_confirmation" | "application_progress" | string;
+  type: "job_search_results" | "job_collection_request" | "application_confirmation" | "application_progress" | string;
   action_id: string;
   message_id?: string;
   campaign_id?: string;
@@ -1452,6 +1454,7 @@ export type CareerAdvisorUiAction = {
   summary?: string;
   plan_name?: string;
   resume_id?: string;
+  resume_name?: string;
   job_ids?: string[];
   jobs?: CareerAdvisorJobCandidate[];
   items?: Array<Record<string, unknown>>;
@@ -1465,6 +1468,14 @@ export type CareerAdvisorUiAction = {
   submitted_count?: number;
   manual_count?: number;
   waiting_count?: number;
+  result_source?: "knowledge_base" | "automated_collection";
+  platform?: "boss" | "zhaopin" | "auto" | string;
+  query?: string;
+  city?: string;
+  max_jobs?: number;
+  quick_score_threshold?: number;
+  auto_start?: boolean;
+  high_score_only?: boolean;
   [key: string]: unknown;
 };
 
@@ -1482,6 +1493,13 @@ export type CareerAdvisorSession = {
   message_total: number;
   message_offset: number;
   message_has_more: boolean;
+};
+
+export type CareerAdvisorSessionJobsBindResponse = {
+  session_id: string;
+  linked_count: number;
+  total_count: number;
+  job_ids: string[];
 };
 
 export type CareerAdvisorSessionListResponse = {
@@ -1511,17 +1529,40 @@ export type AgentMemoryType =
   | "CONVERSATION_SUMMARY"
   | "USER_CONFIRMED_FACT";
 
+export type AgentMemoryClass = "SEMANTIC" | "STATE" | "EPISODIC";
+export type AgentMemoryStability = "STABLE" | "TEMPORARY" | "EVENT";
+export type AgentMemoryStatus = "ACTIVE" | "SUPERSEDED" | "EXPIRED" | "DELETED";
+export type AgentMemoryExtractionMethod = "USER" | "RULE" | "LLM" | "SUMMARY" | "SYSTEM_DERIVED";
+
 export type AgentMemorySettings = {
   enabled: boolean;
   auto_save_non_sensitive: boolean;
   retention_days: number;
   allowed_types: AgentMemoryType[];
+  allow_session_summaries: boolean;
+  allow_unconfirmed_context: boolean;
+  memory_token_budget: number;
+  extraction_confidence_threshold: number;
 };
 
 export type AgentMemory = {
   id: string;
   memory_type: AgentMemoryType;
+  memory_key: string;
+  structured_value: Record<string, unknown>;
+  scope: string | null;
+  memory_class: AgentMemoryClass;
+  stability: AgentMemoryStability;
+  importance: number;
+  status: AgentMemoryStatus;
   content: string;
+  source_quote: string | null;
+  extraction_method: AgentMemoryExtractionMethod;
+  extraction_version: string;
+  supersedes_id: string | null;
+  last_verified_at: string | null;
+  pinned: boolean;
+  use_count: number;
   confidence: number;
   user_confirmed: boolean;
   sensitivity: string;
@@ -1529,6 +1570,7 @@ export type AgentMemory = {
   valid_until: string | null;
   last_used_at: string | null;
   deleted_at: string | null;
+  deleted_from_status: AgentMemoryStatus | null;
   created_at: string;
   updated_at: string;
 };
@@ -1536,12 +1578,53 @@ export type AgentMemory = {
 export type AgentMemoryCandidate = {
   id: string;
   memory_type: AgentMemoryType;
+  memory_key: string;
+  structured_value: Record<string, unknown>;
+  scope: string | null;
+  memory_class: AgentMemoryClass;
+  stability: AgentMemoryStability;
+  importance: number;
   content: string;
+  source_quote: string | null;
+  extraction_method: AgentMemoryExtractionMethod;
+  extraction_version: string;
+  requires_confirmation: boolean;
+  conflict_type: string | null;
   confidence: number;
   sensitivity: string;
   status: string;
   reason: string;
   created_at: string;
+};
+
+export type AgentMemoryEmbeddingRun = {
+  id: string;
+  mode: string;
+  status: string;
+  progress: number;
+  total: number;
+  processed: number;
+  succeeded: number;
+  failed: number;
+  current_memory_id: string | null;
+  result_payload: Record<string, unknown>;
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AgentMemoryEmbeddingHealth = {
+  embedding_model: string;
+  embedding_dimensions: number;
+  provider_available: boolean;
+  status: string;
+  total: number;
+  embedded: number;
+  pending: number;
+  failed: number;
+  latest_run: AgentMemoryEmbeddingRun | null;
 };
 
 export function getAgentMemorySettings(): Promise<AgentMemorySettings> {
@@ -1562,17 +1645,37 @@ export function getAgentMemories(options?: {
   query?: string;
   memoryType?: AgentMemoryType | "";
   includeDeleted?: boolean;
+  status?: AgentMemoryStatus | "";
+  extractionMethod?: AgentMemoryExtractionMethod | "";
+  limit?: number;
+  offset?: number;
 }): Promise<{ items: AgentMemory[]; total: number; limit: number; offset: number; has_more: boolean }> {
   const params = new URLSearchParams();
   if (options?.query) params.set("query", options.query);
   if (options?.memoryType) params.set("memory_type", options.memoryType);
   if (options?.includeDeleted) params.set("include_deleted", "true");
+  if (options?.status) params.set("status", options.status);
+  if (options?.extractionMethod) params.set("extraction_method", options.extractionMethod);
+  if (options?.limit !== undefined) params.set("limit", String(options.limit));
+  if (options?.offset !== undefined) params.set("offset", String(options.offset));
   return apiFetch(`/api/career-memory/items?${params.toString()}`);
 }
 
 export function updateAgentMemory(
   id: string,
-  payload: { content?: string; memory_type?: AgentMemoryType; user_confirmed?: boolean },
+  payload: {
+    content?: string;
+    memory_type?: AgentMemoryType;
+    user_confirmed?: boolean;
+    memory_key?: string;
+    structured_value?: Record<string, unknown>;
+    scope?: string;
+    memory_class?: AgentMemoryClass;
+    stability?: AgentMemoryStability;
+    importance?: number;
+    pinned?: boolean;
+    valid_until?: string;
+  },
 ): Promise<AgentMemory> {
   return apiFetch<AgentMemory>(`/api/career-memory/items/${encodeURIComponent(id)}`, {
     method: "PATCH",
@@ -1594,6 +1697,16 @@ export function restoreAgentMemory(id: string): Promise<AgentMemory> {
   });
 }
 
+export function markAgentMemoryOutdated(id: string): Promise<AgentMemory> {
+  return apiFetch<AgentMemory>(`/api/career-memory/items/${encodeURIComponent(id)}/outdated`, {
+    method: "POST",
+  });
+}
+
+export function getAgentMemoryHistory(id: string): Promise<AgentMemory[]> {
+  return apiFetch<AgentMemory[]>(`/api/career-memory/items/${encodeURIComponent(id)}/history`);
+}
+
 export function batchDeleteAgentMemories(ids: string[]): Promise<{ deleted: number }> {
   return apiFetch<{ deleted: number }>("/api/career-memory/batch-delete", {
     method: "POST",
@@ -1608,11 +1721,73 @@ export function clearAgentMemories(permanent = false): Promise<{ deleted: number
   });
 }
 
-export function getAgentMemoryCandidates(): Promise<{
+export function getAgentMemoryCandidates(options: { limit?: number; offset?: number } = {}): Promise<{
   items: AgentMemoryCandidate[];
   total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
 }> {
-  return apiFetch("/api/career-memory/candidates");
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.offset !== undefined) params.set("offset", String(options.offset));
+  return apiFetch(`/api/career-memory/candidates${params.toString() ? `?${params}` : ""}`);
+}
+
+export function getAgentMemoryEmbeddingRuns(): Promise<AgentMemoryEmbeddingRun[]> {
+  return apiFetch("/api/career-memory/embedding-runs");
+}
+
+export function getAgentMemoryEmbeddingHealth(): Promise<AgentMemoryEmbeddingHealth> {
+  return apiFetch<AgentMemoryEmbeddingHealth>("/api/career-memory/embedding-health");
+}
+
+export function createAgentMemoryEmbeddingRun(
+  mode: "full" | "incremental" = "incremental",
+): Promise<AgentMemoryEmbeddingRun> {
+  return apiFetch<AgentMemoryEmbeddingRun>("/api/career-memory/embedding-runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+}
+
+export function runAgentMemoryMaintenance(): Promise<AgentMemoryEmbeddingRun> {
+  return apiFetch<AgentMemoryEmbeddingRun>('/api/career-memory/maintenance-runs', {
+    method: "POST",
+  });
+}
+
+export function resolveAgentMemoryMaintenanceAction(
+  runId: string,
+  payload: {
+    action: "merge_duplicate" | "supersede_conflict";
+    source_memory_id: string;
+    target_memory_id: string;
+  },
+): Promise<AgentMemoryEmbeddingRun> {
+  return apiFetch<AgentMemoryEmbeddingRun>(
+    `/api/career-memory/maintenance-runs/${encodeURIComponent(runId)}/resolve`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function cancelAgentMemoryEmbeddingRun(id: string): Promise<AgentMemoryEmbeddingRun> {
+  return apiFetch<AgentMemoryEmbeddingRun>(
+    `/api/career-memory/embedding-runs/${encodeURIComponent(id)}/cancel`,
+    { method: "POST" },
+  );
+}
+
+export function retryAgentMemoryEmbeddingRun(id: string): Promise<AgentMemoryEmbeddingRun> {
+  return apiFetch<AgentMemoryEmbeddingRun>(
+    `/api/career-memory/embedding-runs/${encodeURIComponent(id)}/retry`,
+    { method: "POST" },
+  );
 }
 
 export function resolveAgentMemoryCandidate(id: string, accept: boolean): Promise<AgentMemory | void> {
@@ -1710,7 +1885,7 @@ export function discoverMCPTools(id: string): Promise<{
 export type EvaluationDataset = {
   id: string;
   name: string;
-  suite: "tool_calling" | "rag_retrieval" | "answer";
+  suite: "tool_calling" | "rag_retrieval" | "answer" | "memory";
   version: string;
   label_status: string;
   sha256: string;
@@ -1739,6 +1914,12 @@ export function getEvaluationDatasets(): Promise<EvaluationDataset[]> {
 
 export function importToolEvaluationSeed(): Promise<EvaluationDataset> {
   return apiFetch<EvaluationDataset>("/api/evaluations/datasets/import-tool-seed", {
+    method: "POST",
+  });
+}
+
+export function importMemoryEvaluationSeed(): Promise<EvaluationDataset> {
+  return apiFetch<EvaluationDataset>("/api/evaluations/datasets/import-memory-seed", {
     method: "POST",
   });
 }
@@ -1777,6 +1958,103 @@ export function compareEvaluationRuns(leftId: string, rightId: string): Promise<
 }> {
   const params = new URLSearchParams({ left_id: leftId, right_id: rightId });
   return apiFetch(`/api/evaluations/compare?${params.toString()}`);
+}
+
+export type RagV2Query = {
+  query_id: string;
+  query: string;
+  normalized_intent: string;
+  query_type: string;
+  target_role: string[];
+  target_skills: string[];
+  hard_constraints: Record<string, unknown>;
+  soft_preferences: Record<string, unknown>;
+  answerability: "answerable" | "unanswerable" | "uncertain";
+  source: string;
+  generator_model: string | null;
+  requires_human_review: boolean;
+  template_group: string;
+  split: "train" | "dev" | "test" | null;
+  candidate_count?: number;
+  annotated_count?: number;
+  submitted_count?: number;
+};
+
+export type RagV2Job = {
+  dataset_version: string;
+  job_id: string;
+  platform: string;
+  external_job_id: string | null;
+  title: string;
+  company: string;
+  description: string;
+  location: string;
+  city: string;
+  salary_min: number | null;
+  salary_max: number | null;
+  job_type: string;
+  education_requirement: string;
+  experience_requirement: string;
+  education_level: string;
+  experience_level: string;
+  role_direction: string;
+  source_url: string | null;
+};
+
+export type RagV2Annotation = {
+  annotation_id?: string | null;
+  dataset_version: string;
+  query_id: string;
+  job_id: string;
+  annotator_id: string;
+  relevance_grade: -1 | 0 | 1 | 2 | 3;
+  hard_constraint_violation: "yes" | "no" | "uncertain";
+  answerability_judgment?: "answerable" | "unanswerable" | "uncertain" | null;
+  matched_requirements: string[];
+  missing_requirements: string[];
+  evidence_spans: Array<{ start: number; end: number; text: string; section?: string | null }>;
+  confidence: "low" | "medium" | "high";
+  annotation_note: string;
+  status: "draft" | "submitted" | "skipped";
+  updated_at?: string;
+};
+
+export type RagV2QueryDetail = {
+  query: RagV2Query;
+  items: Array<{ job: RagV2Job; candidate_rank: number; channels: string[]; annotation: RagV2Annotation | null }>;
+  labeler_view: { model_scores: boolean };
+};
+
+export type RagV2Status = {
+  dataset_version: string;
+  label_status: string;
+  corpus_sha256: string | null;
+  source_job_count: number;
+  selected_job_count: number;
+  query_count: number;
+  candidate_pair_count: number;
+  annotation_quality: Record<string, number | boolean | null>;
+  progress: Record<string, Record<string, number | string>>;
+};
+
+export function getRagV2Status(): Promise<RagV2Status> {
+  return apiFetch<RagV2Status>("/api/evaluation-v2/status");
+}
+
+export function getRagV2Queries(annotatorId: string): Promise<RagV2Query[]> {
+  return apiFetch<RagV2Query[]>(`/api/evaluation-v2/queries?annotator_id=${encodeURIComponent(annotatorId)}`);
+}
+
+export function getRagV2Query(queryId: string, annotatorId: string): Promise<RagV2QueryDetail> {
+  return apiFetch<RagV2QueryDetail>(`/api/evaluation-v2/queries/${encodeURIComponent(queryId)}?annotator_id=${encodeURIComponent(annotatorId)}`);
+}
+
+export function saveRagV2Annotation(payload: RagV2Annotation): Promise<RagV2Annotation> {
+  return apiFetch<RagV2Annotation>("/api/evaluation-v2/annotations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
 export function getCareerAdvisorSessions(options?: { limit?: number; offset?: number }): Promise<CareerAdvisorSessionListResponse> {
@@ -1838,6 +2116,25 @@ export function sendCareerAdvisorMessage(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+}
+
+export function bindCareerAdvisorSessionJobs(
+  sessionId: string,
+  payload: {
+    message_id: string;
+    job_ids: string[];
+    source_type?: "automated_collection" | "knowledge_base";
+    context?: Record<string, unknown>;
+  },
+): Promise<CareerAdvisorSessionJobsBindResponse> {
+  return apiFetch<CareerAdvisorSessionJobsBindResponse>(
+    `/api/career-advisor/sessions/${encodeURIComponent(sessionId)}/jobs/bind`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 export function cancelCareerAdvisorMessage(messageId: string): Promise<CareerAdvisorMessage> {
@@ -1904,25 +2201,33 @@ type CareerAdvisorStreamPayload = {
   content?: string;
   resume_id?: string | null;
   filters?: JobKnowledgeFilters | null;
+  job_ids?: string[];
+  collection_key?: string;
 };
+
+export type CareerAdvisorStreamConnectionState = "connected" | "reconnecting" | "recovered" | "offline";
+type CareerAdvisorStreamConnectionCallback = (state: CareerAdvisorStreamConnectionState, attempt?: number) => void;
 
 async function streamCareerAdvisorResponse(
   url: string,
   payload: CareerAdvisorStreamPayload,
   onEvent: (eventType: string, payload: Record<string, unknown>) => void,
   signal?: AbortSignal,
+  onConnectionChange?: CareerAdvisorStreamConnectionCallback,
+  method: "GET" | "POST" = "POST",
 ): Promise<CareerAdvisorMessage> {
   let response: Response;
   try {
     response = await fetch(`${API_BASE_URL}${url}`, {
-      method: "POST",
+      method,
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify(payload),
+      body: method === "GET" ? undefined : JSON.stringify(payload),
       cache: "no-store",
       signal,
     });
   } catch (reason) {
     if (reason instanceof DOMException && reason.name === "AbortError") throw reason;
+    onConnectionChange?.("reconnecting");
     throw new Error("无法连接 API 服务，请确认后端已启动并稍后重试。");
   }
   if (!response.ok) {
@@ -1936,6 +2241,7 @@ async function streamCareerAdvisorResponse(
     throw new Error(detail);
   }
   if (!response.body) throw new Error("职业顾问暂时无法建立流式连接。");
+  onConnectionChange?.("connected");
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -1965,13 +2271,19 @@ async function streamCareerAdvisorResponse(
     else if (!line.trim()) dispatch();
   };
 
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? "";
-    lines.forEach(consumeLine);
-    if (done) break;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      lines.forEach(consumeLine);
+      if (done) break;
+    }
+  } catch (reason) {
+    if (reason instanceof DOMException && reason.name === "AbortError") throw reason;
+    onConnectionChange?.("reconnecting");
+    throw reason instanceof Error ? reason : new Error("职业顾问流式连接已中断。");
   }
   if (buffer) consumeLine(buffer);
   dispatch();
@@ -1984,12 +2296,47 @@ export function streamCareerAdvisorMessage(
   payload: { content: string; resume_id?: string | null; filters?: JobKnowledgeFilters | null },
   onEvent: (eventType: string, payload: Record<string, unknown>) => void,
   signal?: AbortSignal,
+  onConnectionChange?: CareerAdvisorStreamConnectionCallback,
 ): Promise<CareerAdvisorMessage> {
   return streamCareerAdvisorResponse(
     `/api/career-advisor/sessions/${encodeURIComponent(sessionId)}/messages/stream`,
     payload,
     onEvent,
     signal,
+    onConnectionChange,
+  );
+}
+
+export function streamCareerAdvisorRecovery(
+  messageId: string,
+  onEvent: (eventType: string, payload: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+  onConnectionChange?: CareerAdvisorStreamConnectionCallback,
+): Promise<CareerAdvisorMessage> {
+  return streamCareerAdvisorResponse(
+    `/api/career-advisor/messages/${encodeURIComponent(messageId)}/stream`,
+    {},
+    onEvent,
+    signal,
+    onConnectionChange,
+    "GET",
+  );
+}
+
+export function streamCareerAdvisorCollectionContinuation(
+  sessionId: string,
+  messageId: string,
+  payload: { job_ids: string[]; collection_key?: string },
+  onEvent: (eventType: string, payload: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+  onConnectionChange?: CareerAdvisorStreamConnectionCallback,
+): Promise<CareerAdvisorMessage> {
+  return streamCareerAdvisorResponse(
+    `/api/career-advisor/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/collection-complete/stream`,
+    payload,
+    onEvent,
+    signal,
+    onConnectionChange,
   );
 }
 
@@ -1997,12 +2344,14 @@ export function streamRegenerateCareerAdvisorMessage(
   messageId: string,
   onEvent: (eventType: string, payload: Record<string, unknown>) => void,
   signal?: AbortSignal,
+  onConnectionChange?: CareerAdvisorStreamConnectionCallback,
 ): Promise<CareerAdvisorMessage> {
   return streamCareerAdvisorResponse(
     `/api/career-advisor/messages/${encodeURIComponent(messageId)}/regenerate/stream`,
     {},
     onEvent,
     signal,
+    onConnectionChange,
   );
 }
 

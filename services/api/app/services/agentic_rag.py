@@ -36,9 +36,11 @@ from app.schemas.knowledge_search import (
 from app.services.job_knowledge import SKILL_ALIASES, canonicalize_skill
 from app.services.job_knowledge_rag import (
     JobKnowledgeRAG,
+    KnowledgeEmbeddingIncompatibleError,
     KnowledgeEmbeddingUnavailableError,
     KnowledgeRetrievalError,
     extract_query_terms,
+    section_weights_for_query,
 )
 from app.services.rag_planning import (
     AnswerReflectionService,
@@ -55,6 +57,7 @@ _SECTION_RERANK_WEIGHTS = {
     "requirements": 1.0,
     "required_skills": 0.98,
     "responsibilities": 0.96,
+    "direction": 0.9,
     "education": 0.88,
     "experience": 0.88,
     "salary_benefits": 0.86,
@@ -132,6 +135,126 @@ def clear_agentic_rag_cache() -> None:
     _ANALYSIS_CACHE.clear()
 
 
+def _usage_total_tokens(usage: dict[str, Any] | None) -> int:
+    if not usage:
+        return 0
+    explicit = usage.get("total_tokens")
+    if isinstance(explicit, int | float):
+        return max(0, int(explicit))
+    input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0))
+    output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
+    return max(0, int(input_tokens or 0)) + max(0, int(output_tokens or 0))
+
+
+def _supports_agentic_llm(provider: LLMProvider | None) -> bool:
+    return bool(
+        provider
+        and getattr(provider, "provider_name", "mock") != "mock"
+        and getattr(provider, "supports_streaming", False)
+        and getattr(provider, "supports_agentic_rag_planning", False)
+    )
+
+
+@dataclass
+class RAGBudgetLedger:
+    """One bounded ledger shared by planning, retrieval and reflection.
+
+    Reservations are charged before execution, so failed and timed-out calls
+    cannot bypass the budget. Actual token usage is added after LLM calls.
+    """
+
+    max_tool_calls: int
+    max_search_calls: int
+    max_llm_calls: int
+    max_tokens: int
+    tool_calls_used: int = 0
+    search_calls_used: int = 0
+    llm_calls_used: int = 0
+    tokens_used: int = 0
+    calls_by_kind: dict[str, int] = field(default_factory=dict)
+    exhausted_reason: str = ""
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> RAGBudgetLedger:
+        return cls(
+            max_tool_calls=settings.rag_max_tool_calls,
+            max_search_calls=settings.rag_max_search_calls,
+            max_llm_calls=settings.rag_max_llm_calls,
+            max_tokens=settings.rag_total_token_budget,
+        )
+
+    @classmethod
+    def from_snapshot(cls, value: dict[str, Any]) -> RAGBudgetLedger:
+        return cls(
+            max_tool_calls=max(1, int(value.get("tool_calls_limit", 1) or 1)),
+            max_search_calls=max(1, int(value.get("search_calls_limit", 1) or 1)),
+            max_llm_calls=max(0, int(value.get("llm_calls_limit", 0) or 0)),
+            max_tokens=max(1, int(value.get("token_limit", 1) or 1)),
+            tool_calls_used=max(0, int(value.get("tool_calls_used", 0) or 0)),
+            search_calls_used=max(0, int(value.get("search_calls_used", 0) or 0)),
+            llm_calls_used=max(0, int(value.get("llm_calls_used", 0) or 0)),
+            tokens_used=max(0, int(value.get("tokens_used", 0) or 0)),
+            calls_by_kind={
+                str(key): max(0, int(count or 0))
+                for key, count in dict(value.get("calls_by_kind") or {}).items()
+            },
+            exhausted_reason=str(value.get("exhausted_reason") or ""),
+        )
+
+    def reserve(self, kind: str, *, estimated_tokens: int = 0) -> bool:
+        is_search = kind == "search"
+        is_llm = kind in {"planner", "evidence_reflection", "answer_reflection"}
+        reason = ""
+        if self.tool_calls_used >= self.max_tool_calls:
+            reason = "tool_call_budget_exhausted"
+        elif is_search and self.search_calls_used >= self.max_search_calls:
+            reason = "search_call_budget_exhausted"
+        elif is_llm and self.llm_calls_used >= self.max_llm_calls:
+            reason = "llm_call_budget_exhausted"
+        elif self.tokens_used + max(0, estimated_tokens) > self.max_tokens:
+            reason = "token_budget_exhausted"
+        if reason:
+            self.exhausted_reason = reason
+            return False
+        self.tool_calls_used += 1
+        if is_search:
+            self.search_calls_used += 1
+        if is_llm:
+            self.llm_calls_used += 1
+        self.calls_by_kind[kind] = self.calls_by_kind.get(kind, 0) + 1
+        return True
+
+    def add_usage(self, usage: dict[str, Any] | None) -> None:
+        self.tokens_used += _usage_total_tokens(usage)
+        if self.tokens_used > self.max_tokens and not self.exhausted_reason:
+            self.exhausted_reason = "token_budget_exhausted"
+
+    @property
+    def remaining_search_calls(self) -> int:
+        return max(
+            0,
+            min(
+                self.max_search_calls - self.search_calls_used,
+                self.max_tool_calls - self.tool_calls_used,
+            ),
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "tool_calls_used": self.tool_calls_used,
+            "tool_calls_limit": self.max_tool_calls,
+            "search_calls_used": self.search_calls_used,
+            "search_calls_limit": self.max_search_calls,
+            "llm_calls_used": self.llm_calls_used,
+            "llm_calls_limit": self.max_llm_calls,
+            "tokens_used": self.tokens_used,
+            "token_limit": self.max_tokens,
+            "calls_by_kind": dict(self.calls_by_kind),
+            "exhausted": bool(self.exhausted_reason),
+            "exhausted_reason": self.exhausted_reason,
+        }
+
+
 def _compact(value: str, limit: int = 500) -> str:
     return re.sub(r"\s+", " ", value or "").strip()[:limit]
 
@@ -153,7 +276,13 @@ def _overlap(left: str, right: str) -> float:
 
 
 def _merge_similar_queries(queries: Sequence[str], limit: int) -> list[str]:
-    """Collapse near-duplicate rewrites before retrieval and embedding."""
+    """Drop near-duplicate rewrites without mutating the user's original query.
+
+    Concatenating two similar rewrites creates an unnatural embedding query and
+    can drift away from an exact skill or role lookup.  The caller supplies the
+    original question first, so retaining the first representative is both
+    cheaper and safer.
+    """
 
     groups: list[tuple[str, set[str]]] = []
     for raw_query in queries:
@@ -175,8 +304,7 @@ def _merge_similar_queries(queries: Sequence[str], limit: int) -> list[str]:
             groups.append((query, terms))
             continue
         previous, group_terms = groups[match_index]
-        if query.casefold() not in previous.casefold():
-            groups[match_index] = (_compact(f"{previous}；{query}", 300), group_terms | terms)
+        groups[match_index] = (previous, group_terms | terms)
     return [query for query, _ in groups[:limit]]
 
 
@@ -372,9 +500,12 @@ class QueryRewriter:
             )
         )
         labels = " ".join(_INFORMATION_QUERY_LABELS.get(item, item) for item in needs[:3])
-        semantic = _compact(f"{topic} {labels or '岗位要求'}", 300)
+        semantic = _compact(analysis.original_query, 300)
+        normalized_query = _compact(f"{topic} {labels or '岗位要求'}", 300)
         exact = analysis.entities[:2]
         keyword_queries: list[str] = []
+        if normalized_query.casefold() != semantic.casefold():
+            keyword_queries.append(normalized_query)
         if analysis.keywords:
             keyword_queries.append(" ".join(analysis.keywords[:5]))
         sub_queries: list[str] = []
@@ -397,7 +528,13 @@ class QueryRewriter:
         query_limit = {"simple": 2, "medium": 4, "complex": 6}[analysis.complexity]
         query_limit = min(query_limit, self.settings.rag_max_queries)
         previous = {item.casefold().strip() for item in previous_queries}
-        candidates = [semantic, *exact, *keyword_queries, *sub_queries]
+        # Query expansion is additive: never replace the user's wording.  This
+        # avoids recall regressions when a normalized query loses an exact
+        # technology, role title, or uncommon phrase.
+        # Dimension-specific queries must survive the first-iteration budget.
+        # Broad keyword rewrites are useful fallbacks, but putting them first
+        # used to crowd out responsibilities/education/experience queries.
+        candidates = [semantic, *sub_queries, *exact, *keyword_queries]
         unique = list(
             dict.fromkeys(
                 item for item in candidates if item and item.casefold().strip() not in previous
@@ -452,6 +589,31 @@ class RetrievalCandidate:
     fused_score: float = 0.0
     rerank_score: float = 0.0
     matched_queries: set[str] = field(default_factory=set)
+
+
+def _select_job_diverse_candidates(
+    candidates: Sequence[RetrievalCandidate],
+    limit: int,
+    *,
+    max_per_job: int = 2,
+) -> list[RetrievalCandidate]:
+    """Preserve ranking while preventing one JD from consuming the evidence pool."""
+
+    selected: list[RetrievalCandidate] = []
+    selected_chunks: set[UUID] = set()
+    counts: dict[UUID, int] = defaultdict(int)
+    for per_job_limit in range(1, max_per_job + 1):
+        for candidate in candidates:
+            chunk_id = candidate.citation.chunk_id
+            job_id = candidate.citation.job_id
+            if chunk_id in selected_chunks or counts[job_id] >= per_job_limit:
+                continue
+            selected.append(candidate)
+            selected_chunks.add(chunk_id)
+            counts[job_id] += 1
+            if len(selected) >= limit:
+                return selected
+    return selected
 
 
 def _role_focus_score(
@@ -528,11 +690,15 @@ class HybridRetriever:
         if plan.vector_search and not fast_mode:
             try:
                 query_embeddings = await self.rag.embed_queries(list(queries))
-            except KnowledgeEmbeddingUnavailableError:
+            except KnowledgeEmbeddingUnavailableError as exc:
                 effective_plan = plan.model_copy(
                     update={"strategy": "full_text", "vector_search": False}
                 )
-                degradations.append("批量查询向量不可用，本轮已降级为全文检索")
+                degradations.append(
+                    "查询向量维度不兼容，本轮已切换为快速全文检索"
+                    if isinstance(exc, KnowledgeEmbeddingIncompatibleError)
+                    else "批量查询向量不可用，本轮已降级为全文检索"
+                )
         for query in queries:
             request = JobKnowledgeSearchRequest(
                 query=query,
@@ -552,8 +718,12 @@ class HybridRetriever:
                     request,
                     query_embedding=query_embeddings.get(query),
                 )
-            except KnowledgeEmbeddingUnavailableError:
-                degradations.append(f"{query}：向量检索不可用，已降级为全文检索")
+            except KnowledgeEmbeddingUnavailableError as exc:
+                degradations.append(
+                    f"{query}：查询向量维度不兼容，已切换为快速全文检索"
+                    if isinstance(exc, KnowledgeEmbeddingIncompatibleError)
+                    else f"{query}：向量检索不可用，已降级为全文检索"
+                )
                 response = await self.rag.search(
                     request.model_copy(update={"retrieval_mode": "full_text"})
                 )
@@ -612,10 +782,13 @@ class LocalEvidenceReranker:
     async def rerank(
         self, query: str, candidates: Sequence[RetrievalCandidate], limit: int
     ) -> list[RetrievalCandidate]:
+        query_section_weights = section_weights_for_query(query)
         for candidate in candidates:
             citation = candidate.citation
             lexical = _overlap(query, f"{citation.title} {citation.evidence}")
-            section = _SECTION_RERANK_WEIGHTS.get(citation.section_type, 0.5)
+            section = 0.55 * _SECTION_RERANK_WEIGHTS.get(
+                citation.section_type, 0.5
+            ) + 0.45 * query_section_weights.get(citation.section_type, 0.5)
             multi_query = min(1.0, len(candidate.matched_queries) / 2)
             candidate.rerank_score = min(
                 1.0,
@@ -660,10 +833,11 @@ class EvidenceExtractor:
             )
             claims = _claim_lines(citation.evidence) or [_compact(citation.evidence, 420)]
             for claim in claims[:3]:
+                claim_context = f"{citation.title} {claim}"
                 relevance = min(
                     1.0,
                     0.62 * candidate.rerank_score
-                    + 0.23 * _overlap(query, claim)
+                    + 0.23 * _overlap(query, claim_context)
                     + 0.15 * (1.0 if citation.section_type in relevant_sections else 0.45),
                 )
                 if relevance < 0.28:
@@ -942,15 +1116,60 @@ class ContextBuilder:
 class AnswerVerifier:
     """Deterministic post-check; it never invents citations or hidden reasoning."""
 
+    @staticmethod
+    def _trusted_system_metrics(result: AgenticRAGSearchResponse) -> set[str]:
+        """Return evaluator/runtime metrics, separate from JD evidence text.
+
+        These values are produced by CareerPilot itself (coverage, ranks,
+        counts, latency and budget metrics). They are valid for observability
+        panels, but are not claims extracted from a job description and must
+        not be judged by searching the JD context.
+        """
+
+        values: set[str] = set()
+
+        def add(value: Any, *, percentage: bool = False) -> None:
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                return
+            values.add(str(value))
+            values.add(f"{value:g}")
+            values.add(f"{float(value):.2f}")
+            if percentage:
+                values.add(f"{float(value) * 100:g}")
+                values.add(f"{float(value) * 100:.2f}")
+
+        evaluation = result.evidence_evaluation
+        add(evaluation.coverage_score, percentage=True)
+        add(evaluation.max_relevance_score)
+        add(result.trace.coverage_before, percentage=True)
+        add(result.trace.coverage_after, percentage=True)
+        for value in result.trace.metrics.values():
+            add(value)
+        for value in (
+            result.trace.retrieval_iterations,
+            result.trace.query_count,
+            result.trace.candidate_count,
+            result.trace.reranked_count,
+            result.trace.evidence_count,
+        ):
+            add(value)
+        for value in result.trace.latency_ms.values():
+            add(value)
+        return values
+
     def verify(self, answer: str, result: AgenticRAGSearchResponse) -> RAGVerification:
         statistics = result.search.statistics.model_dump_json()
         support = f"{result.context}\n{statistics}"
+        trusted_system_metrics = self._trusted_system_metrics(result)
         fact_part = answer.split("## AI 建议", 1)[0]
         unsupported: list[str] = []
         for line in fact_part.splitlines():
             clean = line.strip(" -*")
             numbers = re.findall(r"\d+(?:\.\d+)?", clean)
-            if numbers and any(number not in support for number in numbers):
+            if numbers and any(
+                number not in support and number not in trusted_system_metrics
+                for number in numbers
+            ):
                 unsupported.append(_compact(clean, 180))
         if unsupported:
             groundedness = "partially_supported" if result.evidence else "unsupported"
@@ -1088,9 +1307,11 @@ class AgenticRAGPipeline:
             query = (action.query or action.target_dimension or "").strip()
             if not query and action.action == "expand_query":
                 query = "岗位要求 技能 经验 学历 薪资"
-            if query and query.casefold() not in previous and query.casefold() not in {
-                item.casefold() for item in queries
-            }:
+            if (
+                query
+                and query.casefold() not in previous
+                and query.casefold() not in {item.casefold() for item in queries}
+            ):
                 queries.append(query)
         return queries[: self.settings.rag_max_queries]
 
@@ -1100,12 +1321,31 @@ class AgenticRAGPipeline:
         result: AgenticRAGSearchResponse,
         verification: RAGVerification,
     ) -> tuple[Any, dict[str, Any], str | None]:
+        budget = RAGBudgetLedger.from_snapshot(result.trace.budget)
+        uses_llm = bool(
+            result.trace.agentic_capability_level == "full"
+            and self.settings.rag_answer_reflection_enabled
+            and (verification.unsupported_claims or verification.groundedness != "supported")
+        )
+        budget_kind = "answer_reflection" if uses_llm else "answer_verification"
+        estimated_tokens = self.settings.rag_reflection_max_tokens if uses_llm else 0
+        if not budget.reserve(budget_kind, estimated_tokens=estimated_tokens):
+            result.trace.budget = budget.snapshot()
+            return (
+                RAGAnswerReflection(status="valid"),
+                {},
+                "Agentic RAG 调用预算已耗尽，已跳过回答 Reflection",
+            )
         try:
-            return await asyncio.wait_for(
+            reflected, usage, warning = await asyncio.wait_for(
                 self.answer_reflector.reflect(answer, verification, result.evidence),
                 timeout=self.settings.rag_workflow_timeout_seconds,
             )
+            budget.add_usage(usage)
+            result.trace.budget = budget.snapshot()
+            return reflected, usage, warning
         except TimeoutError:
+            result.trace.budget = budget.snapshot()
             return (
                 RAGAnswerReflection(status="insufficient"),
                 {},
@@ -1125,6 +1365,7 @@ class AgenticRAGPipeline:
         trace_id = str(uuid4())
         latency: dict[str, float] = {}
         degradations: list[str] = []
+        budget = RAGBudgetLedger.from_settings(self.settings)
 
         async def emit(event_type: str, payload: dict) -> None:
             if on_status is not None:
@@ -1135,14 +1376,34 @@ class AgenticRAGPipeline:
         await emit("retrieval_status", {"stage": "query_analysis", "label": "正在分析问题结构"})
         analysis = self.analyzer.analyze(request.query, intent=intent, filters=request.filters)
         latency["query_analysis"] = round((perf_counter() - started) * 1000, 2)
-        indexing_in_progress = await self.rag.knowledge_update_in_progress()
+        # Only a full knowledge-base rebuild invalidates the assumption that
+        # the current corpus is searchable. Incremental indexing keeps the
+        # previous compatible vectors online and therefore must not switch the
+        # entire pipeline into fast/full-text mode.
+        rebuild_in_progress = await self.rag.knowledge_update_in_progress()
+        knowledge_execution_mode = "fast" if rebuild_in_progress else "agentic"
+        agentic_capability_level = (
+            "fast"
+            if rebuild_in_progress
+            else "full"
+            if _supports_agentic_llm(self.llm_provider)
+            else "retrieval_only"
+        )
 
         planning_started = perf_counter()
         rule_plan = self.planner.plan(analysis, request.filters)
         plan = rule_plan
         planner_usage: dict[str, Any] = {}
         planner_warning: str | None = None
-        if not indexing_in_progress and self.llm_planner.should_use(analysis):
+        if not rebuild_in_progress and self.llm_planner.should_use(analysis):
+            planner_reserved = budget.reserve(
+                "planner", estimated_tokens=self.settings.rag_planner_max_tokens
+            )
+            if not planner_reserved:
+                degradations.append("Agentic RAG 调用预算不足，已使用规则检索规划")
+        else:
+            planner_reserved = False
+        if planner_reserved:
             try:
                 llm_plan, planner_usage, planner_warning = await asyncio.wait_for(
                     self.llm_planner.plan(
@@ -1158,6 +1419,7 @@ class AgenticRAGPipeline:
                     {},
                     "LLM 检索规划超时，已回退规则规划",
                 )
+            budget.add_usage(planner_usage)
             if llm_plan is not None and not self.settings.rag_planner_shadow_mode:
                 plan = llm_plan
             elif llm_plan is not None and self.settings.rag_planner_shadow_mode:
@@ -1165,7 +1427,7 @@ class AgenticRAGPipeline:
             if planner_warning:
                 degradations.append(planner_warning)
         rewrite = self._rewrite_from_plan(plan, analysis)
-        if indexing_in_progress:
+        if rebuild_in_progress:
             plan = plan.model_copy(
                 update={
                     "strategy": "full_text",
@@ -1181,15 +1443,15 @@ class AgenticRAGPipeline:
                 }
             )
             rewrite = RAGQueryRewrite(semantic_query=analysis.original_query)
-            degradations.append("知识库正在增量更新，已切换为单次快速全文检索")
+            degradations.append("知识库正在全量重建，已切换为单次快速全文检索")
         latency["planning"] = round((perf_counter() - planning_started) * 1000, 2)
         await emit(
             "retrieval_status",
             {
                 "stage": "retrieval_planning",
                 "label": (
-                    "知识库正在增量更新，检索速度可能降低"
-                    if indexing_in_progress
+                    "知识库正在全量重建，暂使用快速全文检索"
+                    if rebuild_in_progress
                     else f"已生成 {len(rewrite.all_queries)} 个受控检索查询"
                 ),
                 "question_type": analysis.question_type,
@@ -1241,9 +1503,12 @@ class AgenticRAGPipeline:
                     keyword_queries=repair_queries[1:],
                 )
                 repair_queries = []
-            remaining_query_budget = max(0, self.settings.rag_max_queries - len(searched_queries))
+            remaining_query_budget = min(
+                max(0, self.settings.rag_max_queries - len(searched_queries)),
+                budget.remaining_search_calls,
+            )
             if remaining_query_budget == 0:
-                stop_reason = "query_budget_exhausted"
+                stop_reason = budget.exhausted_reason or "query_budget_exhausted"
                 break
             iteration_query_limit = remaining_query_budget
             if iteration == 0 and plan.max_iterations > 1:
@@ -1254,10 +1519,16 @@ class AgenticRAGPipeline:
                 if query.casefold() not in {item.casefold() for item in searched_queries}
             ]
             queries = _merge_similar_queries(queries, iteration_query_limit)
-            if indexing_in_progress:
+            if rebuild_in_progress:
                 queries = queries[:1]
+            reserved_queries: list[str] = []
+            for query in queries:
+                if not budget.reserve("search"):
+                    break
+                reserved_queries.append(query)
+            queries = reserved_queries
             if not queries:
-                stop_reason = "no_new_queries"
+                stop_reason = budget.exhausted_reason or "no_new_queries"
                 break
             iterations_run += 1
             await emit(
@@ -1295,7 +1566,7 @@ class AgenticRAGPipeline:
                         request.filters,
                         resume_id=request.resume_id,
                         section_types=iteration_sections,
-                        fast_mode=indexing_in_progress,
+                        fast_mode=rebuild_in_progress,
                     ),
                     timeout=max(0.1, workflow_deadline - perf_counter()),
                 )
@@ -1335,10 +1606,14 @@ class AgenticRAGPipeline:
                 },
             )
             try:
+                rerank_pool_limit = min(
+                    len(all_candidates),
+                    max(plan.rerank_k, plan.rerank_k * 2),
+                )
                 reranked = await self.reranker.rerank(
                     analysis.original_query,
                     list(all_candidates.values()),
-                    plan.rerank_k,
+                    rerank_pool_limit,
                 )
             except Exception as exc:
                 degradations.append(f"Reranker 不可用，已使用融合排序：{_compact(str(exc), 120)}")
@@ -1346,7 +1621,8 @@ class AgenticRAGPipeline:
                     all_candidates.values(),
                     key=lambda item: item.fused_score,
                     reverse=True,
-                )[: plan.rerank_k]
+                )[:rerank_pool_limit]
+            reranked = _select_job_diverse_candidates(reranked, plan.rerank_k)
             extracted = self.extractor.extract(
                 analysis, reranked, self.settings.rag_evidence_max_items
             )
@@ -1386,6 +1662,20 @@ class AgenticRAGPipeline:
             if self.settings.rag_max_reflection_iterations <= reflection_iterations:
                 stop_reason = "reflection_budget_exhausted"
                 break
+            reflection_kind = (
+                "evidence_reflection"
+                if agentic_capability_level == "full" and self.settings.rag_reflection_enabled
+                else "evidence_evaluation"
+            )
+            reflection_tokens = (
+                self.settings.rag_reflection_max_tokens
+                if reflection_kind == "evidence_reflection"
+                else 0
+            )
+            if not budget.reserve(reflection_kind, estimated_tokens=reflection_tokens):
+                stop_reason = budget.exhausted_reason or "reflection_budget_exhausted"
+                degradations.append("Agentic RAG 调用预算不足，已停止证据修复")
+                break
             reflection_iterations += 1
             try:
                 (
@@ -1407,6 +1697,7 @@ class AgenticRAGPipeline:
                 stop_reason = "workflow_timeout"
                 degradations.append("证据反思达到工作流超时上限，已保留当前证据")
                 break
+            budget.add_usage(reflection_usage)
             reflection_records.append(reflection.model_dump(mode="json"))
             if reflection_warning:
                 degradations.append(reflection_warning)
@@ -1435,19 +1726,24 @@ class AgenticRAGPipeline:
 
         if responses:
             primary = responses[0]
-        elif indexing_in_progress:
+        elif rebuild_in_progress:
             stop_reason = stop_reason or "fast_mode_no_retry"
             primary = self.rag.empty_response(
                 request,
-                warnings=["知识库正在增量更新，本轮快速检索未命中，已返回当前已有结果。"],
+                warnings=["知识库正在全量重建，本轮快速检索未命中，已返回当前已有结果。"],
             )
         else:
-            remaining = workflow_deadline - perf_counter()
+            fallback_reserved = budget.reserve("search")
+            remaining = workflow_deadline - perf_counter() if fallback_reserved else 0.0
             if remaining <= 0.05:
-                stop_reason = stop_reason or "workflow_timeout"
+                stop_reason = stop_reason or budget.exhausted_reason or "workflow_timeout"
                 primary = self.rag.empty_response(
                     request,
-                    warnings=["知识库检索已达到时间上限，已立即返回当前已有结果。"],
+                    warnings=[
+                        "知识库检索调用预算已耗尽，已立即返回当前已有结果。"
+                        if not fallback_reserved
+                        else "知识库检索已达到时间上限，已立即返回当前已有结果。"
+                    ],
                 )
             else:
                 try:
@@ -1473,8 +1769,7 @@ class AgenticRAGPipeline:
                     primary = self.rag.empty_response(
                         request,
                         warnings=[
-                            "知识库快速兜底检索失败，已返回当前已有结果："
-                            f"{_compact(str(exc), 120)}"
+                            f"知识库快速兜底检索失败，已返回当前已有结果：{_compact(str(exc), 120)}"
                         ],
                     )
             responses.append(primary)
@@ -1531,9 +1826,7 @@ class AgenticRAGPipeline:
                         else []
                     ),
                     *(
-                        [
-                            "候选内容与问题的直接相关性不足，未将语义近邻岗位视为确定答案。"
-                        ]
+                        ["候选内容与问题的直接相关性不足，未将语义近邻岗位视为确定答案。"]
                         if evidence
                         and evaluation.max_relevance_score
                         < self.settings.rag_evidence_min_relevance
@@ -1573,6 +1866,9 @@ class AgenticRAGPipeline:
         evidence_yield = len(evidence) / max(1, len(all_candidates))
         trace = RAGTrace(
             trace_id=trace_id,
+            knowledge_execution_mode=knowledge_execution_mode,
+            agentic_capability_level=agentic_capability_level,
+            budget=budget.snapshot(),
             retrieval_iterations=iterations_run,
             query_count=len(searched_queries),
             candidate_count=len(all_candidates),

@@ -5,7 +5,9 @@ import json
 from collections import OrderedDict
 from collections.abc import Sequence
 from time import monotonic
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
 
 from app.core.config import Settings, get_settings
 from app.llm.provider import LLMProvider
@@ -41,6 +43,78 @@ _ALLOWED_SECTIONS = {
 _PLAN_CACHE: OrderedDict[str, tuple[float, RAGRetrievalPlan]] = OrderedDict()
 _PLAN_CACHE_TTL_SECONDS = 180.0
 _PLAN_CACHE_MAX_SIZE = 128
+
+
+class _LLMPlannerQuery(BaseModel):
+    """Compact model-facing query contract."""
+
+    query: str = Field(min_length=1, max_length=300)
+    purpose: Literal[
+        "semantic",
+        "exact",
+        "keyword",
+        "aggregation",
+        "comparison",
+        "procedural",
+    ] = "semantic"
+    section_types: list[str] = Field(default_factory=list, max_length=8)
+    target_dimension: str | None = Field(default=None, max_length=100)
+
+
+class _LLMRetrievalPlannerDecision(BaseModel):
+    """Only fields on which the LLM is allowed to decide."""
+
+    queries: list[_LLMPlannerQuery] = Field(min_length=1, max_length=4)
+    preferred_channels: list[Literal["lexical", "dense"]] = Field(
+        default_factory=lambda: ["lexical", "dense"],
+        max_length=2,
+    )
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    decision_summary: str = Field(default="", max_length=180)
+
+
+class _LLMRepairAction(BaseModel):
+    action: Literal[
+        "expand_query",
+        "add_exact_terms",
+        "change_section",
+        "retrieve_statistics",
+        "increase_top_k",
+        "resolve_conflict",
+    ]
+    query: str | None = Field(default=None, max_length=300)
+    target_dimension: str | None = Field(default=None, max_length=100)
+    section_types: list[str] = Field(default_factory=list, max_length=8)
+    reason: str = Field(default="", max_length=160)
+
+
+class _LLMEvidenceReflectionDecision(BaseModel):
+    """Compact reflection contract; measured gaps remain server-owned."""
+
+    status: Literal["sufficient", "repairable", "insufficient"] = "insufficient"
+    repair_actions: list[_LLMRepairAction] = Field(default_factory=list, max_length=4)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    decision_summary: str = Field(default="", max_length=180)
+
+
+class _LLMUnsupportedClaim(BaseModel):
+    claim: str = Field(min_length=1, max_length=400)
+    section: str = Field(default="", max_length=100)
+    reason: str = Field(default="", max_length=180)
+
+
+class _LLMAnswerReflectionDecision(BaseModel):
+    status: Literal["valid", "repairable", "insufficient"] = "valid"
+    repair_strategy: Literal[
+        "none",
+        "remove_claim",
+        "qualify_claim",
+        "regenerate_section",
+    ] = "none"
+    unsupported_claims: list[_LLMUnsupportedClaim] = Field(default_factory=list, max_length=6)
+    citation_gaps: list[str] = Field(default_factory=list, max_length=6)
+    correction: str = Field(default="", max_length=600)
+    confidence: float = Field(default=0.0, ge=0, le=1)
 
 
 def clear_rag_planner_cache() -> None:
@@ -101,6 +175,22 @@ def _safe_query(value: str | None) -> str:
 def _compact_json(value: Any, limit: int = 5000) -> str:
     rendered = json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
     return rendered[:limit]
+
+
+def _structured_fallback_warning(
+    prefix: str,
+    provider: LLMProvider | None,
+    token_limit: int,
+) -> str:
+    """Return an actionable, user-safe reason instead of an exception class."""
+
+    usage = _usage_snapshot(provider)
+    completion_tokens = int(
+        usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0
+    )
+    if completion_tokens >= token_limit:
+        return f"{prefix}输出达到长度上限，已使用确定性降级方案"
+    return f"{prefix}暂不可用，已使用确定性降级方案"
 
 
 class RetrievalPlanValidationError(ValueError):
@@ -268,11 +358,36 @@ class LLMRetrievalPlanner:
             _PLAN_CACHE.pop(cache_key, None)
         prompt = self._prompt(analysis, fallback, filters, previous_queries, missing_information)
         try:
-            candidate = await self.provider.generate_structured(
+            decision = await self.provider.generate_structured(
                 prompt,
-                RAGPlannerPlan,
+                _LLMRetrievalPlannerDecision,
                 max_tokens=self.settings.rag_planner_max_tokens,
                 reasoning_effort="none",
+            )
+            candidate = RAGPlannerPlan(
+                normalized_question=analysis.original_query,
+                question_type=analysis.question_type,
+                complexity=analysis.complexity,
+                answer_dimensions=analysis.required_information,
+                queries=[
+                    RAGRetrievalQuery(
+                        query=item.query,
+                        purpose=item.purpose,
+                        section_types=item.section_types,
+                        target_dimension=item.target_dimension,
+                    )
+                    for item in decision.queries
+                ],
+                hard_filters=filters,
+                preferred_channels=decision.preferred_channels,
+                expected_evidence=analysis.required_information,
+                keyword_top_k=fallback.keyword_top_k,
+                vector_top_k=fallback.vector_top_k,
+                candidate_k=fallback.candidate_k,
+                rerank_k=fallback.rerank_k,
+                max_iterations=fallback.max_iterations,
+                confidence=decision.confidence,
+                decision_summary=decision.decision_summary,
             )
             plan = self.validator.validate(candidate, fallback=fallback, filters=filters)
             if cacheable:
@@ -281,11 +396,15 @@ class LLMRetrievalPlanner:
                 while len(_PLAN_CACHE) > _PLAN_CACHE_MAX_SIZE:
                     _PLAN_CACHE.popitem(last=False)
             return plan, _usage_snapshot(self.provider), None
-        except Exception as exc:
+        except Exception:
             return (
                 None,
                 _usage_snapshot(self.provider),
-                f"LLM 检索规划不可用，已回退规则规划：{type(exc).__name__}",
+                _structured_fallback_warning(
+                    "LLM 检索规划",
+                    self.provider,
+                    self.settings.rag_planner_max_tokens,
+                ).replace("确定性降级方案", "规则规划"),
             )
 
     def _prompt(
@@ -296,17 +415,33 @@ class LLMRetrievalPlanner:
         previous_queries: Sequence[str],
         missing_information: Sequence[str],
     ) -> str:
+        analysis_payload = {
+            "question": analysis.original_query,
+            "type": analysis.question_type,
+            "complexity": analysis.complexity,
+            "entities": analysis.entities,
+            "required": analysis.required_information,
+        }
+        baseline_payload = {
+            "strategy": fallback.strategy,
+            "sections": fallback.section_types,
+            "max_queries": min(4, self.settings.rag_max_queries),
+        }
+        filter_payload = filters.model_dump(
+            mode="json",
+            exclude_none=True,
+            exclude_defaults=True,
+        )
         return (
-            "你是岗位知识库检索规划器。只输出符合给定结构的 JSON，不要输出推理过程。\n"
-            "任务：把用户问题拆成少量、互补、可验证的检索查询。不得改变用户筛选条件。\n"
-            f"用户分析：{_compact_json(analysis.model_dump(mode='json'))}\n"
-            f"规则基线：{_compact_json(fallback.model_dump(mode='json'))}\n"
-            f"用户筛选：{_compact_json(filters.model_dump(mode='json'))}\n"
-            f"已检索查询：{_compact_json(list(previous_queries), 1200)}\n"
-            f"缺口：{_compact_json(list(missing_information), 1200)}\n"
-            "要求：queries 至少 1 个且最多 6 个；查询应覆盖用户问题的不同维度；"
-            "preferred_channels 只能使用 lexical/dense；hard_filters 只能原样复制用户筛选；"
-            "不要生成无法从岗位知识库验证的结论。"
+            "你是岗位知识库检索规划器，只返回简短 JSON。"
+            "生成 1 至 4 个互补查询，优先覆盖 required/缺口；不输出事实、解释或筛选条件。\n"
+            f"分析：{_compact_json(analysis_payload, 1800)}\n"
+            f"基线：{_compact_json(baseline_payload, 1200)}\n"
+            f"只读筛选：{_compact_json(filter_payload, 1000)}\n"
+            f"已检索：{_compact_json(list(previous_queries), 600)}\n"
+            f"缺口：{_compact_json(list(missing_information), 600)}\n"
+            "section_types 仅从基线 sections 选择；channel 仅 lexical/dense；"
+            "decision_summary 一句话且不超过 60 字。"
         )
 
 
@@ -353,8 +488,17 @@ class EvidenceReflectionService:
             actions.append(
                 RAGRepairAction(
                     action=action_name,
-                    query=missing,
+                    query=(
+                        f"{missing} 岗位职责 工作内容"
+                        if missing == "responsibilities"
+                        else missing
+                    ),
                     target_dimension=missing,
+                    section_types=(
+                        ["responsibilities", "requirements", "source_context"]
+                        if missing == "responsibilities"
+                        else []
+                    ),
                     reason="补齐证据覆盖缺口",
                 )
             )
@@ -395,28 +539,56 @@ class EvidenceReflectionService:
         evidence_summary = [
             {
                 "topic": item.topic,
-                "claim": item.claim,
-                "text": item.evidence_text[:260],
+                "claim": item.claim[:180],
             }
-            for item in evidence[:8]
+            for item in evidence[:6]
         ]
+        analysis_payload = {
+            "question": analysis.original_query,
+            "type": analysis.question_type,
+            "required": analysis.required_information,
+        }
+        evaluation_payload = {
+            "answerable": evaluation.answerable,
+            "coverage": evaluation.coverage_score,
+            "max_relevance": evaluation.max_relevance_score,
+            "missing": evaluation.missing_information,
+            "conflicts": evaluation.conflicts,
+        }
         prompt = (
-            "你是证据反思器。只输出结构化 JSON，不要输出思维链。"
-            "判断当前岗位知识库证据是否足以回答问题，"
-            "并给出最多 4 个定向修复动作。动作必须是 expand_query/add_exact_terms/change_section/"
-            "retrieve_statistics/increase_top_k/resolve_conflict。\n"
-            f"问题分析：{_compact_json(analysis.model_dump(mode='json'))}\n"
-            f"评估：{_compact_json(evaluation.model_dump(mode='json'))}\n"
-            f"证据摘要：{_compact_json(evidence_summary)}\n"
-            f"已检索：{_compact_json(list(previous_queries), 1200)}\n"
-            "只诊断证据和检索策略，不编造岗位事实。"
+            "你是证据检索修复器，只返回简短 JSON，不输出思维链或岗位事实。"
+            "以评估中的 missing 为准，给出最多 4 个可执行修复动作；"
+            "有缺口时不得返回 sufficient。\n"
+            f"分析：{_compact_json(analysis_payload, 1600)}\n"
+            f"评估：{_compact_json(evaluation_payload, 1600)}\n"
+            f"证据主题：{_compact_json(evidence_summary, 1800)}\n"
+            f"已检索：{_compact_json(list(previous_queries), 600)}\n"
+            "动作限 expand_query/add_exact_terms/change_section/retrieve_statistics/"
+            "increase_top_k/resolve_conflict；summary 不超过 60 字。"
         )
         try:
-            candidate = await self.provider.generate_structured(
+            decision = await self.provider.generate_structured(
                 prompt,
-                RAGEvidenceReflection,
+                _LLMEvidenceReflectionDecision,
                 max_tokens=self.settings.rag_reflection_max_tokens,
                 reasoning_effort="none",
+            )
+            candidate = RAGEvidenceReflection(
+                status=decision.status,
+                failure_types=fallback.failure_types,
+                missing_information=evaluation.missing_information,
+                repair_actions=[
+                    RAGRepairAction(
+                        action=item.action,
+                        query=item.query,
+                        target_dimension=item.target_dimension,
+                        section_types=item.section_types,
+                        reason=item.reason,
+                    )
+                    for item in decision.repair_actions
+                ],
+                confidence=decision.confidence,
+                decision_summary=decision.decision_summary,
             )
             if candidate.confidence < self.settings.rag_planner_confidence_threshold:
                 raise ValueError("reflection confidence is below threshold")
@@ -425,11 +597,15 @@ class EvidenceReflectionService:
             if not candidate.repair_actions and fallback.repair_actions:
                 raise ValueError("reflection returned no actionable repair")
             return candidate, _usage_snapshot(self.provider), None
-        except Exception as exc:
+        except Exception:
             return (
                 fallback,
                 _usage_snapshot(self.provider),
-                f"LLM 证据反思不可用，已使用确定性修复：{type(exc).__name__}",
+                _structured_fallback_warning(
+                    "LLM 证据反思",
+                    self.provider,
+                    self.settings.rag_reflection_max_tokens,
+                ).replace("确定性降级方案", "确定性修复"),
             )
 
 
@@ -453,31 +629,45 @@ class AnswerReflectionService:
         evidence_summary = [
             {
                 "topic": item.topic,
-                "claim": item.claim,
-                "text": item.evidence_text[:240],
+                "claim": item.claim[:220],
             }
-            for item in evidence[:10]
+            for item in evidence[:8]
         ]
         prompt = (
-            "你是回答校验器。只输出结构化 JSON，不输出思维链。"
-            "检查回答中的可验证断言是否被岗位知识库证据支持，"
-            "只列出确实缺少支持的断言，并选择 remove_claim、qualify_claim 或 regenerate_section。\n"
-            f"回答：{answer[:6000]}\n"
-            f"校验结果：{_compact_json(verification.model_dump(mode='json'))}\n"
-            f"证据：{_compact_json(evidence_summary)}\n"
-            "不得补写新的事实。"
+            "你是回答证据校验器，只返回简短 JSON，不输出思维链。"
+            "仅复核待核实断言；证据足以支持时不要列为 unsupported。"
+            "不得补写事实，correction 最多两句话。\n"
+            f"待核实断言：{_compact_json(verification.unsupported_claims[:8], 1800)}\n"
+            f"回答摘要：{answer[:2800]}\n"
+            f"证据断言：{_compact_json(evidence_summary, 2600)}\n"
+            "repair_strategy 仅 none/remove_claim/qualify_claim/regenerate_section。"
         )
         try:
-            candidate = await self.provider.generate_structured(
+            decision = await self.provider.generate_structured(
                 prompt,
-                RAGAnswerReflection,
+                _LLMAnswerReflectionDecision,
                 max_tokens=self.settings.rag_reflection_max_tokens,
                 reasoning_effort="none",
             )
-            if verification.unsupported_claims and not candidate.unsupported_claims:
-                raise ValueError("answer reflection returned no unsupported claims")
+            candidate = RAGAnswerReflection(
+                status=decision.status,
+                repair_strategy=decision.repair_strategy,
+                unsupported_claims=[
+                    RAGUnsupportedClaim(
+                        claim=item.claim,
+                        section=item.section,
+                        reason=item.reason,
+                    )
+                    for item in decision.unsupported_claims
+                ],
+                citation_gaps=decision.citation_gaps,
+                correction=decision.correction,
+                confidence=decision.confidence,
+            )
+            if candidate.status == "repairable" and not candidate.unsupported_claims:
+                raise ValueError("repairable answer reflection returned no actionable claims")
             return candidate, _usage_snapshot(self.provider), None
-        except Exception as exc:
+        except Exception:
             claims = [
                 RAGUnsupportedClaim(claim=claim, reason="回答校验未找到对应证据")
                 for claim in verification.unsupported_claims[:8]
@@ -490,7 +680,11 @@ class AnswerReflectionService:
                     confidence=0.8,
                 ),
                 _usage_snapshot(self.provider),
-                f"LLM 回答校验不可用，已使用确定性校验：{type(exc).__name__}",
+                _structured_fallback_warning(
+                    "LLM 回答校验",
+                    self.provider,
+                    self.settings.rag_reflection_max_tokens,
+                ).replace("确定性降级方案", "确定性校验"),
             )
 
     def local_repair(self, reflection: RAGAnswerReflection) -> str:

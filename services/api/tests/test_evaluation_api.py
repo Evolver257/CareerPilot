@@ -34,6 +34,13 @@ async def test_evaluation_seed_import_and_background_run(client) -> None:
     assert retried.json()["status"] == "PENDING"
 
 
+async def test_memory_evaluation_seed_import(client) -> None:
+    response = await client.post("/api/evaluations/datasets/import-memory-seed")
+    assert response.status_code == 200
+    assert response.json()["suite"] == "memory"
+    assert response.json()["case_count"] == 5
+
+
 async def test_evaluation_rejects_sensitive_payload(client) -> None:
     response = await client.post(
         "/api/evaluations/datasets",

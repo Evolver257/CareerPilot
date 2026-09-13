@@ -71,6 +71,8 @@ services:
       RANKING_TIMEOUT_SECONDS: ${RANKING_TIMEOUT_SECONDS:-1800}
       AUTO_DELIVERY_MAX_JOB_AGE_DAYS: ${AUTO_DELIVERY_MAX_JOB_AGE_DAYS:-3}
       RAG_EVIDENCE_MIN_RELEVANCE: ${RAG_EVIDENCE_MIN_RELEVANCE:-0.42}
+      RAG_RERANKER: ${RAG_RERANKER:-local}
+      SEMANTIC_RERANKER_MODEL: ${SEMANTIC_RERANKER_MODEL:-cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}
     ports:
       - "${API_PORT:-8010}:8000"
     volumes:
@@ -113,8 +115,12 @@ services:
       context: ./apps/web
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8010}
+        NEXT_PUBLIC_APP_VERSION: ${NEXT_PUBLIC_APP_VERSION:-dev}
+        NEXT_PUBLIC_BUILD_TIME: ${NEXT_PUBLIC_BUILD_TIME:-unknown}
     environment:
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8010}
+      NEXT_PUBLIC_APP_VERSION: ${NEXT_PUBLIC_APP_VERSION:-dev}
+      NEXT_PUBLIC_BUILD_TIME: ${NEXT_PUBLIC_BUILD_TIME:-unknown}
     ports:
       - "3000:3000"
     depends_on:

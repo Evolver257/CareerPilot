@@ -360,6 +360,11 @@ class JobService:
                     created=result.created,
                     duplicates=result.duplicates,
                 )
+            # Normalized provider fields are applied after the generic import
+            # path. Re-index once more so salary/education/skills changes can
+            # never leave the durable knowledge document stale.
+            if auto_index and refreshed is not None:
+                await enqueue_incremental_knowledge_index(self.session, [refreshed.id])
         return result
 
     async def analyze_job(self, job_id: UUID) -> Job | None:

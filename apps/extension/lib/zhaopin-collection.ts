@@ -5,7 +5,7 @@ import type { ZhaopinCaptureResponse } from "./protocol";
 
 const KEY = "careerpilot_zhaopin_background_search";
 const API = "http://localhost:8010";
-const HUMAN_STATES = new Set(["CAPTCHA", "LOGIN_REQUIRED", "RISK_CONTROL", "PLATFORM_LIMIT"]);
+const HUMAN_STATES = new Set(["CAPTCHA", "LOGIN_REQUIRED", "RISK_CONTROL", "PLATFORM_LIMIT", "TAB_HIDDEN"]);
 let activeRequest: string | null = null;
 let commands = Promise.resolve();
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -108,13 +108,21 @@ async function ensureTab(tabId: number | undefined, url: string): Promise<number
       await browser.tabs.get(tabId); exists = true;
     } catch { /* Recreate only our missing/closed collection tab. */ }
     if (exists) {
-      if ((await browser.tabs.get(tabId)).url !== url) await browser.tabs.update(tabId, { url });
+      if ((await browser.tabs.get(tabId)).url !== url) await browser.tabs.update(tabId, { active: true, url });
+      await activateVisibleTab(tabId);
       await waitForTabComplete(tabId); return tabId;
     }
   }
-  const created = await browser.tabs.create({ active: false, url });
+  const created = await browser.tabs.create({ active: true, url });
   if (created.id === undefined) throw new Error("无法创建采集标签页");
   await waitForTabComplete(created.id); return created.id;
+}
+async function activateVisibleTab(tabId: number): Promise<void> {
+  const tab = await browser.tabs.update(tabId, { active: true });
+  if (!tab) return;
+  if (tab.windowId !== undefined && browser.windows?.update) {
+    await browser.windows.update(tab.windowId, { focused: true });
+  }
 }
 async function snapshot(tabId: number, requestId: string): Promise<ZhaopinCaptureResponse> {
   let last: ZhaopinCaptureResponse | undefined;

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { MemorySettingsPanel } from "../../components/memory-settings-panel";
 import { MCPSettingsPanel } from "../../components/mcp-settings-panel";
+import { KnowledgeBaseMaintenancePanel } from "../../components/knowledge-base-maintenance-panel";
 
 import {
   deleteLLMProvider,
@@ -14,10 +15,12 @@ import {
   testLLMConnection,
   testSavedLLMProvider,
   type ActiveLLMProvider,
-  type LLMProviderName,
+type LLMProviderName,
   type LLMSettings,
   type RecruitmentPlatform,
 } from "../../lib/api";
+
+type BuildInfo = { version: string; build_time: string | null };
 
 const providerDefaults: Record<LLMProviderName, { label: string; model: string; baseUrl: string }> = {
   openai: {
@@ -50,6 +53,7 @@ export default function SettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [recruitmentPlatforms, setRecruitmentPlatforms] = useState<RecruitmentPlatform[]>([]);
+  const [buildInfo, setBuildInfo] = useState<BuildInfo | null>(null);
 
   const configuredProvider = useMemo(
     () => settings?.providers.find((item) => item.provider === provider),
@@ -60,6 +64,10 @@ export default function SettingsPage() {
   useEffect(() => {
     void loadSettings();
     getRecruitmentPlatforms().then(setRecruitmentPlatforms).catch(() => setRecruitmentPlatforms([]));
+    fetch("/api/build-info", { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() as Promise<BuildInfo> : null))
+      .then(setBuildInfo)
+      .catch(() => setBuildInfo(null));
   }, []);
 
   useEffect(() => {
@@ -179,10 +187,10 @@ export default function SettingsPage() {
     <div className="mx-auto max-w-5xl space-y-8">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p className="eyebrow">模型连接</p>
-          <h1 className="mt-3 text-3xl font-semibold tracking-tight">LLM 设置</h1>
+          <p className="eyebrow">模型、数据与连接</p>
+          <h1 className="mt-3 text-3xl font-semibold tracking-tight">系统设置</h1>
           <p className="mt-3 max-w-2xl text-slate-500">
-            配置你自己的 API key，用于职位解析、匹配评分和求职 Agent。密钥只发送到本地 API 服务，保存后仅展示末 4 位。
+            管理模型服务、岗位知识库、长期记忆和外部工具连接。API 密钥只发送到本地服务，保存后仅展示末 4 位。
           </p>
         </div>
         <span className="rounded-full bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700">
@@ -193,6 +201,7 @@ export default function SettingsPage() {
       {error && <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-800">{error}</div>}
       {notice && <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-800">{notice}</div>}
 
+      <KnowledgeBaseMaintenancePanel />
       <MemorySettingsPanel />
       <MCPSettingsPanel />
 
@@ -298,6 +307,11 @@ export default function SettingsPage() {
       <section className="rounded-2xl border border-amber-200 bg-amber-50 p-5 text-sm leading-6 text-amber-800">
         <p className="font-semibold">安全提示</p>
         <p className="mt-1">API key 会在服务端加密保存，接口和页面都不会返回完整密钥。部署到生产环境时，请为 API 服务设置独立且足够随机的 LLM_ENCRYPTION_KEY，并不要把 key 提交到代码仓库。</p>
+      </section>
+
+      <section className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-500">
+        <p className="font-medium text-slate-700">系统版本</p>
+        <p className="mt-1">前端 {buildInfo?.version ?? "未读取"}{buildInfo?.build_time ? ` · 构建于 ${buildInfo.build_time}` : ""}</p>
       </section>
     </div>
   );

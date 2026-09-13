@@ -41,6 +41,8 @@ from app.services.job_knowledge_rag import clear_knowledge_search_cache
 from app.services.work_queue import enqueue_work
 
 KNOWLEDGE_INDEX_TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
+
+
 class KnowledgeIndexNotFoundError(ValueError):
     pass
 
@@ -556,19 +558,13 @@ class KnowledgeIndexService:
             return True
         if not current.chunks:
             return True
-        chunk_keys = [
-            (chunk.section_type, chunk.content_hash)
-            for chunk in current.chunks
-        ]
+        chunk_keys = [(chunk.section_type, chunk.content_hash) for chunk in current.chunks]
         if len(chunk_keys) != len(set(chunk_keys)):
             return True
         return any(
             chunk.embedding is None
             or chunk.embedding_dimensions != embedding_dimensions
-            or (
-                embedding_signature
-                and chunk.embedding_signature != embedding_signature
-            )
+            or (embedding_signature and chunk.embedding_signature != embedding_signature)
             for chunk in current.chunks
         )
 
@@ -756,7 +752,7 @@ class KnowledgeIndexService:
         ]
         generated_vectors = await embed_texts(
             provider,
-            [draft.content for draft in missing],
+            [draft.embedding_content for draft in missing],
             model=self.settings.embedding_model,
         )
         generated_by_key = {
@@ -991,62 +987,76 @@ async def enqueue_incremental_knowledge_index(
     if not unique_job_ids:
         return None
     bind = getattr(session.sync_session, "bind", None)
-    if bind is not None and bind.dialect.name == "postgresql":
-        # A short durable debounce turns rapid imports into one run. The queue's
-        # available_at gives other API workers time to join before execution.
+    is_postgres = bind is not None and bind.dialect.name == "postgresql"
+    if is_postgres:
+        # Keep one durable incremental run as the append-only ingestion
+        # buffer. New jobs may arrive after the worker has started; appending
+        # them to the active run prevents a long queue of one-job runs and is
+        # safe because execute() re-reads PENDING items after every checkpoint.
         from sqlalchemy import text
 
         await session.execute(text("SELECT pg_advisory_xact_lock(4200917)"))
-        pending = await session.scalar(
-            select(KnowledgeIndexRun)
-            .join(BackgroundWork, BackgroundWork.run_id == KnowledgeIndexRun.id)
-            .where(
-                BackgroundWork.kind == "knowledge",
-                BackgroundWork.status == "PENDING",
-                KnowledgeIndexRun.mode == "incremental",
-                KnowledgeIndexRun.status == "PENDING",
-                KnowledgeIndexRun.created_at >= _now() - timedelta(seconds=10),
-            )
-            .order_by(KnowledgeIndexRun.created_at.desc())
-            .with_for_update()
+    # SQLite is used for local development and tests and has no advisory
+    # locks/background queue rows. It still benefits from the same coalescing
+    # behavior; production PostgreSQL additionally filters by queue state.
+    active_query = select(KnowledgeIndexRun).where(
+        KnowledgeIndexRun.mode == "incremental",
+        KnowledgeIndexRun.status.in_(["PENDING", "RUNNING"]),
+    )
+    if is_postgres:
+        active_query = active_query.join(
+            BackgroundWork, BackgroundWork.run_id == KnowledgeIndexRun.id
+        ).where(
+            BackgroundWork.kind == "knowledge",
+            BackgroundWork.status.in_(["PENDING", "RUNNING"]),
         )
-        if pending is not None:
-            existing = set(
-                await session.scalars(
-                    select(KnowledgeIndexRunItem.job_id).where(
-                        KnowledgeIndexRunItem.run_id == pending.id
-                    )
+    active_run = await session.scalar(
+        active_query.order_by(KnowledgeIndexRun.created_at.desc()).with_for_update()
+    )
+    if active_run is not None:
+        existing = set(
+            await session.scalars(
+                select(KnowledgeIndexRunItem.job_id).where(
+                    KnowledgeIndexRunItem.run_id == active_run.id
                 )
             )
-            added = [job_id for job_id in unique_job_ids if job_id not in existing]
-            if added:
-                session.add_all(
-                    [KnowledgeIndexRunItem(run_id=pending.id, job_id=job_id) for job_id in added]
+        )
+        added = [job_id for job_id in unique_job_ids if job_id not in existing]
+        if added:
+            session.add_all(
+                [KnowledgeIndexRunItem(run_id=active_run.id, job_id=job_id) for job_id in added]
+            )
+            request = dict(active_run.request_payload)
+            request["job_ids"] = list(
+                dict.fromkeys([*request.get("job_ids", []), *(str(value) for value in added)])
+            )
+            active_run.request_payload = request
+            active_run.total_jobs += len(added)
+            work = await session.scalar(
+                select(BackgroundWork).where(
+                    BackgroundWork.kind == "knowledge",
+                    BackgroundWork.run_id == active_run.id,
                 )
-                request = dict(pending.request_payload)
-                request["job_ids"] = list(
-                    dict.fromkeys([*request.get("job_ids", []), *(str(value) for value in added)])
-                )
-                pending.request_payload = request
-                pending.total_jobs += len(added)
-                work = await session.scalar(
-                    select(BackgroundWork).where(
-                        BackgroundWork.kind == "knowledge",
-                        BackgroundWork.run_id == pending.id,
+            )
+            if work is not None and work.status == "PENDING":
+                next_available = _now() + timedelta(seconds=5)
+                # SQLite may materialize timezone-aware columns as naive
+                # datetimes; the production debounce is the only place where
+                # the creation-time cap is needed.
+                if is_postgres:
+                    next_available = min(
+                        next_available,
+                        active_run.created_at + timedelta(seconds=15),
                     )
-                )
-                if work is not None:
-                    work.available_at = min(
-                        _now() + timedelta(seconds=5), pending.created_at + timedelta(seconds=15)
-                    )
-            if force:
-                pending.request_payload = {
-                    **dict(pending.request_payload),
-                    "force": True,
-                }
-            if added or force:
-                await session.commit()
-            return pending.id
+                work.available_at = next_available
+        if force:
+            active_run.request_payload = {
+                **dict(active_run.request_payload),
+                "force": True,
+            }
+        if added or force:
+            await session.commit()
+        return active_run.id
     run = await KnowledgeIndexService(session).create(
         KnowledgeIndexRunCreate(
             mode="incremental",

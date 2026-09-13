@@ -18,6 +18,7 @@ from app.models.entities import (
     JobSkill,
     JobSkillFact,
     JobVersion,
+    KnowledgeIndexRun,
     KnowledgeIndexRunItem,
     SkillTaxonomy,
 )
@@ -27,12 +28,17 @@ from app.services import knowledge_indexing
 from app.services.job_knowledge import (
     JOB_KNOWLEDGE_CHUNK_CHAR_LIMIT,
     JOB_KNOWLEDGE_CHUNK_TOKEN_LIMIT,
+    JOB_KNOWLEDGE_CHUNK_TOKEN_OVERLAP,
+    JobKnowledgeChunkingConfig,
     build_job_knowledge_chunks,
     canonicalize_skill,
     estimate_knowledge_tokens,
 )
 from app.services.jobs import JobService
-from app.services.knowledge_indexing import KnowledgeIndexService
+from app.services.knowledge_indexing import (
+    KnowledgeIndexService,
+    enqueue_incremental_knowledge_index,
+)
 
 
 @pytest_asyncio.fixture
@@ -132,8 +138,7 @@ def test_chunker_preserves_unparsed_source_and_filters_section_headings() -> Non
 
 def test_chunker_respects_embedding_token_budget_for_long_single_line() -> None:
     long_requirement = "".join(
-        f"第{index}项要求精通Python并完成复杂模块设计、性能优化及故障排查。"
-        for index in range(30)
+        f"第{index}项要求精通Python并完成复杂模块设计、性能优化及故障排查。" for index in range(30)
     )
     job = _job(f"任职要求\n{long_requirement}")
     job.normalized_data = {
@@ -147,7 +152,9 @@ def test_chunker_respects_embedding_token_budget_for_long_single_line() -> None:
     assert len([draft for draft in drafts if draft.section_type == "required_skills"]) == 1
     assert all(len(draft.content) <= JOB_KNOWLEDGE_CHUNK_CHAR_LIMIT for draft in drafts)
     assert all(draft.token_count <= JOB_KNOWLEDGE_CHUNK_TOKEN_LIMIT for draft in drafts)
-    assert all(draft.token_count == estimate_knowledge_tokens(draft.content) for draft in drafts)
+    assert all(
+        draft.token_count == estimate_knowledge_tokens(draft.embedding_content) for draft in drafts
+    )
 
 
 def test_chunker_uses_provider_token_counter_and_records_provenance() -> None:
@@ -166,13 +173,65 @@ def test_chunker_uses_provider_token_counter_and_records_provenance() -> None:
     drafts = build_job_knowledge_chunks(job, token_counter=counter)
 
     assert drafts
-    assert all(draft.token_count == len(draft.content) for draft in drafts)
+    assert all(draft.token_count == len(draft.embedding_content) for draft in drafts)
     assert all(draft.token_count <= JOB_KNOWLEDGE_CHUNK_TOKEN_LIMIT for draft in drafts)
     assert all(
-        draft.metadata["tokenizer_signature"] == "test:character-tokenizer-v1"
-        for draft in drafts
+        draft.metadata["tokenizer_signature"] == "test:character-tokenizer-v1" for draft in drafts
     )
     assert all(draft.metadata["token_count_exact"] is True for draft in drafts)
+
+
+def test_chunk_embeddings_include_job_context_but_citations_keep_clean_evidence() -> None:
+    job = _job("岗位职责\n负责构建检索服务\n任职要求\n熟悉 Python")
+
+    drafts = build_job_knowledge_chunks(job)
+    requirement = next(draft for draft in drafts if draft.section_type == "requirements")
+
+    assert "岗位：AI Agent 实习生" in requirement.embedding_content
+    assert "岗位方向：AI Agent" in requirement.embedding_content
+    assert "证据类型：任职条件" in requirement.embedding_content
+    assert requirement.content.startswith("## 任职条件")
+    assert "岗位：" not in requirement.content
+    assert requirement.token_count <= JOB_KNOWLEDGE_CHUNK_TOKEN_LIMIT
+
+
+def test_chunker_accepts_isolated_experiment_boundaries_without_changing_defaults() -> None:
+    counter = CallableTokenCounter(
+        callback=len,
+        signature="test:character-tokenizer-v1",
+        exact=True,
+    )
+    description = "\n".join(
+        ["岗位职责", *(f"负责第{index}个独立模块的开发与测试。" for index in range(12))]
+    )
+    job = _job(description)
+    job.normalized_data = {"structured_job": {}, "requirements": {}}
+    config = JobKnowledgeChunkingConfig(
+        char_limit=180,
+        token_limit=72,
+        token_overlap=20,
+    )
+
+    experimental = build_job_knowledge_chunks(job, token_counter=counter, chunking=config)
+    production = build_job_knowledge_chunks(job, token_counter=counter)
+
+    assert experimental
+    assert all(draft.token_count <= config.token_limit for draft in experimental)
+    assert all(draft.metadata["chunk_token_limit"] == 72 for draft in experimental)
+    assert all(draft.metadata["chunk_token_overlap"] == 20 for draft in experimental)
+    assert all(
+        draft.metadata["chunk_token_limit"] == JOB_KNOWLEDGE_CHUNK_TOKEN_LIMIT
+        for draft in production
+    )
+    assert all(
+        draft.metadata["chunk_token_overlap"] == JOB_KNOWLEDGE_CHUNK_TOKEN_OVERLAP
+        for draft in production
+    )
+
+
+def test_chunking_experiment_configuration_rejects_invalid_overlap() -> None:
+    with pytest.raises(ValueError, match="smaller than token_limit"):
+        JobKnowledgeChunkingConfig(token_limit=64, token_overlap=64)
 
 
 def test_chunker_deduplicates_skill_aliases_after_enrichment() -> None:
@@ -467,3 +526,29 @@ async def test_job_import_persists_incremental_knowledge_run(
     )
     assert item is not None
     assert item.job_id == result.jobs[0].id
+
+
+@pytest.mark.asyncio
+async def test_incremental_enqueue_coalesces_active_runs(session: AsyncSession) -> None:
+    first_job = _job("岗位职责\n负责 RAG 服务", title="RAG 实习生 1")
+    second_job = _job("岗位职责\n负责 Agent 服务", title="Agent 实习生 2")
+    session.add_all([first_job, second_job])
+    await session.commit()
+    await session.refresh(first_job)
+    await session.refresh(second_job)
+
+    first_run_id = await enqueue_incremental_knowledge_index(session, [first_job.id])
+    second_run_id = await enqueue_incremental_knowledge_index(session, [second_job.id])
+
+    assert first_run_id == second_run_id
+    run = await session.get(KnowledgeIndexRun, first_run_id)
+    assert run is not None
+    assert run.total_jobs == 2
+    items = list(
+        (
+            await session.scalars(
+                select(KnowledgeIndexRunItem).where(KnowledgeIndexRunItem.run_id == run.id)
+            )
+        ).all()
+    )
+    assert {item.job_id for item in items} == {first_job.id, second_job.id}

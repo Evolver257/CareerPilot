@@ -8,11 +8,24 @@ from typing import Any
 from uuid import uuid4
 
 from app.schemas.tool_protocol import (
+    AgentMessage,
     AgentToolCall,
     AgentToolResult,
     ToolDefinition,
     ToolSource,
 )
+
+
+def _message_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            item.text
+            for item in content
+            if hasattr(item, "text") and isinstance(item.text, str)
+        )
+    return ""
 
 
 def canonical_tool_signature(tool_name: str, arguments: dict[str, Any]) -> str:
@@ -58,6 +71,73 @@ def to_anthropic_tools(definitions: list[ToolDefinition]) -> list[dict[str, Any]
         for item in definitions
         if item.enabled
     ]
+
+
+def to_openai_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]:
+    """Serialize neutral Agent messages into OpenAI chat/tool messages."""
+
+    result: list[dict[str, Any]] = []
+    for message in messages:
+        if message.role == "tool" and message.tool_result is not None:
+            result.append(openai_tool_result_message(message.tool_result))
+            continue
+        item: dict[str, Any] = {
+            "role": message.role,
+            "content": _message_text(message.content),
+        }
+        if message.role == "assistant" and message.tool_calls:
+            item["content"] = item["content"] or None
+            item["tool_calls"] = [
+                {
+                    "id": call.call_id,
+                    "type": "function",
+                    "function": {
+                        "name": call.tool_name,
+                        "arguments": json.dumps(call.arguments, ensure_ascii=False),
+                    },
+                }
+                for call in message.tool_calls
+            ]
+        result.append(item)
+    return result
+
+
+def to_anthropic_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]:
+    """Serialize neutral Agent messages into Anthropic tool-use messages."""
+
+    result: list[dict[str, Any]] = []
+    for message in messages:
+        if message.role == "system":
+            # CareerAdvisor currently keeps runtime instructions in the first
+            # user message. A provider-level system field can be added later.
+            result.append({"role": "user", "content": _message_text(message.content)})
+            continue
+        if message.role == "tool" and message.tool_result is not None:
+            result.append(
+                {
+                    "role": "user",
+                    "content": [anthropic_tool_result_block(message.tool_result)],
+                }
+            )
+            continue
+        if message.role == "assistant" and message.tool_calls:
+            blocks: list[dict[str, Any]] = []
+            text = _message_text(message.content)
+            if text:
+                blocks.append({"type": "text", "text": text})
+            blocks.extend(
+                {
+                    "type": "tool_use",
+                    "id": call.call_id,
+                    "name": call.tool_name,
+                    "input": call.arguments,
+                }
+                for call in message.tool_calls
+            )
+            result.append({"role": "assistant", "content": blocks})
+            continue
+        result.append({"role": message.role, "content": _message_text(message.content)})
+    return result
 
 
 def parse_openai_tool_calls(message: dict[str, Any]) -> list[AgentToolCall]:

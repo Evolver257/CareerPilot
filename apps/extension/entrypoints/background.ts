@@ -26,7 +26,7 @@ import type {
 const API_WS_BASE = "ws://localhost:8010/api/browser-tasks/ws/";
 const API_BASE_URL = "http://localhost:8010";
 const BOSS_SEARCH_STORAGE_KEY = "careerpilot_boss_background_search";
-const RESUMABLE_BOSS_SEARCH_STATES = new Set(["CAPTCHA", "LOGIN_REQUIRED", "RISK_CONTROL"]);
+const RESUMABLE_BOSS_SEARCH_STATES = new Set(["CAPTCHA", "LOGIN_REQUIRED", "RISK_CONTROL", "TAB_HIDDEN"]);
 const sockets = new Map<string, WebSocket>();
 const activeTabs = new Map<string, number>();
 const activeSearchOrigins = new Map<string, number>();
@@ -79,9 +79,10 @@ export default defineBackground(() => {
 async function captureZhaopinVisible(
   message: ZhaopinCaptureRequest,
 ): Promise<ZhaopinCaptureResponse> {
-  const tabs = await browser.tabs.query({
-    url: ["https://zhaopin.com/*", "https://*.zhaopin.com/*"],
-  });
+  // Manual capture must always target the tab the user can currently see.
+  // Never scrape an arbitrary inactive recruitment tab left over from an
+  // earlier task.
+  const tabs = await browser.tabs.query({ active: true, currentWindow: true });
   const tab = tabs.find((item) => item.id !== undefined);
   if (!tab?.id) {
     return {
@@ -135,7 +136,7 @@ async function runBossSearch(
     if (!requirements) throw new Error("请填写岗位要求");
     const existing = await getStoredBossSearch();
     if (existing?.status === "RUNNING" && existing.request_id !== message.request_id) {
-      throw new Error("已有 BOSS 后台采集任务正在运行，请等待其完成后再启动新任务");
+      throw new Error("已有 BOSS 可见采集任务正在运行，请等待其完成后再启动新任务");
     }
     cancelledBossSearchRequests.delete(message.request_id);
     const now = new Date().toISOString();
@@ -159,7 +160,7 @@ async function runBossSearch(
     };
     await storeBossSearch(task);
     const tab = await browser.tabs.create({
-      active: false,
+      active: true,
       url: buildBossSearchUrl(requirements, message.payload.city),
     });
     if (!tab.id) throw new Error("无法创建 BOSS 搜索标签页");
@@ -426,16 +427,24 @@ async function resolveBossSearchTab(task: BossBackgroundSearchTask): Promise<num
         return tab.id;
       }
     } catch {
-      // The original background tab was closed; recreate the search below.
+      // The original visible tab was closed; recreate the search below.
     }
   }
   const tab = await browser.tabs.create({
-    active: false,
+    active: true,
     url: buildBossSearchUrl(task.requirements, task.city),
   });
   if (!tab.id) throw new Error("无法恢复 BOSS 搜索标签页");
   await waitForTabComplete(tab.id);
   return tab.id;
+}
+
+async function activateVisibleTab(tabId: number): Promise<void> {
+  const tab = await browser.tabs.update(tabId, { active: true });
+  if (!tab) return;
+  if (tab.windowId !== undefined && browser.windows?.update) {
+    await browser.windows.update(tab.windowId, { focused: true });
+  }
 }
 
 async function ensureBossSearchPage(tabId: number, task: BossBackgroundSearchTask): Promise<void> {
@@ -488,7 +497,8 @@ async function forwardBossSearchProgress(message: BossCaptureProgress): Promise<
       background_task: task,
     });
   } catch {
-    // The CareerPilot page may have been closed while the background tab continues safely.
+    // The CareerPilot page may have been closed; the visible recruitment tab
+    // remains the only page allowed to continue the collection.
   }
 }
 
@@ -715,14 +725,14 @@ async function startNextBatchTask(): Promise<void> {
   if (batchTabId !== null) {
     try {
       await browser.tabs.get(batchTabId);
-      await browser.tabs.update(batchTabId, { url: next.url });
+      await browser.tabs.update(batchTabId, { active: true, url: next.url });
       return;
     } catch {
       batchTabId = null;
     }
   }
   try {
-    const tab = await browser.tabs.create({ active: false, url: next.url });
+    const tab = await browser.tabs.create({ active: true, url: next.url });
     if (!tab.id) throw new Error("无法创建招聘平台串行投递标签页");
     batchTabId = tab.id;
   } catch (error) {
@@ -762,7 +772,11 @@ async function captureVisibleJobs(
 ): Promise<BossCaptureResponse> {
   let lastResult: BossCaptureResponse | null = null;
   let lastError: unknown = null;
-  const terminalStates = new Set(["CAPTCHA", "LOGIN_REQUIRED", "PLATFORM_LIMIT", "RISK_CONTROL", "DOM_CHANGED"]);
+  const terminalStates = new Set(["CAPTCHA", "LOGIN_REQUIRED", "PLATFORM_LIMIT", "RISK_CONTROL", "DOM_CHANGED", "TAB_HIDDEN"]);
+  // Activate once so the first result surface can load. Once cards are
+  // available, the content script can keep parsing without misclassifying a
+  // complete page as TAB_HIDDEN. A tab hidden before initial load still pauses.
+  await activateVisibleTab(tabId);
   for (let attempt = 0; attempt < 24; attempt += 1) {
     const task = await getStoredBossSearch();
     if (task?.request_id === requestId && (

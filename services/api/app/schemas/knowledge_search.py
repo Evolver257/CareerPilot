@@ -32,6 +32,7 @@ class JobKnowledgeFilters(BaseModel):
     salary_ceiling: int | None = Field(default=None, ge=0)
     published_after: datetime | None = None
     published_before: datetime | None = None
+    collected_after: datetime | None = None
     job_ids: list[UUID] = Field(default_factory=list, max_length=200)
 
 
@@ -350,6 +351,9 @@ class RAGTrace(BaseModel):
     stop_reason: str = ""
     planner_token_usage: dict[str, Any] = Field(default_factory=dict)
     reflection_token_usage: dict[str, Any] = Field(default_factory=dict)
+    knowledge_execution_mode: Literal["direct", "agentic", "fast"] = "agentic"
+    agentic_capability_level: Literal["full", "retrieval_only", "fast"] = "retrieval_only"
+    budget: dict[str, Any] = Field(default_factory=dict)
     plan_version: str = "rules-v1"
     reflection: list[dict[str, Any]] = Field(default_factory=list)
 

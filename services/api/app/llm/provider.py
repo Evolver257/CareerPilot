@@ -11,11 +11,13 @@ import httpx
 from pydantic import BaseModel
 
 from app.llm.usage import UsageRecord, estimate_tokens
-from app.schemas.tool_protocol import NativeToolResponse, ToolDefinition
+from app.schemas.tool_protocol import AgentMessage, NativeToolResponse, ToolDefinition
 from app.services.tool_protocol import (
     parse_anthropic_tool_calls,
     parse_openai_tool_calls,
+    to_anthropic_messages,
     to_anthropic_tools,
+    to_openai_messages,
     to_openai_tools,
 )
 
@@ -81,6 +83,7 @@ class LLMProvider(Protocol):
         model: str | None = None,
         max_tokens: int | None = None,
         tool_choice: str = "auto",
+        messages: list[AgentMessage] | None = None,
     ) -> NativeToolResponse: ...
 
     async def embed(self, text: str, *, model: str | None = None) -> list[float]: ...
@@ -185,8 +188,9 @@ class MockLLMProvider:
         model: str | None = None,
         max_tokens: int | None = None,
         tool_choice: str = "auto",
+        messages: list[AgentMessage] | None = None,
     ) -> NativeToolResponse:
-        del tools, max_tokens, tool_choice
+        del tools, max_tokens, tool_choice, messages
         self.last_usage = UsageRecord(
             prompt_tokens=estimate_tokens(prompt),
             completion_tokens=0,
@@ -556,6 +560,7 @@ class OpenAIProvider(RemoteLLMProvider):
         model: str | None = None,
         max_tokens: int | None = None,
         tool_choice: str = "auto",
+        messages: list[AgentMessage] | None = None,
     ) -> NativeToolResponse:
         url, headers, payload = self._chat_request(
             prompt,
@@ -563,6 +568,8 @@ class OpenAIProvider(RemoteLLMProvider):
             max_tokens=max_tokens,
         )
         payload["tools"] = to_openai_tools(tools)
+        if messages:
+            payload["messages"] = to_openai_messages(messages)
         payload["tool_choice"] = tool_choice
         payload["parallel_tool_calls"] = False
         data = await self._post_json(url, headers=headers, payload=payload)
@@ -695,6 +702,7 @@ class AnthropicProvider(RemoteLLMProvider):
         model: str | None = None,
         max_tokens: int | None = None,
         tool_choice: str = "auto",
+        messages: list[AgentMessage] | None = None,
     ) -> NativeToolResponse:
         url, headers, payload = self._messages_request(
             prompt,
@@ -703,6 +711,8 @@ class AnthropicProvider(RemoteLLMProvider):
             reasoning_effort="none",
         )
         payload["tools"] = to_anthropic_tools(tools)
+        if messages:
+            payload["messages"] = to_anthropic_messages(messages)
         if tool_choice != "auto":
             payload["tool_choice"] = {"type": "any" if tool_choice == "required" else tool_choice}
         data = await self._post_json(url, headers=headers, payload=payload)

@@ -57,6 +57,12 @@ class KnowledgeEmbeddingUnavailableError(KnowledgeRetrievalError):
     pass
 
 
+class KnowledgeEmbeddingIncompatibleError(KnowledgeEmbeddingUnavailableError):
+    """The configured query vector cannot be compared with stored vectors."""
+
+    pass
+
+
 @dataclass
 class _ChunkHit:
     chunk: JobKnowledgeChunk
@@ -82,6 +88,7 @@ _SECTION_WEIGHTS = {
     "requirements": 0.98,
     "responsibilities": 0.94,
     "overview": 0.88,
+    "direction": 0.86,
     "education": 0.82,
     "experience": 0.82,
     "salary_benefits": 0.7,
@@ -140,6 +147,20 @@ _DOMAIN_QUERY_TERMS = (
     "产品经理",
     "网络安全",
     "算法",
+)
+_QUERY_CONCEPT_EXPANSIONS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("企鹅操作系统", "类 unix", "类unix"), ("Linux", "Shell")),
+    (("命令行", "终端命令"), ("Linux", "Shell", "Bash")),
+    (
+        ("生成答案质量", "答案质量", "模型质量", "评估生成结果", "验证生成答案"),
+        ("模型评测", "评测集", "评估体系"),
+    ),
+    (
+        ("模型服务上线", "模型上线", "更快响应", "推理速度", "推理延迟"),
+        ("模型部署", "推理优化", "vLLM", "TensorRT"),
+    ),
+    (("外部工具", "调用工具", "执行查询和操作"), ("Function Calling", "Tool Calling")),
+    (("企业实践", "在校实践", "还在读书"), ("实习", "实习生")),
 )
 
 
@@ -205,6 +226,9 @@ def _query_terms(query: str) -> list[str]:
             token for token in re.findall(r"[a-z0-9][a-z0-9+#._/-]*", normalized) if len(token) > 1
         )
     terms.extend(term for term in _DOMAIN_QUERY_TERMS if term in normalized)
+    for cues, expansions in _QUERY_CONCEPT_EXPANSIONS:
+        if any(cue in normalized for cue in cues):
+            terms.extend(expansions)
 
     if not terms:
         for segment in re.findall(r"[\u3400-\u9fff]{2,}", normalized):
@@ -220,6 +244,39 @@ def _query_terms(query: str) -> list[str]:
             if len(term.strip()) >= 2 and term.strip() not in _QUERY_STOP_PHRASES
         )
     )[:20]
+
+
+def section_weights_for_query(query: str) -> dict[str, float]:
+    """Adjust section authority to the information requested by the user."""
+
+    weights = dict(_SECTION_WEIGHTS)
+    lowered = query.casefold()
+    intents: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
+        (
+            ("技能", "技术栈", "掌握", "熟悉", "能力", "skill"),
+            ("required_skills", "requirements", "preferred_skills"),
+        ),
+        (("学历", "本科", "硕士", "博士", "大专"), ("education", "requirements")),
+        (("经验", "年限", "应届"), ("experience", "requirements")),
+        (("薪资", "工资", "待遇", "收入"), ("salary_benefits", "overview")),
+        (("职责", "工作内容", "做什么", "任务"), ("responsibilities", "requirements")),
+        (
+            ("方向", "岗位类型", "职位类别", "岗位族群"),
+            ("direction", "overview", "business_domain"),
+        ),
+    ]
+    matched = [sections for cues, sections in intents if any(cue in lowered for cue in cues)]
+    if not matched:
+        return weights
+    requested = set().union(*matched)
+    for section in weights:
+        if section in requested:
+            weights[section] = max(0.92, min(1.0, weights[section] + 0.16))
+        elif section == "source_context":
+            weights[section] = 0.48
+        else:
+            weights[section] = max(0.3, weights[section] * 0.68)
+    return weights
 
 
 def extract_query_terms(query: str) -> list[str]:
@@ -346,11 +403,18 @@ class JobKnowledgeRAG:
         self.matching_repository = MatchingRepository(session)
 
     async def knowledge_update_in_progress(self) -> bool:
-        """Return whether an indexing run is active without touching embeddings."""
+        """Return whether a full rebuild is active without touching embeddings.
+
+        Incremental runs deliberately do not participate in this switch. They
+        write new documents while previously completed chunks remain valid and
+        searchable, so a small import must never downgrade the whole knowledge
+        base to a slower full-text-only path.
+        """
 
         run_id = await self.session.scalar(
             select(KnowledgeIndexRun.id)
             .where(KnowledgeIndexRun.status.in_(["PENDING", "RUNNING"]))
+            .where(KnowledgeIndexRun.mode == "backfill")
             .limit(1)
         )
         return run_id is not None
@@ -441,7 +505,7 @@ class JobKnowledgeRAG:
             for (query, cache_key), vector in zip(missing, vectors, strict=True):
                 normalized_vector = list(vector)
                 if len(normalized_vector) != self.settings.embedding_dimensions:
-                    raise KnowledgeRetrievalError(
+                    raise KnowledgeEmbeddingIncompatibleError(
                         "向量维度不兼容："
                         f"岗位知识库要求 {self.settings.embedding_dimensions} 维，"
                         f"当前为 {len(normalized_vector)} 维。"
@@ -472,8 +536,8 @@ class JobKnowledgeRAG:
         ):
             raise KnowledgeRetrievalError("薪资下限不能高于薪资上限")
 
-        indexing_in_progress = await self.knowledge_update_in_progress()
-        if indexing_in_progress:
+        rebuild_in_progress = await self.knowledge_update_in_progress()
+        if rebuild_in_progress:
             request = request.model_copy(
                 update={
                     "retrieval_mode": "full_text",
@@ -500,9 +564,7 @@ class JobKnowledgeRAG:
             request.section_types,
         )
         warnings: list[str] = (
-            ["知识库正在增量更新，检索速度可能降低。"]
-            if indexing_in_progress
-            else []
+            ["知识库正在全量重建，当前使用快速全文检索。"] if rebuild_in_progress else []
         )
         hits: dict[UUID, _ChunkHit] = {}
         if request.retrieval_mode in {"hybrid", "full_text"}:
@@ -518,14 +580,20 @@ class JobKnowledgeRAG:
             if self.embedding_provider is None and request.retrieval_mode == "hybrid":
                 warnings.append("未配置 Embedding Provider，本次仅使用全文召回。")
             else:
-                vector_hits = await self._vector_retrieve(
-                    request.filters,
-                    request.query,
-                    request.vector_top_k,
-                    request.section_types,
-                    query_embedding=query_embedding,
-                )
-                self._merge_hits(hits, vector_hits, "vector")
+                try:
+                    vector_hits = await self._vector_retrieve(
+                        request.filters,
+                        request.query,
+                        request.vector_top_k,
+                        request.section_types,
+                        query_embedding=query_embedding,
+                    )
+                except KnowledgeEmbeddingIncompatibleError:
+                    if request.retrieval_mode != "hybrid":
+                        raise
+                    warnings.append("查询向量维度不兼容，本次已降级为全文召回。")
+                else:
+                    self._merge_hits(hits, vector_hits, "vector")
         if hits:
             job_ids = list(dict.fromkeys([*job_ids, *(hit.job.id for hit in hits.values())]))
         statistics = await self.statistics_for_jobs(job_ids)
@@ -767,6 +835,8 @@ class JobKnowledgeRAG:
             conditions.append(Job.publish_time >= filters.published_after)
         if filters.published_before is not None:
             conditions.append(Job.publish_time <= filters.published_before)
+        if filters.collected_after is not None:
+            conditions.append(Job.last_collected_at >= filters.collected_after)
         if filters.job_ids:
             conditions.append(Job.id.in_(filters.job_ids))
         if section_types:
@@ -879,7 +949,7 @@ class JobKnowledgeRAG:
         if query_embedding is None:
             raise KnowledgeEmbeddingUnavailableError("未生成查询向量")
         if len(query_embedding) != self.settings.embedding_dimensions:
-            raise KnowledgeRetrievalError(
+            raise KnowledgeEmbeddingIncompatibleError(
                 "向量维度不兼容："
                 f"岗位知识库要求 {self.settings.embedding_dimensions} 维，"
                 f"当前为 {len(query_embedding)} 维。"
@@ -966,6 +1036,7 @@ class JobKnowledgeRAG:
     ) -> list[_ChunkHit]:
         if not hits:
             return []
+        section_weights = section_weights_for_query(query)
         max_rrf = 0.0
         max_rrf = max(max_rrf, 1e-9)
         for hit in hits.values():
@@ -986,7 +1057,7 @@ class JobKnowledgeRAG:
         for hit in hits.values():
             rrf_score = hit.fusion_score / max_rrf
             title_score = _lexical_score(query, hit.job, hit.company_name, hit.job.title)
-            section_score = _SECTION_WEIGHTS.get(hit.chunk.section_type, 0.5)
+            section_score = section_weights.get(hit.chunk.section_type, 0.5)
             if mode == "full_text":
                 base = 0.8 * hit.lexical_score + 0.2 * rrf_score
             elif mode == "vector":

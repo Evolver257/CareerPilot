@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -15,12 +16,15 @@ from app.schemas.career_advisor import (
     CareerAdvisorCancelApplicationRequest,
     CareerAdvisorCitationListResponse,
     CareerAdvisorCitationRead,
+    CareerAdvisorCollectionCompletedRequest,
     CareerAdvisorConfirmApplicationRequest,
     CareerAdvisorMessageCreate,
     CareerAdvisorMessageRead,
     CareerAdvisorPrepareApplicationRequest,
     CareerAdvisorRoleComparisonRequest,
     CareerAdvisorSessionCreate,
+    CareerAdvisorSessionJobsBindRequest,
+    CareerAdvisorSessionJobsBindResponse,
     CareerAdvisorSessionListResponse,
     CareerAdvisorSessionRead,
     CareerAdvisorSessionUpdate,
@@ -41,6 +45,47 @@ from app.services.career_advisor import (
 from app.services.job_knowledge_rag import KnowledgeRetrievalError
 
 router = APIRouter(prefix="/api/career-advisor", tags=["career-advisor"])
+
+
+@router.post(
+    "/sessions/{session_id}/jobs/bind",
+    response_model=CareerAdvisorSessionJobsBindResponse,
+)
+async def bind_career_advisor_session_jobs(
+    session_id: UUID,
+    payload: CareerAdvisorSessionJobsBindRequest,
+    service: CareerAdvisorService = Depends(get_career_advisor_service),
+) -> CareerAdvisorSessionJobsBindResponse:
+    try:
+        return await service.bind_session_jobs(session_id, payload)
+    except CareerAdvisorNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except CareerAdvisorActionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(
+    "/sessions/{session_id}/messages/{message_id}/collection-complete/stream",
+)
+async def stream_career_advisor_collection_continuation(
+    session_id: UUID,
+    message_id: UUID,
+    payload: CareerAdvisorCollectionCompletedRequest,
+    service: CareerAdvisorService = Depends(get_career_advisor_service),
+) -> StreamingResponse:
+    """Resume the original question after browser collection has completed."""
+
+    try:
+        pending = await service.create_collection_continuation_pending(
+            session_id,
+            message_id,
+            payload,
+        )
+        return _stream_pending_message(service, pending)
+    except CareerAdvisorNotFoundError as exc:
+        raise _not_found(exc) from exc
+    except CareerAdvisorActionError as exc:
+        raise _action_error(exc) from exc
 
 
 def _citation_read(citation: CareerAdvisorCitation) -> CareerAdvisorCitationRead:
@@ -377,6 +422,15 @@ def _sse(event_type: str, payload: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _message_started_payload(message_id: UUID) -> dict[str, str]:
+    return {
+        "message_id": str(message_id),
+        "run_id": str(message_id),
+        "event_id": f"message-started:{message_id}",
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+
+
 def _stream_pending_message(
     service: CareerAdvisorService,
     pending: CareerAdvisorMessage,
@@ -394,7 +448,7 @@ def _stream_pending_message(
 
     async def event_stream() -> AsyncIterator[str]:
         try:
-            yield _sse("message_started", {"message_id": str(pending.id)})
+            yield _sse("message_started", _message_started_payload(pending.id))
             while True:
                 try:
                     event_type, event_payload = await asyncio.wait_for(queue.get(), 0.25)
@@ -419,6 +473,42 @@ def _stream_pending_message(
             raise
         finally:
             unregister_career_message_task(pending.id)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/messages/{message_id}/stream")
+async def recover_career_advisor_message_stream(
+    message_id: UUID,
+    service: CareerAdvisorService = Depends(get_career_advisor_service),
+) -> StreamingResponse:
+    """Recover the durable result after an SSE connection is interrupted.
+
+    The original POST stream owns the live event queue.  This lightweight
+    stream intentionally resumes from the persisted message checkpoint and
+    emits the terminal message once it is available, so a browser reconnect
+    cannot duplicate answer deltas.
+    """
+
+    try:
+        await service.get_message(message_id)
+    except CareerAdvisorNotFoundError as exc:
+        raise _not_found(exc) from exc
+
+    async def event_stream() -> AsyncIterator[str]:
+        terminal = {"COMPLETED", "FAILED", "CANCELLED"}
+        yield _sse("message_started", _message_started_payload(message_id))
+        while True:
+            message = await service.get_message(message_id)
+            if message.status in terminal:
+                yield _sse("message_state", _message_read(message).model_dump(mode="json"))
+                return
+            yield ": heartbeat\n\n"
+            await asyncio.sleep(0.5)
 
     return StreamingResponse(
         event_stream(),

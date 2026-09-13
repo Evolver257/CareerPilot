@@ -5,7 +5,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
+    )
 
     app_name: str = "CareerPilot API"
     environment: str = "development"
@@ -22,6 +27,18 @@ class Settings(BaseSettings):
     embedding_provider: str = Field(default="auto", validation_alias="EMBEDDING_PROVIDER")
     embedding_api_key: str = Field(default="", validation_alias="EMBEDDING_API_KEY")
     embedding_base_url: str = Field(default="", validation_alias="EMBEDDING_BASE_URL")
+    memory_extraction_timeout_seconds: float = Field(
+        default=8.0,
+        ge=1.0,
+        le=60.0,
+        validation_alias="MEMORY_EXTRACTION_TIMEOUT_SECONDS",
+    )
+    memory_retrieval_timeout_seconds: float = Field(
+        default=4.0,
+        ge=0.1,
+        le=60.0,
+        validation_alias="MEMORY_RETRIEVAL_TIMEOUT_SECONDS",
+    )
     semantic_model: str = Field(
         default="Qwen/Qwen3-Embedding-0.6B",
         validation_alias="SEMANTIC_MODEL",
@@ -105,15 +122,9 @@ class Settings(BaseSettings):
     )
     rag_max_iterations: int = Field(default=2, ge=1, le=3, validation_alias="RAG_MAX_ITERATIONS")
     rag_max_queries: int = Field(default=6, ge=1, le=8, validation_alias="RAG_MAX_QUERIES")
-    rag_llm_planner_enabled: bool = Field(
-        default=True, validation_alias="RAG_LLM_PLANNER_ENABLED"
-    )
-    rag_planner_shadow_mode: bool = Field(
-        default=False, validation_alias="RAG_PLANNER_SHADOW_MODE"
-    )
-    rag_reflection_enabled: bool = Field(
-        default=True, validation_alias="RAG_REFLECTION_ENABLED"
-    )
+    rag_llm_planner_enabled: bool = Field(default=True, validation_alias="RAG_LLM_PLANNER_ENABLED")
+    rag_planner_shadow_mode: bool = Field(default=False, validation_alias="RAG_PLANNER_SHADOW_MODE")
+    rag_reflection_enabled: bool = Field(default=True, validation_alias="RAG_REFLECTION_ENABLED")
     rag_answer_reflection_enabled: bool = Field(
         default=True, validation_alias="RAG_ANSWER_REFLECTION_ENABLED"
     )
@@ -124,6 +135,15 @@ class Settings(BaseSettings):
         default=1, ge=0, le=2, validation_alias="RAG_MAX_ANSWER_REPAIRS"
     )
     rag_max_tool_calls: int = Field(default=8, ge=1, le=20, validation_alias="RAG_MAX_TOOL_CALLS")
+    rag_max_search_calls: int = Field(
+        default=6, ge=1, le=20, validation_alias="RAG_MAX_SEARCH_CALLS"
+    )
+    rag_max_llm_calls: int = Field(
+        default=4, ge=0, le=10, validation_alias="RAG_MAX_LLM_CALLS"
+    )
+    rag_total_token_budget: int = Field(
+        default=12000, ge=1000, le=100000, validation_alias="RAG_TOTAL_TOKEN_BUDGET"
+    )
     agent_tool_timeout_seconds: float = Field(
         default=30,
         ge=0.1,

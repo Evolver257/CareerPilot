@@ -1,0 +1,80 @@
+{
+  "annotation_quality": {
+    "adjudicated_pairs": 0,
+    "agreement_rate": null,
+    "cohen_kappa": null,
+    "conflict_pairs": 0,
+    "dual_annotated_pairs": 0,
+    "stable_gold": false,
+    "weighted_kappa": null
+  },
+  "failure_cases": [],
+  "metadata": {
+    "candidate_pool_sha256": "84f2207397adeee502d3ec1c2a79e21bf01ba1938434a926cf295fd900668a7c",
+    "corpus_sha256": "eb4a1d4e4862e31efac9caed7a8ce1aae096806c67b078158f4ff406f11c3376",
+    "dataset_version": "rag-v2.0.0",
+    "environment": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "python": "3.13.9"
+    },
+    "git_commit": "ed3b39bf8552443d192ece1b98d2d8b235faebf9",
+    "git_dirty": true,
+    "label_status": "awaiting_review",
+    "model_signature": {
+      "chunk_overlap": 16,
+      "chunk_size": 160,
+      "knowledge_version": "JOB_KNOWLEDGE_V3",
+      "production_embedding": "Qwen/Qwen3-Embedding-0.6B",
+      "reranker": "optional; configured per run"
+    },
+    "parameters": {
+      "bootstrap_iterations": 1000,
+      "candidate_pool_size": 30,
+      "seed": 20260910
+    },
+    "quality_claim_allowed": false,
+    "queries_sha256": "6518202ee232aa4812beea91c2081d79ecaf74c95172d90fe5011d12d79673b8"
+  },
+  "methods": {
+    "agentic_rag": {
+      "metrics": null,
+      "note": "未完成双人标注与仲裁，不输出质量结论",
+      "status": "awaiting_review"
+    },
+    "current_hybrid": {
+      "metrics": null,
+      "note": "未完成双人标注与仲裁，不输出质量结论",
+      "status": "awaiting_review"
+    },
+    "full_text_bm25": {
+      "metrics": null,
+      "note": "未完成双人标注与仲裁，不输出质量结论",
+      "status": "awaiting_review"
+    },
+    "hybrid_dynamic_fields": {
+      "metrics": null,
+      "note": "未完成双人标注与仲裁，不输出质量结论",
+      "status": "awaiting_review"
+    },
+    "multi_channel_rrf": {
+      "metrics": null,
+      "note": "未完成双人标注与仲裁，不输出质量结论",
+      "status": "awaiting_review"
+    },
+    "optional_reranker": {
+      "metrics": null,
+      "note": "未完成双人标注与仲裁，不输出质量结论",
+      "status": "awaiting_review"
+    },
+    "qwen3_vector": {
+      "metrics": null,
+      "note": "未完成双人标注与仲裁，不输出质量结论",
+      "status": "awaiting_review"
+    },
+    "structured_skill": {
+      "metrics": null,
+      "note": "未完成双人标注与仲裁，不输出质量结论",
+      "status": "awaiting_review"
+    }
+  }
+}

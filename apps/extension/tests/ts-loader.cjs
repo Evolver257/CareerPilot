@@ -20,7 +20,7 @@ function loadTs(file, globals = {}, cache = new Map()) {
   return module.exports;
 }
 function parser(html, url) {
-  const dom = new JSDOM(html, { url });
+  const dom = new JSDOM(html, { url, pretendToBeVisual: true });
   const window = dom.window;
   window.HTMLElement.prototype.getBoundingClientRect = () => ({ height: 40, width: 100 });
   window.HTMLElement.prototype.scrollIntoView = () => {};

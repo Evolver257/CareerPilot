@@ -14,11 +14,12 @@ from app.llm.tokenization import (
 )
 from app.models.entities import Job
 
-JOB_KNOWLEDGE_VERSION = "JOB_KNOWLEDGE_V4"
-JOB_KNOWLEDGE_CHUNKING_VERSION = "JD_SEMANTIC_V5_PROVIDER_TOKENS"
+JOB_KNOWLEDGE_VERSION = "JOB_KNOWLEDGE_V6_CONTEXTUAL_160_16"
+JOB_KNOWLEDGE_CHUNKING_VERSION = "JD_SEMANTIC_V7_CONTEXTUAL_160_16_PROVIDER_TOKENS"
 JOB_KNOWLEDGE_PARSER_VERSION = "JOB_EXTRACTION_V5"
 JOB_KNOWLEDGE_CHUNK_CHAR_LIMIT = 1400
-JOB_KNOWLEDGE_CHUNK_TOKEN_LIMIT = 110
+JOB_KNOWLEDGE_CHUNK_TOKEN_LIMIT = 160
+JOB_KNOWLEDGE_CHUNK_TOKEN_OVERLAP = 16
 _SECTION_HEADINGS = {
     "岗位职责",
     "工作职责",
@@ -49,9 +50,32 @@ _REQUIREMENT_CUES = re.compile(
 class JobKnowledgeChunkDraft:
     section_type: str
     content: str
+    embedding_content: str
     content_hash: str
     token_count: int
     metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class JobKnowledgeChunkingConfig:
+    """Tunable boundaries for isolated indexing experiments.
+
+    Production callers intentionally keep the semantic V5 defaults.  Offline
+    evaluations can provide a different configuration without mutating module
+    constants or the production index.
+    """
+
+    char_limit: int = JOB_KNOWLEDGE_CHUNK_CHAR_LIMIT
+    token_limit: int = JOB_KNOWLEDGE_CHUNK_TOKEN_LIMIT
+    token_overlap: int = JOB_KNOWLEDGE_CHUNK_TOKEN_OVERLAP
+
+    def __post_init__(self) -> None:
+        if self.char_limit < 64:
+            raise ValueError("char_limit must be at least 64")
+        if self.token_limit < 16:
+            raise ValueError("token_limit must be at least 16")
+        if self.token_overlap < 0 or self.token_overlap >= self.token_limit:
+            raise ValueError("token_overlap must be non-negative and smaller than token_limit")
 
 
 SKILL_ALIASES: dict[str, str] = {
@@ -101,6 +125,11 @@ SKILL_ALIASES: dict[str, str] = {
     "postgres": "PostgreSQL",
     "redis": "Redis",
     "git": "Git",
+    "linux": "Linux",
+    "linux 系统": "Linux",
+    "shell": "Shell",
+    "bash": "Shell",
+    "命令行": "Shell",
 }
 
 SKILL_CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -190,10 +219,12 @@ def normalize_experience_requirement(value: str | None) -> str:
 def build_job_knowledge_chunks(
     job: Job,
     token_counter: TokenCounter | None = None,
+    chunking: JobKnowledgeChunkingConfig | None = None,
 ) -> list[JobKnowledgeChunkDraft]:
     """Create semantic JD sections without asking an LLM to rewrite source text."""
 
     counter = token_counter or APPROXIMATE_TOKEN_COUNTER
+    chunking = chunking or JobKnowledgeChunkingConfig()
 
     structured = (job.normalized_data or {}).get("structured_job") or {}
     requirements = (job.normalized_data or {}).get("requirements") or {}
@@ -202,11 +233,13 @@ def build_job_knowledge_chunks(
         company = job.company.name
 
     responsibilities = _list_values(
-        structured.get("responsibilities"), requirements.get("responsibilities"),
+        structured.get("responsibilities"),
+        requirements.get("responsibilities"),
         (job.normalized_data or {}).get("pipeline", {}).get("responsibilities"),
     )
     qualifications = _list_values(
-        requirements.get("qualifications"), requirements.get("preferred_qualifications"),
+        requirements.get("qualifications"),
+        requirements.get("preferred_qualifications"),
         (job.normalized_data or {}).get("pipeline", {}).get("requirements"),
     )
     pipeline = (job.normalized_data or {}).get("pipeline") or {}
@@ -219,11 +252,13 @@ def build_job_knowledge_chunks(
         [skill.skill_name for skill in job.skills if skill.skill_type in {"preferred", "optional"}],
     )
     persisted_requirements = job.__dict__.get("requirements", [])
-    direction_values = _unique_values([
-        str((item.requirement_metadata or {}).get("label") or item.normalized_value)
-        for item in persisted_requirements
-        if item.requirement_type == "direction"
-    ])
+    direction_values = _unique_values(
+        [
+            str((item.requirement_metadata or {}).get("label") or item.normalized_value)
+            for item in persisted_requirements
+            if item.requirement_type == "direction"
+        ]
+    )
     fields: list[tuple[str, str, list[str]]] = [
         (
             "overview",
@@ -278,7 +313,8 @@ def build_job_knowledge_chunks(
                 [
                     _salary_line(job),
                     *_list_values(
-                        structured.get("benefits"), requirements.get("benefits"),
+                        structured.get("benefits"),
+                        requirements.get("benefits"),
                         pipeline.get("benefits"),
                     ),
                 ]
@@ -293,11 +329,26 @@ def build_job_knowledge_chunks(
 
     drafts: list[JobKnowledgeChunkDraft] = []
     for section_type, heading, values in fields:
-        chunker = _atomic_section_chunks if section_type in {
-            "direction", "required_skills", "preferred_skills", "education", "experience"
-        } else _section_chunks
-        for index, content in enumerate(chunker(heading, values, counter)):
-            drafts.append(_draft(section_type, content, job, index, counter))
+        embedding_context = _embedding_context(job, structured, heading, counter)
+        content_chunking = _content_chunking(chunking, embedding_context, counter)
+        chunker = (
+            _atomic_section_chunks
+            if section_type
+            in {"direction", "required_skills", "preferred_skills", "education", "experience"}
+            else _section_chunks
+        )
+        for index, content in enumerate(chunker(heading, values, counter, content_chunking)):
+            drafts.append(
+                _draft(
+                    section_type,
+                    content,
+                    job,
+                    index,
+                    counter,
+                    chunking,
+                    embedding_context,
+                )
+            )
 
     covered_values = _unique_values(
         [
@@ -309,9 +360,74 @@ def build_job_knowledge_chunks(
         ]
     )
     residual_lines = _uncovered_source_lines(job.description, covered_values)
-    for index, content in enumerate(_section_chunks("原文补充", residual_lines, counter)):
-        drafts.append(_draft("source_context", content, job, index, counter))
+    embedding_context = _embedding_context(job, structured, "原文补充", counter)
+    content_chunking = _content_chunking(chunking, embedding_context, counter)
+    for index, content in enumerate(
+        _section_chunks("原文补充", residual_lines, counter, content_chunking)
+    ):
+        drafts.append(
+            _draft(
+                "source_context",
+                content,
+                job,
+                index,
+                counter,
+                chunking,
+                embedding_context,
+            )
+        )
     return drafts
+
+
+def _embedding_context(
+    job: Job,
+    structured: dict[str, Any],
+    heading: str,
+    token_counter: TokenCounter,
+) -> str:
+    """Build a bounded retrieval prefix while preserving the source evidence."""
+
+    title = re.sub(r"\s+", " ", job.title or "未命名岗位").strip()[:80]
+    direction = re.sub(r"\s+", " ", str(structured.get("role_category") or "")).strip()[:50]
+    location = re.sub(r"\s+", " ", job.location or "").strip()[:30]
+    required = [f"岗位：{title}", f"证据类型：{heading}"]
+    optional = [
+        value
+        for value in (
+            f"岗位方向：{direction}" if direction else "",
+            f"地点：{location}" if location else "",
+        )
+        if value
+    ]
+    lines = [required[0], *optional, required[1]]
+    while optional and token_counter.count("\n".join(lines)) > 48:
+        optional.pop()
+        lines = [required[0], *optional, required[1]]
+    if token_counter.count("\n".join(lines)) > 48:
+        title_budget = max(8, 48 - token_counter.count(f"岗位：\n{required[1]}") - 2)
+        title_end = max_prefix_end(
+            title,
+            max_chars=60,
+            max_tokens=title_budget,
+            counter=token_counter,
+        )
+        lines = [f"岗位：{title[:title_end]}", required[1]]
+    return "\n".join(lines)
+
+
+def _content_chunking(
+    chunking: JobKnowledgeChunkingConfig,
+    embedding_context: str,
+    token_counter: TokenCounter,
+) -> JobKnowledgeChunkingConfig:
+    reserved_tokens = token_counter.count(f"{embedding_context}\n")
+    reserved_chars = len(embedding_context) + 1
+    token_limit = max(24, chunking.token_limit - reserved_tokens)
+    return JobKnowledgeChunkingConfig(
+        char_limit=max(64, chunking.char_limit - reserved_chars),
+        token_limit=token_limit,
+        token_overlap=min(chunking.token_overlap, token_limit - 1),
+    )
 
 
 def _draft(
@@ -320,15 +436,19 @@ def _draft(
     job: Job,
     index: int,
     token_counter: TokenCounter,
+    chunking: JobKnowledgeChunkingConfig,
+    embedding_context: str,
 ) -> JobKnowledgeChunkDraft:
     company = str((job.raw_data or {}).get("company_name") or "").strip()
     if not company and job.company is not None:
         company = job.company.name
+    embedding_content = f"{embedding_context}\n{content}".strip()
     return JobKnowledgeChunkDraft(
         section_type=section_type,
         content=content,
-        content_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
-        token_count=token_counter.count(content),
+        embedding_content=embedding_content,
+        content_hash=hashlib.sha256(embedding_content.encode("utf-8")).hexdigest(),
+        token_count=token_counter.count(embedding_content),
         metadata={
             "section_type": section_type,
             "chunk_index": index,
@@ -340,6 +460,8 @@ def _draft(
             "experience": job.experience_requirement,
             "source_url": job.source_url,
             "evidence_type": "source_text",
+            "embedding_context": embedding_context,
+            "source_content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
             "quality_score": job.data_quality_score,
             "quality_level": job.data_quality_level,
             "lifecycle_status": job.lifecycle_status,
@@ -347,6 +469,8 @@ def _draft(
             "tokenizer_signature": token_counter.signature,
             "token_count_exact": token_counter.exact,
             "chunking_version": JOB_KNOWLEDGE_CHUNKING_VERSION,
+            "chunk_token_limit": chunking.token_limit,
+            "chunk_token_overlap": chunking.token_overlap,
         },
     )
 
@@ -355,31 +479,39 @@ def _section_chunks(
     heading: str,
     values: list[str],
     token_counter: TokenCounter,
+    chunking: JobKnowledgeChunkingConfig,
 ) -> list[str]:
     clean_values = _unique_values(values)
     if not clean_values:
         return []
     chunks: list[str] = []
-    current = f"## {heading}"
+    heading_line = f"## {heading}"
+    current_values: list[str] = []
     expanded_values = _unique_values(
         [
             segment
             for value in clean_values
-            for segment in _split_value(value, heading, token_counter)
+            for segment in _split_value(value, heading, token_counter, chunking)
         ]
     )
     for value in expanded_values:
         line = f"- {value}"
-        if len(current) > len(f"## {heading}") and (
-            len(current) + len(line) + 1 > JOB_KNOWLEDGE_CHUNK_CHAR_LIMIT
-            or token_counter.count(f"{current}\n{line}") > JOB_KNOWLEDGE_CHUNK_TOKEN_LIMIT
+        current = "\n".join([heading_line, *(f"- {item}" for item in current_values)])
+        if current_values and (
+            len(current) + len(line) + 1 > chunking.char_limit
+            or token_counter.count(f"{current}\n{line}") > chunking.token_limit
         ):
             chunks.append(current)
-            current = f"## {heading}\n{line}"
-        else:
-            current = f"{current}\n{line}"
-    if current != f"## {heading}":
-        chunks.append(current)
+            current_values = _overlap_values(
+                current_values,
+                heading_line,
+                value,
+                token_counter,
+                chunking,
+            )
+        current_values.append(value)
+    if current_values:
+        chunks.append("\n".join([heading_line, *(f"- {item}" for item in current_values)]))
     return chunks
 
 
@@ -387,13 +519,43 @@ def _atomic_section_chunks(
     heading: str,
     values: list[str],
     token_counter: TokenCounter,
+    chunking: JobKnowledgeChunkingConfig,
 ) -> list[str]:
     """Keep every scoring requirement independently retrievable and citeable."""
     return [
         f"## {heading}\n- {segment}"
         for value in _unique_values(values)
-        for segment in _split_value(value, heading, token_counter)
+        for segment in _split_value(value, heading, token_counter, chunking)
     ]
+
+
+def _overlap_values(
+    previous: list[str],
+    heading_line: str,
+    next_value: str,
+    token_counter: TokenCounter,
+    chunking: JobKnowledgeChunkingConfig,
+) -> list[str]:
+    """Carry complete semantic units across a boundary when they fit the overlap budget."""
+
+    if not chunking.token_overlap:
+        return []
+    carried: list[str] = []
+    for value in reversed(previous):
+        candidate = [value, *carried]
+        overlap_text = "\n".join(f"- {item}" for item in candidate)
+        if token_counter.count(overlap_text) > chunking.token_overlap:
+            break
+        carried = candidate
+    while carried:
+        combined = "\n".join([heading_line, *(f"- {item}" for item in carried), f"- {next_value}"])
+        if (
+            len(combined) <= chunking.char_limit
+            and token_counter.count(combined) <= chunking.token_limit
+        ):
+            break
+        carried.pop(0)
+    return carried
 
 
 def estimate_knowledge_tokens(value: str) -> int:
@@ -402,11 +564,14 @@ def estimate_knowledge_tokens(value: str) -> int:
     return approximate_multilingual_tokens(value)
 
 
-def _split_value(value: str, heading: str, token_counter: TokenCounter) -> list[str]:
-    char_budget = JOB_KNOWLEDGE_CHUNK_CHAR_LIMIT - len(f"## {heading}\n- ")
-    token_budget = JOB_KNOWLEDGE_CHUNK_TOKEN_LIMIT - token_counter.count(
-        f"## {heading}\n- "
-    )
+def _split_value(
+    value: str,
+    heading: str,
+    token_counter: TokenCounter,
+    chunking: JobKnowledgeChunkingConfig,
+) -> list[str]:
+    char_budget = chunking.char_limit - len(f"## {heading}\n- ")
+    token_budget = chunking.token_limit - token_counter.count(f"## {heading}\n- ")
     if len(value) <= char_budget and token_counter.count(value) <= token_budget:
         return [value]
     units = [

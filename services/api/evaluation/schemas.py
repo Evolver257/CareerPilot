@@ -144,6 +144,64 @@ class AnswerEvaluationCase(BaseModel):
         return self
 
 
+class ExpectedMemoryCandidate(BaseModel):
+    """A human-reviewed memory extraction target for one user utterance."""
+
+    memory_type: str = Field(min_length=1, max_length=80)
+    memory_key: str | None = Field(default=None, max_length=200)
+    source_quote: str | None = Field(default=None, max_length=500)
+    required: bool = True
+
+
+class MemoryEvaluationCase(BaseModel):
+    """Gold case for memory extraction, retrieval, personalization, and privacy."""
+
+    case_id: str = Field(min_length=1, max_length=200)
+    dataset_version: str = Field(min_length=1, max_length=80)
+    split: Literal["dev", "test"]
+    category: Literal["extraction", "retrieval", "privacy", "personalization"]
+    user_query: str = Field(min_length=1)
+    expected_candidates: list[ExpectedMemoryCandidate] = Field(default_factory=list)
+    expected_retrieval_memory_ids: list[str] = Field(default_factory=list)
+    retrieval_top_k: int = Field(default=6, ge=1, le=50)
+    expected_sensitive_rejection: bool = False
+    annotation_status: AnnotationStatus = "seed_requires_dual_review"
+    annotators: list[str] = Field(default_factory=list)
+    adjudicated_by: str | None = None
+    notes: str = ""
+
+    @model_validator(mode="after")
+    def validate_case(self) -> MemoryEvaluationCase:
+        if self.expected_sensitive_rejection and self.expected_candidates:
+            raise ValueError("Sensitive rejection cases cannot require saved candidates")
+        if self.annotation_status == "adjudicated_gold":
+            if len(set(self.annotators)) < 2 or not self.adjudicated_by:
+                raise ValueError("Gold cases require two annotators and an adjudicator")
+        return self
+
+
+class ObservedMemoryCandidate(BaseModel):
+    memory_id: str | None = None
+    memory_type: str = Field(min_length=1, max_length=80)
+    memory_key: str | None = None
+    source_quote: str = ""
+    supported: bool = True
+    sensitive: bool = False
+
+
+class MemoryTaskObservation(BaseModel):
+    case_id: str
+    extracted_candidates: list[ObservedMemoryCandidate] = Field(default_factory=list)
+    retrieved_memory_ids: list[str] = Field(default_factory=list)
+    stale_memory_ids: list[str] = Field(default_factory=list)
+    wrong_user_memory_ids: list[str] = Field(default_factory=list)
+    irrelevant_memory_ids: list[str] = Field(default_factory=list)
+    sensitive_memory_saved: bool = False
+    task_completed: bool = False
+    token_usage: int = Field(default=0, ge=0)
+    error: str | None = None
+
+
 class EvaluationRunManifest(BaseModel):
     run_id: str
     suite: str
@@ -160,7 +218,12 @@ class EvaluationRunManifest(BaseModel):
 
 
 def assert_gold_ready(
-    cases: list[ToolEvaluationCase | RAGEvaluationCase | AnswerEvaluationCase],
+    cases: list[
+        ToolEvaluationCase
+        | RAGEvaluationCase
+        | AnswerEvaluationCase
+        | MemoryEvaluationCase
+    ],
 ) -> None:
     """Refuse to let silver/seed cases masquerade as a human gold result."""
 

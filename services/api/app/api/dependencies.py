@@ -19,6 +19,7 @@ from app.services.llm_settings import LLMSettingsService
 from app.services.market_insights import MarketInsightService
 from app.services.matching import MatchingService
 from app.services.mcp_connections import MCPConnectionService
+from app.services.memory_embeddings import MemoryEmbeddingService
 from app.services.quick_matching import QuickMatchingService
 from app.services.ranking import RankingService
 from app.services.ranking_runs import RankingRunService
@@ -61,6 +62,13 @@ async def get_optional_embedding_provider(
         return await LLMSettingsService(session).get_runtime_embedding_provider()
     except Exception:
         return None
+
+
+def get_memory_embedding_service(
+    session: AsyncSession = Depends(get_db),
+    embedding_provider: LLMProvider | None = Depends(get_optional_embedding_provider),
+) -> MemoryEmbeddingService:
+    return MemoryEmbeddingService(session, embedding_provider=embedding_provider)
 
 
 def get_llm_settings_service(
@@ -127,9 +135,14 @@ def get_career_advisor_service(
 
 def get_career_memory_service(
     session: AsyncSession = Depends(get_db),
+    provider: LLMProvider = Depends(get_llm_provider),
     embedding_provider: LLMProvider | None = Depends(get_optional_embedding_provider),
 ) -> CareerMemoryService:
-    return CareerMemoryService(session, embedding_provider=embedding_provider)
+    return CareerMemoryService(
+        session,
+        embedding_provider=embedding_provider,
+        llm_provider=provider,
+    )
 
 
 def get_mcp_connection_service(

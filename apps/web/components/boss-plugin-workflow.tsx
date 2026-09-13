@@ -72,20 +72,46 @@ const MAX_VISIBLE_BOSS_JOBS = 200;
 const COLLECTION_INACTIVITY_TIMEOUT_MS = 90_000;
 const DEFAULT_QUICK_SCORE_THRESHOLD = 50;
 
-export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => Promise<void> }) {
+type BossPluginWorkflowProps = {
+  onTasksCreated?: () => Promise<unknown> | void;
+  onJobsPersisted?: (jobIds: string[]) => Promise<unknown> | void;
+  onCollectionCompleted?: (jobIds: string[], collectionKey?: string) => Promise<unknown> | void;
+  initialRequirements?: string;
+  initialCity?: string;
+  initialMaxJobs?: number;
+  initialQuickScoreThreshold?: number;
+  initialResumeId?: string;
+  autoStart?: boolean;
+  autoStartKey?: string;
+  compact?: boolean;
+};
+
+export function BossPluginWorkflow({
+  onTasksCreated,
+  onJobsPersisted,
+  onCollectionCompleted,
+  initialRequirements = "AI Agent RAG 实习",
+  initialCity = "北京",
+  initialMaxJobs = 10,
+  initialQuickScoreThreshold = DEFAULT_QUICK_SCORE_THRESHOLD,
+  initialResumeId = "",
+  autoStart = false,
+  autoStartKey = "",
+  compact = false,
+}: BossPluginWorkflowProps) {
   const [extensionStatus, setExtensionStatus] = useState<ExtensionStatus>("checking");
   const [extensionVersion, setExtensionVersion] = useState("");
   const [stage, setStage] = useState<WorkflowStage>("idle");
-  const [requirements, setRequirements] = useState("AI Agent RAG 实习");
-  const [city, setCity] = useState("北京");
-  const [maxJobs, setMaxJobs] = useState(10);
-  const [quickScoreThreshold, setQuickScoreThreshold] = useState(DEFAULT_QUICK_SCORE_THRESHOLD);
+  const [requirements, setRequirements] = useState(initialRequirements);
+  const [city, setCity] = useState(initialCity);
+  const [maxJobs, setMaxJobs] = useState(Math.min(200, Math.max(1, initialMaxJobs)));
+  const [quickScoreThreshold, setQuickScoreThreshold] = useState(Math.min(100, Math.max(0, initialQuickScoreThreshold)));
   const [jobs, setJobs] = useState<Job[]>([]);
   const [quickScores, setQuickScores] = useState<Record<string, QuickJobScore>>({});
   const [quickScoringJobIds, setQuickScoringJobIds] = useState<string[]>([]);
   const [selectedJobIds, setSelectedJobIds] = useState<string[]>([]);
   const [resumes, setResumes] = useState<Resume[]>([]);
-  const [resumeId, setResumeId] = useState("");
+  const [resumeId, setResumeId] = useState(initialResumeId);
   const [createdPlan, setCreatedPlan] = useState<{ id: string; signature: string } | null>(null);
   const selectionSignature = JSON.stringify([resumeId, [...selectedJobIds].sort(), requirements.trim(), city.trim()]);
   const existingPlan = createdPlan?.signature === selectionSignature ? createdPlan : null;
@@ -94,7 +120,7 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
   const activeSearchRequest = useRef<string | null>(null);
   const maxJobsRef = useRef(maxJobs);
   maxJobsRef.current = maxJobs;
-  const searchInputsEdited = useRef(false);
+  const searchInputsEdited = useRef(compact);
   const searchTimeout = useRef<number | null>(null);
   const stopTimeout = useRef<number | null>(null);
   const importQueue = useRef<Promise<void>>(Promise.resolve());
@@ -110,6 +136,9 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
   const [backgroundSearchTask, setBackgroundSearchTask] = useState<BossBackgroundSearchTask | null>(null);
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
   const [stoppingCollection, setStoppingCollection] = useState(false);
+  const autoStarted = useRef(false);
+  const persistedJobIds = useRef(new Set<string>());
+  const completionNotified = useRef(new Set<string>());
 
   const resetCollectionTimeout = useCallback((requestId: string) => {
     if (searchTimeout.current) window.clearTimeout(searchTimeout.current);
@@ -161,6 +190,7 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
   const applyBackgroundTask = useCallback((task: BossBackgroundSearchTask) => {
     const restoredThreshold = Math.min(100, Math.max(0, task.quick_score_threshold ?? DEFAULT_QUICK_SCORE_THRESHOLD));
     setBackgroundSearchTask(task);
+    task.persisted_jobs.forEach((job) => persistedJobIds.current.add(job.id));
     const restoredJobs: Job[] = task.persisted_jobs.map((job) => ({
       id: job.id,
       platform: "boss",
@@ -192,6 +222,11 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
     setMaxJobs(task.target_count);
     setQuickScoreThreshold(restoredThreshold);
     setJobs(restoredJobs);
+    if (restoredJobs.length > 0) {
+      void Promise.resolve(onJobsPersisted?.(restoredJobs.map((job) => job.id))).catch(
+        () => undefined,
+      );
+    }
     setSelectedJobIds((current) => current.filter((id) => restoredJobs.some((job) => job.id === id)));
     void scoreNewJobs(restoredJobs.map((job) => job.id), restoredThreshold);
     setCollectionProgress({
@@ -211,7 +246,7 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
       resetCollectionTimeout(task.request_id);
       setStage("importing");
       setError(task.error ?? null);
-      setNotice(`后台采集中：已读取 ${task.collected_count}/${task.target_count}，已持久化 ${task.persisted_count} 条。你可以离开此页面，扩展会继续运行。`);
+      setNotice(`正在可见页面采集：已读取 ${task.collected_count}/${task.target_count}，已持久化 ${task.persisted_count} 条。请保持 BOSS 标签页可见。`);
       return;
     }
     activeSearchRequest.current = null;
@@ -219,7 +254,7 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
     if (task.status === "COMPLETED") {
       setStage("ready");
       setError(null);
-      setNotice(`后台采集完成：读取 ${task.collected_count} 条、持久化 ${task.persisted_count} 条，其中 ${task.detailed_count} 条包含完整 JD。`);
+      setNotice(`采集完成：读取 ${task.collected_count} 条、持久化 ${task.persisted_count} 条，其中 ${task.detailed_count} 条包含完整 JD。`);
     } else if (task.status === "WAITING_FOR_USER") {
       setStage("idle");
       setError(task.error || `BOSS 页面状态为 ${task.page_state}，请完成页面验证后继续采集。`);
@@ -230,9 +265,28 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
       setNotice(`职位采集已停止：已读取 ${task.collected_count}/${task.target_count}，已持久化 ${task.persisted_count} 条。已入库岗位和快速评分结果均已保留，你可以直接筛选或重新检索。`);
     } else {
       setStage("idle");
-      setError(task.error || `后台采集停止，页面状态为 ${task.page_state}。`);
+      setError(task.error || `采集停止，页面状态为 ${task.page_state}。`);
     }
-  }, [resetCollectionTimeout, scoreNewJobs]);
+  }, [onJobsPersisted, resetCollectionTimeout, scoreNewJobs]);
+
+  useEffect(() => {
+    const task = backgroundSearchTask;
+    if (
+      !onCollectionCompleted
+      || !task
+      || task.status !== "COMPLETED"
+      || completionNotified.current.has(task.request_id)
+    ) return;
+    const jobIds = [...new Set([
+      ...persistedJobIds.current,
+      ...task.persisted_jobs.map((job) => job.id),
+    ])].filter(Boolean);
+    if (jobIds.length === 0) return;
+    completionNotified.current.add(task.request_id);
+    Promise.resolve(onCollectionCompleted(jobIds, task.request_id)).catch((reason) => {
+      setError(reason instanceof Error ? reason.message : "采集完成，自动续答启动失败，请重新发送问题。");
+    });
+  }, [backgroundSearchTask, onCollectionCompleted]);
 
   const importCaptureBatch = useCallback(async (
     pageUrl: string,
@@ -246,12 +300,14 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
     stats.created += imported.created;
     stats.updated += imported.updated;
     stats.detailed += imported.items.filter((job) => job.raw_data.description_source === "detail_panel").length;
+    imported.items.forEach((job) => persistedJobIds.current.add(job.id));
     batch.forEach((job) => stats.importedExternalIds.add(job.external_job_id));
     setJobs((current) => {
       const merged = new Map(current.map((job) => [job.id, job]));
       imported.items.forEach((job) => merged.set(job.id, job));
       return [...merged.values()];
     });
+    await onJobsPersisted?.(imported.items.map((job) => job.id));
     const quickResults = await scoreNewJobs(imported.items.map((job) => job.id));
     const lowScoreCount = quickResults?.filter((item) => item.score_status !== "INSUFFICIENT_DATA" && item.score < quickScoreThreshold).length ?? 0;
     setCollectionProgress({
@@ -265,7 +321,7 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
         ? `其中 ${lowScoreCount} 个岗位与当前简历符合度低于 ${quickScoreThreshold} 分，已置后且默认未勾选，请手动确认。`
         : "新岗位已完成快速评分并更新选择状态。"),
     );
-  }, [quickScoreThreshold, scoreNewJobs]);
+  }, [onJobsPersisted, quickScoreThreshold, scoreNewJobs]);
 
   const queueCaptureBatch = useCallback((
     pageUrl: string,
@@ -319,16 +375,22 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
       });
       setNotice(`采集并持久化完成：新增 ${stats.created} 条，更新完整 JD ${stats.updated} 条；本次 ${stats.detailed}/${stats.importedExternalIds.size} 条已获取完整 JD。`);
       setStage("ready");
+      const persistedIds = [...persistedJobIds.current];
+      if (persistedIds.length > 0) {
+        await onCollectionCompleted?.(persistedIds);
+      }
     } catch (reason) {
       setStage("idle");
       setError(reason instanceof Error ? reason.message : "BOSS 职位导入失败。");
     }
-  }, [queueCaptureBatch]);
+  }, [onCollectionCompleted, queueCaptureBatch]);
 
   useEffect(() => {
     getResumes().then((response) => {
       setResumes(response.items);
-      setResumeId(response.items.find((resume) => resume.is_default)?.id ?? response.items[0]?.id ?? "");
+      setResumeId((current) => response.items.some((resume) => resume.id === current)
+        ? current
+        : response.items.find((resume) => resume.is_default)?.id ?? response.items[0]?.id ?? "");
     }).catch(() => setError("无法读取简历，请确认 API 服务已启动。"));
   }, []);
 
@@ -424,6 +486,8 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
     activeSearchRequest.current = requestId;
     setStage("searching");
     setJobs([]);
+    persistedJobIds.current.clear();
+    completionNotified.current.clear();
     setQuickScores({});
     setQuickScoringJobIds([]);
     setSelectedJobIds([]);
@@ -459,7 +523,7 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
       scheduledExternalIds: new Set<string>(),
     };
     setCollectionProgress({ collected: 0, target: requestedMaxJobs, persisted: 0 });
-    setNotice("后台采集任务已启动。你可以切换到其他 CareerPilot 页面；扩展会持续采集并直接入库，返回此页即可恢复进度。如需登录或验证，请手动切换到 BOSS 标签页处理。");
+    setNotice("已打开可见的 BOSS 采集标签页。采集期间请保持该标签页可见；如果切换到其他页面，采集会自动暂停，已入库岗位会保留。");
     window.postMessage({
       source: "careerpilot-web",
       type: "BOSS_SEARCH_REQUEST",
@@ -474,6 +538,22 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
     resetCollectionTimeout(requestId);
   }
 
+  useEffect(() => {
+    if (!autoStart || autoStarted.current || extensionStatus !== "connected" || !requirements.trim() || !resumeId) return;
+    const storageKey = `careerpilot:advisor-collection:${autoStartKey || requirements}`;
+    try {
+      if (window.localStorage.getItem(storageKey)) {
+        autoStarted.current = true;
+        return;
+      }
+      window.localStorage.setItem(storageKey, "started");
+    } catch { /* A disabled session store should not block an explicit user request. */ }
+    autoStarted.current = true;
+    startSearch();
+    // The action is immutable for one mounted chat message.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStart, autoStartKey, extensionStatus, resumeId]);
+
   function clearRetrievedJobs() {
     if (busy) return;
     searchInputsEdited.current = true;
@@ -481,6 +561,8 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
     if (searchTimeout.current) window.clearTimeout(searchTimeout.current);
     setStage("idle");
     setJobs([]);
+    persistedJobIds.current.clear();
+    completionNotified.current.clear();
     setQuickScores({});
     setQuickScoringJobIds([]);
     setSelectedJobIds([]);
@@ -547,7 +629,7 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
       setCreatedPlan({ id: campaign.id, signature: selectionSignature });
       setNotice(campaign.reused_existing ? "相同选择已有投递计划，已为你找到原计划，未重复创建或投递。" : `已将 ${selectedJobIds.length} 个岗位保存到计划。请进入计划确认岗位，再启动投递。`);
       setStage("ready");
-      try { await onTasksCreated(); } catch { /* The persisted plan remains available. */ }
+      try { await onTasksCreated?.(); } catch { /* The persisted plan remains available. */ }
     } catch (reason) {
       setStage("ready");
       setError(reason instanceof Error ? reason.message : "投递计划保存失败，请重试；勾选结果已保留。");
@@ -556,7 +638,8 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
 
   const busy = stage === "searching" || stage === "importing" || stage === "preparing";
   const canResumeCollection = backgroundSearchTask?.status === "WAITING_FOR_USER"
-    && ["RISK_CONTROL", "CAPTCHA", "LOGIN_REQUIRED"].includes(backgroundSearchTask.page_state);
+    && ["RISK_CONTROL", "CAPTCHA", "LOGIN_REQUIRED", "TAB_HIDDEN"].includes(backgroundSearchTask.page_state);
+  const collectionTabHidden = backgroundSearchTask?.page_state === "TAB_HIDDEN";
   const canStopCollection = backgroundSearchTask !== null
     && ["RUNNING", "WAITING_FOR_USER"].includes(backgroundSearchTask.status);
   const orderedJobs = [...jobs].sort((left, right) => {
@@ -571,21 +654,27 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
     if (leftLow !== rightLow) return leftLow ? 1 : -1;
     return rightScore - leftScore;
   });
+  const displayedJobs = compact
+    ? orderedJobs.filter((job) => {
+        const score = quickScores[job.id];
+        return score !== undefined && score.score_status !== "INSUFFICIENT_DATA" && score.score >= quickScoreThreshold;
+      })
+    : orderedJobs;
 
   return (
     <section className="panel overflow-hidden border-indigo-200">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="eyebrow">BOSS Extension Workflow</p>
-          <h2 className="mt-2 text-xl font-semibold">从 BOSS 采集岗位</h2>
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">扩展会在后台新建 BOSS 标签页，以较快但受控的节奏逐卡平滑滚动并采集。任务不依赖当前页面存活，你可以继续使用其他功能；每取得一个完整 JD 就由扩展后台立即持久化。登录、验证码、风控或平台限制仍会暂停等待人工处理。</p>
+          <p className="eyebrow">{compact ? "Agent Tool · 联网岗位检索" : "BOSS Extension Workflow"}</p>
+          <h2 className="mt-2 text-xl font-semibold">{compact ? `正在搜索：${requirements}` : "从 BOSS 采集岗位"}</h2>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">扩展会打开 BOSS 搜索标签页，逐卡读取并实时保存完整 JD。职位卡片加载完成后可切回本系统；浏览器节电策略可能让后台加载变慢，若任务停滞可重新打开 BOSS 标签继续。登录、验证码、风控或平台限制仍会暂停等待人工处理。</p>
         </div>
         <span className={`rounded-full px-3 py-1 text-xs font-semibold ${extensionStatus === "connected" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
           {extensionStatus === "connected" ? `插件已连接 ${extensionVersion}` : extensionStatus === "checking" ? "正在检测插件" : "未检测到插件"}
         </span>
       </div>
 
-      <div className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(180px,1fr)_140px_160px]">
+      {!compact && <div className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(180px,1fr)_140px_160px]">
         <label className="text-sm font-medium text-slate-700">岗位要求
           <input className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 font-normal outline-none focus:border-indigo-500" maxLength={200} onChange={(event) => { searchInputsEdited.current = true; setRequirements(event.target.value); }} placeholder="例如：AI Agent、RAG、Python 实习" value={requirements} />
         </label>
@@ -602,19 +691,20 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
             setSelectedJobIds((current) => current.filter((id) => quickScores[id]?.score === undefined || quickScores[id].score_status === "INSUFFICIENT_DATA" || quickScores[id].score >= next));
           }} type="number" value={quickScoreThreshold} />
         </label>
-      </div>
+      </div>}
       <div className="mt-5 flex flex-wrap items-center gap-3">
-        {canResumeCollection && <button className="rounded-xl bg-emerald-600 px-5 py-3 text-sm font-medium text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy || extensionStatus !== "connected"} onClick={resumeSearch} type="button">我已完成验证，继续采集</button>}
+        {canResumeCollection && <button className="rounded-xl bg-emerald-600 px-5 py-3 text-sm font-medium text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50" disabled={busy || extensionStatus !== "connected"} onClick={resumeSearch} type="button">{collectionTabHidden ? "保持 BOSS 可见，继续采集" : "我已完成处理，继续采集"}</button>}
         {canStopCollection && <button className="rounded-xl border border-rose-300 bg-rose-50 px-5 py-3 text-sm font-medium text-rose-700 transition hover:border-rose-400 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50" disabled={stoppingCollection || extensionStatus !== "connected"} onClick={() => setStopConfirmOpen(true)} type="button">{stoppingCollection ? "正在停止…" : "停止采集"}</button>}
         <button className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={busy || extensionStatus !== "connected" || !requirements.trim()} onClick={startSearch} type="button">
           {stage === "searching" || stage === "importing" ? "插件采集中…" : canResumeCollection ? "放弃续采并重新检索" : jobs.length > 0 ? "重新检索 BOSS" : "调动插件搜索 BOSS"}
         </button>
         {jobs.length > 0 && !busy && <button className="rounded-xl border border-slate-200 px-5 py-3 text-sm font-medium text-slate-700 transition hover:border-indigo-300 hover:text-indigo-700" onClick={clearRetrievedJobs} type="button">清空本次结果</button>}
-        <a className="text-sm font-medium text-indigo-700" href="https://www.zhipin.com/web/geek/jobs" rel="noreferrer" target="_blank">手动打开 BOSS →</a>
-        {canResumeCollection && backgroundSearchTask.page_url && <a className="text-sm font-medium text-amber-700" href={backgroundSearchTask.page_url} rel="noreferrer" target="_blank">打开待处理的 BOSS 页面 →</a>}
+        {!compact && <a className="text-sm font-medium text-indigo-700" href="https://www.zhipin.com/web/geek/jobs" rel="noreferrer" target="_blank">手动打开 BOSS →</a>}
+        {canResumeCollection && backgroundSearchTask.page_url && <a className="text-sm font-medium text-amber-700" href={backgroundSearchTask.page_url} rel="noreferrer" target="_blank">打开并保持 BOSS 页面可见 →</a>}
       </div>
 
       {extensionStatus === "missing" && <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-800">请在浏览器扩展管理页加载或重新加载 <code>apps/extension/.output/chrome-mv3</code>，然后刷新此页面。插件连接只在本机浏览器内建立。</p>}
+      {compact && resumes.length === 0 && <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-200">联网采集需要一份简历用于快速评分。请先到简历管理上传简历，再返回本消息启动采集。</p>}
       {notice && <p className="mt-4 rounded-xl bg-indigo-50 p-4 text-sm leading-6 text-indigo-700">{notice}</p>}
       {error && <p className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm leading-6 text-rose-800">{error}</p>}
       {(stage === "searching" || stage === "importing") && collectionProgress.target > 0 && <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
@@ -623,9 +713,10 @@ export function BossPluginWorkflow({ onTasksCreated }: { onTasksCreated: () => P
       </div>}
 
       {jobs.length > 0 && <div className="mt-7 space-y-4">
-        <div className="flex flex-wrap items-end justify-between gap-3"><div><p className="eyebrow">Imported Jobs</p><h3 className="mt-2 font-semibold">选择需要投递的职位</h3></div><span className="text-sm text-slate-500">已选 {selectedJobIds.length}/{jobs.length}</span></div>
+        <div className="flex flex-wrap items-end justify-between gap-3"><div><p className="eyebrow">Imported Jobs</p><h3 className="mt-2 font-semibold">{compact ? "达到阈值的高匹配岗位" : "选择需要投递的职位"}</h3></div><span className="text-sm text-slate-500">{compact ? `高分 ${displayedJobs.length} · 已采集 ${jobs.length}` : `已选 ${selectedJobIds.length}/${jobs.length}`}</span></div>
+        {compact && displayedJobs.length === 0 && <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-500 dark:bg-slate-900 dark:text-slate-400">岗位正在评分，或暂时没有达到 {quickScoreThreshold} 分的岗位。低分岗位不会在聊天推荐卡片中展示。</p>}
         <div className="divide-y divide-slate-100 rounded-2xl border border-slate-200">
-          {orderedJobs.map((job) => {
+          {displayedJobs.map((job) => {
             const checked = selectedJobIds.includes(job.id);
             const company = typeof job.raw_data.company_name === "string" ? job.raw_data.company_name : "公司待补充";
             const salary = typeof job.raw_data.salary_text === "string" ? job.raw_data.salary_text : "薪资面议";

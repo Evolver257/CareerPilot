@@ -82,6 +82,16 @@ async def import_tool_seed(
         raise _error(exc) from exc
 
 
+@router.post("/datasets/import-memory-seed", response_model=EvaluationDatasetRead)
+async def import_memory_seed(
+    service: EvaluationService = Depends(get_evaluation_service),
+) -> EvaluationDatasetRead:
+    try:
+        return _dataset_read(await service.import_memory_seed())
+    except EvaluationError as exc:
+        raise _error(exc) from exc
+
+
 @router.get("/runs", response_model=list[EvaluationRunRead])
 async def list_runs(
     service: EvaluationService = Depends(get_evaluation_service),

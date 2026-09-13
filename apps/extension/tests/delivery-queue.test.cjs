@@ -32,7 +32,7 @@ test("mixed platform queue reuses one tab, deduplicates and pauses until task co
   assert.equal((await onMessage(request, {})).success, false);
   assert.equal((await onMessage(request, {})).success, true);
   assert.equal((await onMessage(request, {})).accepted_count, 0);
-  assert.equal(creates.length, 1); assert.equal(creates[0].active, false);
+  assert.equal(creates.length, 1); assert.equal(creates[0].active, true);
   await onUpdated(9, { status: "complete" }, tab);
   await sockets[0].emit({ type: "REQUEST_USER_ACTION", task_id: "one", action: { id: "pause", action: "REQUEST_USER_ACTION" } });
   assert.equal(timers.length, 0); assert.equal(updates.length, 0);

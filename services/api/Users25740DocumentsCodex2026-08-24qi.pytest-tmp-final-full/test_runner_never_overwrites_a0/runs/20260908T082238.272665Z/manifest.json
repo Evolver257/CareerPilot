@@ -1,0 +1,23 @@
+{
+  "run_id": "20260908T082238.272665Z",
+  "suite": "agent_tool_calling",
+  "dataset_version": [
+    "v1"
+  ],
+  "dataset_sha256": "e890f6ea1b8ae83d04dffb612ad82c57afb290fdb5abfdb2b8e3dab6b07922d2",
+  "started_at": "2026-09-08T08:22:38.272665+00:00",
+  "finished_at": "2026-09-08T08:22:38.273353+00:00",
+  "git_commit": "ed3b39bf8552443d192ece1b98d2d8b235faebf9",
+  "git_dirty": true,
+  "seed": 7,
+  "configuration": {
+    "require_gold": false
+  },
+  "environment": {
+    "python": "3.13.9",
+    "platform": "Windows-11-10.0.26200-SP0"
+  },
+  "label_status": [
+    "seed_requires_dual_review"
+  ]
+}

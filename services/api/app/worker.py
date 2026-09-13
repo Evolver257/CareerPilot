@@ -20,6 +20,7 @@ from app.models.entities import (
     EvaluationRun,
     KnowledgeIndexRun,
     KnowledgeIndexRunItem,
+    MemoryEmbeddingRun,
     RankingRun,
 )
 from app.models.work import BackgroundWork
@@ -35,6 +36,7 @@ def model_for_kind(kind):
         "knowledge": KnowledgeIndexRun,
         "agent": AgentRun,
         "evaluation": EvaluationRun,
+        "memory_embedding": MemoryEmbeddingRun,
     }[kind]
 
 
@@ -58,6 +60,7 @@ async def execute_business(session, work):
     from app.services.agent_runtime import AgentRuntime
     from app.services.knowledge_indexing import KnowledgeIndexService
     from app.services.llm_settings import LLMSettingsService
+    from app.services.memory_embeddings import MemoryEmbeddingService
     from app.services.ranking_runs import RankingRunService
 
     if work.kind == "evaluation":
@@ -78,6 +81,8 @@ async def execute_business(session, work):
         return await RankingRunService(session).execute(
             work.run_id, await settings.get_runtime_provider(), embeddings
         )
+    if work.kind == "memory_embedding":
+        return await MemoryEmbeddingService(session, embeddings).execute(work.run_id, embeddings)
     await session.execute(
         update(KnowledgeIndexRunItem)
         .where(
@@ -114,7 +119,13 @@ async def run_once(engine, *, worker_id=None, handler=execute_business):
                 work = await session.get(BackgroundWork, work_id)
                 if work is None or work.status not in {"PENDING", "RUNNING"}:
                     continue
-                if work.kind not in {"ranking", "knowledge", "agent", "evaluation"}:
+                if work.kind not in {
+                    "ranking",
+                    "knowledge",
+                    "agent",
+                    "evaluation",
+                    "memory_embedding",
+                }:
                     raise ValueError("Unsupported work kind")
                 key = lock_key(work.kind, work.run_id)
                 acquired = await session.scalar(

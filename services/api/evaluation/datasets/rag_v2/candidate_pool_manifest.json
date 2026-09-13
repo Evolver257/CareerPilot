@@ -1,0 +1,21 @@
+{
+  "candidate_pool_sha256": "84f2207397adeee502d3ec1c2a79e21bf01ba1938434a926cf295fd900668a7c",
+  "channels": [
+    "postgres_bm25",
+    "qwen3_embedding_0.6b",
+    "hybrid",
+    "job_skill_fact",
+    "exact_title_role",
+    "production_baseline",
+    "candidate_new",
+    "random",
+    "human_supplement"
+  ],
+  "corpus_sha256": "eb4a1d4e4862e31efac9caed7a8ce1aae096806c67b078158f4ff406f11c3376",
+  "dataset_version": "rag-v2.0.0",
+  "generated_at": "2026-09-10T13:22:04.451547+00:00",
+  "label_scores_exposed_to_annotator": false,
+  "pool_size": 30,
+  "queries_sha256": "6518202ee232aa4812beea91c2081d79ecaf74c95172d90fe5011d12d79673b8",
+  "retrieval_adapter_mode": "deterministic_local_fallback_when_channel_results_are_not_injected"
+}
